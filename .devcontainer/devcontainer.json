@@ -1,0 +1,52 @@
+{
+  "name": "template-axum",
+  "dockerComposeFile": [
+    "compose.yml"
+  ],
+  "service": "api",
+  "workspaceFolder": "/workspace",
+  "shutdownAction": "stopCompose",
+  "features": {
+    "ghcr.io/devcontainers/features/docker-in-docker:4.1.0": {
+      "moby": false,
+      "dockerDashComposeVersion": "v2"
+    }
+  },
+  "forwardPorts": [8000, "keycloak:8080"],
+  "portsAttributes": {
+    "8000": {
+      "label": "axum (api)",
+      "onAutoForward": "openPreview"
+    },
+    "keycloak:8080": {
+      "label": "Keycloak",
+      "onAutoForward": "notify"
+    }
+  },
+  "mounts": [
+    "source=${localEnv:SSH_AUTH_SOCK},target=/ssh-agent,type=bind",
+    "source=/run/host-services/ssh-auth.sock,target=/ssh-agent-macos,type=bind"
+  ],
+  "remoteEnv": {
+    "SSH_AUTH_SOCK": "/home/vscode/.ssh-agent-resolved.sock"
+  },
+  "postCreateCommand": "git config --global --add safe.directory /workspace && prek install && cargo build",
+  "postStartCommand": "sh /workspace/.devcontainer/resolve-ssh-agent.sh",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "rust-lang.rust-analyzer",
+        "tamasfe.even-better-toml",
+        "ms-azuretools.vscode-docker",
+        "ms-ossdata.vscode-pgsql",
+        "lvdn.s3x-explorer",
+        "Anthropic.claude-code",
+        "GitHub.vscode-github-actions"
+      ],
+      "settings": {
+        "workbench.browser.enableRemoteProxy": true
+      }
+    }
+  },
+  "remoteUser": "vscode"
+}

@@ -1,0 +1,73 @@
+include:
+  - ./stack/postgres/compose.yml
+  - ./stack/s3/compose.yml
+  - ./stack/keycloak/compose.yml
+  - ./stack/redis/compose.yml
+  - ./stack/mqtt/compose.yml
+  - ./stack/selenium/compose.yml
+
+# App service: the axum application itself, built from the top-level
+# Dockerfile's `develop` stage. The workspace is bind-mounted so source
+# edits are picked up without a rebuild. env_file below pulls in each
+# stack service's own credentials (see stack/README.md's "Configuration"
+# section); phase 2's own config module assembles a DATABASE_URL and the
+# S3 access/secret key fields from the raw postgres/rustfs values at
+# runtime, and OIDC_* arrive from keycloak.env already fully composed.
+services:
+  api:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      target: develop
+      # No RUST_VERSION/DEBIAN_VERSION here: the Dockerfile's own ARG
+      # defaults are the single source for those — see the root
+      # README.md's "Versions and config" section.
+    volumes:
+      - ..:/workspace:cached
+      # No volume for target/ (see CARGO_TARGET_DIR in the Dockerfile): a
+      # mounted target dir gets swept by Windows DLP/malware-scanning tools
+      # just like a bind-mounted one, so it lives purely in the container's
+      # writable layer and is rebuilt by `postCreateCommand` when needed.
+      - claude-config:/home/vscode/.claude
+    command: sleep infinity
+    env_file:
+      - ./stack/postgres/postgres.env
+      - ./stack/s3/s3.env
+      - ./stack/keycloak/keycloak.env
+    # Waits for every stack service's own healthcheck (see each fragment's
+    # compose.yml) so `docker compose up` -- and therefore devcontainers/ci's
+    # runCmd, and postCreateCommand -- never starts api, prek, or cargo
+    # test before the service they'd talk to is actually ready.
+    depends_on:
+      postgres:
+        condition: service_healthy
+      s3:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mqtt:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+      selenium:
+        condition: service_healthy
+    environment:
+      # Fixed in-network hostnames/ports, not credentials, so they're
+      # literal here rather than pulled from a stack env file.
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      S3_ENDPOINT_URL: http://s3:9000
+      REDIS_URL: redis://redis:6379/0
+      MQTT_HOST: mqtt
+      MQTT_PORT: "1883"
+    # No ports: mapping and no networks: block — see the root README's
+    # "Don't". Host access to :8000 comes from devcontainer.json's
+    # forwardPorts, and api reaches every stack service by name on
+    # the default network compose generates for this project.
+
+volumes:
+  # Persists Claude Code CLI session/credential state across container
+  # rebuilds. A small amount of session-state data, not thousands of
+  # dependency files, so the DLP/malware-scanning concern above doesn't
+  # apply the same way here.
+  claude-config:

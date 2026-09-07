@@ -1,0 +1,9 @@
+# Build context excludes for `docker build` (see top-level Dockerfile).
+.git
+.github
+.devcontainer
+.secrets
+docs
+README.md
+CLAUDE.md
+target

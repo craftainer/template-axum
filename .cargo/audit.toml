@@ -1,0 +1,15 @@
+# cargo-audit config -- see .pre-commit-config.yaml's cargo-audit hook and
+# docs/TEMPLATE.md's "Checks" section for what a narrow, justified exception
+# to a failing check looks like.
+[advisories]
+ignore = [
+    # rsa (pulled transitively by openidconnect, for RS256-signed OIDC ID
+    # tokens -- see phase 2's Keycloak integration): a timing side-channel
+    # in RSA decryption with no fixed release available upstream as of this
+    # writing. openidconnect only ever uses this crate for signature
+    # verification (public-key operation, no secret-dependent timing to
+    # leak), not decryption, so the advisory's actual attack doesn't apply
+    # to how this dependency is used here. Revisit when either rsa ships a
+    # fix or openidconnect drops the dependency.
+    "RUSTSEC-2023-0071",
+]

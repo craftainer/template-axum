@@ -1,0 +1,18 @@
+# Stack service: a browser (Selenium Grid's standalone Chromium image) for
+# the e2e suite phase 3 adds -- see ./README.md for the intended pattern
+# (a WebDriver session against this container, used only to obtain its
+# `se:cdp` Chrome DevTools Protocol URL for Playwright to drive remotely).
+services:
+  selenium:
+    image: selenium/standalone-chromium:151.0.7922.108-chromedriver-151.0.7922.108-grid-4.47.0-20260808
+    restart: unless-stopped
+    shm_size: 2gb
+    # The grid reports itself up before its one node finishes registering;
+    # "ready":true (note the space -- pretty-printed JSON) is the signal
+    # the e2e suite's own browser fixture actually needs: a node to hand
+    # out sessions from.
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:4444/status | grep -q '\"ready\": true'"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
