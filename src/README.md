@@ -15,10 +15,10 @@ each with its own `README.md`:
   Keycloak client-role RBAC.
 - `migration/` — SeaORM migrations, applied automatically at startup.
 
-`config.rs`/`main.rs`/`telemetry.rs`/`problem_details.rs` stay flat,
-outside any submodule — each has no resource-specific code and no state
-of its own beyond what it's explicitly passed or reads from
-`config::Settings`.
+`config.rs`/`main.rs`/`telemetry.rs`/`problem_details.rs`/
+`rate_limit.rs` stay flat, outside any submodule — each has no
+resource-specific code and no state of its own beyond what it's
+explicitly passed or reads from `config::Settings`.
 
 - `config.rs` — settings, read from environment variables only; see
   "Configuration" and "MODE" below.
@@ -28,6 +28,10 @@ of its own beyond what it's explicitly passed or reads from
   logging" below.
 - `problem_details.rs` — the single `AppError` type and its RFC 9457
   `IntoResponse` impl; see "RFC 9457 error responses" below.
+- `rate_limit.rs` — `RateLimiter`, the Redis-backed (in-memory under
+  `Mode::Mock`) per-caller rate limiter checked inline by Hero's
+  create/update/delete handlers and `POST /mock/token`; see
+  `docs/adrs/0011`.
 
 ## Layering
 

@@ -4,7 +4,9 @@
 //! Owner-scoped per ADR 0011 (reads open, writes/deletes restricted to the
 //! caller's own `sub`); soft-deleted per ADR 0012.
 
-use axum::extract::{Query, State};
+use std::net::SocketAddr;
+
+use axum::extract::{ConnectInfo, Query, State};
 use axum::http::StatusCode;
 use axum::routing::get;
 use axum::{Json, Router};
@@ -14,6 +16,13 @@ use crate::crud::DEFAULT_LIMIT;
 use crate::oidc::AuthClaims;
 use crate::problem_details::AppError;
 use crate::views::hero::{HeroCreate, HeroListQuery, HeroRead, HeroUpdate};
+
+/// Rate-limit scope key (`src/rate_limit.rs`) shared by create/update/
+/// delete -- a single record edit shares the same per-caller budget as
+/// every other mutating call, matching `rate_limit.py`'s own reasoning
+/// (see that module's doc comment) for applying the limit to a route's
+/// handler as a whole rather than exempting any one verb.
+const HERO_WRITE_RATE_SCOPE: &str = "hero-write";
 
 /// `GET ?id=` (single) or `GET ` (list, `?skip=`/`?limit=`/
 /// `?include_archived=`) -- record addressing is a query parameter, never
@@ -48,9 +57,19 @@ async fn list_or_get(
 /// client input (ADR 0011).
 async fn create(
     State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     AuthClaims(claims): AuthClaims,
     Json(payload): Json<HeroCreate>,
 ) -> Result<(StatusCode, Json<HeroRead>), AppError> {
+    state
+        .rate_limiter
+        .check(
+            HERO_WRITE_RATE_SCOPE,
+            addr.ip(),
+            state.settings.rate_limit_hero_write_per_minute,
+            60,
+        )
+        .await?;
     claims.require_any_role(&state.settings.oidc_client_id, HERO_WRITE_ROLES)?;
     payload.validate().map_err(AppError::UnprocessableEntity)?;
     let owner_id = claims.subject()?.to_string();
@@ -62,10 +81,20 @@ async fn create(
 /// (FR-0004). Owner-scoped: a caller can only update their own hero.
 async fn update(
     State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     AuthClaims(claims): AuthClaims,
     Query(query): Query<HeroListQuery>,
     Json(payload): Json<HeroUpdate>,
 ) -> Result<Json<HeroRead>, AppError> {
+    state
+        .rate_limiter
+        .check(
+            HERO_WRITE_RATE_SCOPE,
+            addr.ip(),
+            state.settings.rate_limit_hero_write_per_minute,
+            60,
+        )
+        .await?;
     claims.require_any_role(&state.settings.oidc_client_id, HERO_WRITE_ROLES)?;
     payload.validate().map_err(AppError::UnprocessableEntity)?;
     let id = query.id.ok_or_else(|| {
@@ -84,9 +113,19 @@ async fn update(
 /// scoped, restricted to the `maintainer` role (FR-0015).
 async fn delete_hero(
     State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     AuthClaims(claims): AuthClaims,
     Query(query): Query<HeroListQuery>,
 ) -> Result<StatusCode, AppError> {
+    state
+        .rate_limiter
+        .check(
+            HERO_WRITE_RATE_SCOPE,
+            addr.ip(),
+            state.settings.rate_limit_hero_write_per_minute,
+            60,
+        )
+        .await?;
     claims.require_any_role(&state.settings.oidc_client_id, HERO_DELETE_ROLES)?;
     let id = query.id.ok_or_else(|| {
         AppError::UnprocessableEntity(vec![crate::views::FieldError::new(
@@ -140,6 +179,8 @@ mod tests {
             s3_access_key: "rustfsadmin".to_string(),
             s3_secret_key: "rustfsadmin".to_string(),
             redis_url: "redis://localhost:6379/0".to_string(),
+            rate_limit_mock_token_per_minute: 10,
+            rate_limit_hero_write_per_minute: 20,
             oidc_issuer_url: "http://localhost:8080/realms/template-fastapi".to_string(),
             oidc_authorization_url: "http://localhost:8080/auth".to_string(),
             oidc_token_url: "http://localhost:8080/token".to_string(),
@@ -157,6 +198,7 @@ mod tests {
             hero_crud: Arc::new(crate::crud::CrudService::new(DynHeroRepository(Box::new(
                 HeroMemoryRepository::new(),
             )))),
+            rate_limiter: Arc::new(crate::rate_limit::RateLimiter::mock()),
         };
         router().with_state(state)
     }
@@ -185,13 +227,25 @@ mod tests {
         } else {
             Body::from(body.to_string())
         };
-        Request::builder()
+        let mut request = Request::builder()
             .method(method)
             .uri(uri)
             .header("Authorization", format!("Bearer {}", token(sub, roles)))
             .header("Content-Type", "application/json")
             .body(body)
-            .unwrap()
+            .unwrap();
+        // create/update/delete_hero extract ConnectInfo<SocketAddr> for
+        // rate limiting -- `oneshot` bypasses the real
+        // `into_make_service_with_connect_info` main.rs wires up, so tests
+        // insert the same extension by hand (harmless for routes that
+        // don't extract it, e.g. the GET list/get handler).
+        request
+            .extensions_mut()
+            .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+                [127, 0, 0, 1],
+                12345,
+            ))));
+        request
     }
 
     async fn json_body(response: axum::response::Response) -> serde_json::Value {
@@ -382,6 +436,53 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    // -- Redis-backed rate limiting (Tier B item 1, docs/adrs/0011). --
+
+    #[tokio::test]
+    async fn hero_write_routes_return_429_once_the_per_caller_limit_is_exceeded() {
+        let settings = Arc::new(Settings {
+            rate_limit_hero_write_per_minute: 2,
+            ..mock_settings()
+        });
+        let state = AppState {
+            oidc: Arc::new(OidcVerifier::new(settings.clone())),
+            settings,
+            health_registry: Arc::new(HealthRegistry::new()),
+            hero_crud: Arc::new(crate::crud::CrudService::new(DynHeroRepository(Box::new(
+                HeroMemoryRepository::new(),
+            )))),
+            rate_limiter: Arc::new(crate::rate_limit::RateLimiter::mock()),
+        };
+        let shared_app = router().with_state(state);
+
+        for _ in 0..2 {
+            let response = shared_app
+                .clone()
+                .oneshot(authed(
+                    "POST",
+                    "/",
+                    "alice",
+                    &["editor"],
+                    serde_json::from_str(VALID_HERO).unwrap(),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::CREATED);
+        }
+
+        let response = shared_app
+            .oneshot(authed(
+                "POST",
+                "/",
+                "alice",
+                &["editor"],
+                serde_json::from_str(VALID_HERO).unwrap(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
     }
 
     #[tokio::test]

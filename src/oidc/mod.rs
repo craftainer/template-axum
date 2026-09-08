@@ -246,6 +246,8 @@ mod tests {
             s3_access_key: "rustfsadmin".to_string(),
             s3_secret_key: "rustfsadmin".to_string(),
             redis_url: "redis://localhost:6379/0".to_string(),
+            rate_limit_mock_token_per_minute: 10,
+            rate_limit_hero_write_per_minute: 20,
             oidc_issuer_url: "http://localhost:8080/realms/template-fastapi".to_string(),
             oidc_authorization_url: "http://localhost:8080/auth".to_string(),
             oidc_token_url: "http://localhost:8080/token".to_string(),

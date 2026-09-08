@@ -2,7 +2,9 @@
 //! Keycloak-shaped JWT so RBAC is exercisable with zero real OIDC
 //! provider; port of `controllers/mock.py`.
 
-use axum::extract::State;
+use std::net::SocketAddr;
+
+use axum::extract::{ConnectInfo, State};
 use axum::routing::post;
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
@@ -10,6 +12,9 @@ use serde::{Deserialize, Serialize};
 use crate::controllers::AppState;
 use crate::oidc::MOCK_SIGNING_KEY;
 use crate::problem_details::AppError;
+
+/// Rate-limit scope key (`src/rate_limit.rs`) for this route.
+const MOCK_TOKEN_RATE_SCOPE: &str = "mock-token";
 
 #[derive(Deserialize)]
 struct MockTokenRequest {
@@ -25,8 +30,18 @@ struct MockTokenResponse {
 
 async fn mint_token(
     State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Json(payload): Json<MockTokenRequest>,
 ) -> Result<Json<MockTokenResponse>, AppError> {
+    state
+        .rate_limiter
+        .check(
+            MOCK_TOKEN_RATE_SCOPE,
+            addr.ip(),
+            state.settings.rate_limit_mock_token_per_minute,
+            60,
+        )
+        .await?;
     let mut resource_access = serde_json::Map::new();
     resource_access.insert(
         state.settings.oidc_client_id.clone(),
@@ -79,6 +94,8 @@ mod tests {
             s3_access_key: "rustfsadmin".to_string(),
             s3_secret_key: "rustfsadmin".to_string(),
             redis_url: "redis://localhost:6379/0".to_string(),
+            rate_limit_mock_token_per_minute: 10,
+            rate_limit_hero_write_per_minute: 20,
             oidc_issuer_url: "http://localhost:8080".to_string(),
             oidc_authorization_url: "http://localhost:8080/auth".to_string(),
             oidc_token_url: "http://localhost:8080/token".to_string(),
@@ -92,14 +109,25 @@ mod tests {
             hero_crud: std::sync::Arc::new(crate::crud::CrudService::new(DynHeroRepository(
                 Box::new(HeroMemoryRepository::new()),
             ))),
+            rate_limiter: std::sync::Arc::new(crate::rate_limit::RateLimiter::mock()),
         };
         router().with_state(state)
+    }
+
+    /// `mint_token` extracts `ConnectInfo<SocketAddr>` for rate limiting --
+    /// `oneshot` bypasses the real `into_make_service_with_connect_info`
+    /// main.rs wires up, so tests insert the same extension by hand.
+    fn with_connect_info(mut request: Request<Body>) -> Request<Body> {
+        request
+            .extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 12345))));
+        request
     }
 
     #[tokio::test]
     async fn mint_token_produces_a_token_whose_claims_round_trip_through_the_verifier() {
         let response = app()
-            .oneshot(
+            .oneshot(with_connect_info(
                 Request::builder()
                     .method("POST")
                     .uri("/token")
@@ -109,7 +137,7 @@ mod tests {
                             .to_string(),
                     ))
                     .unwrap(),
-            )
+            ))
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
@@ -133,7 +161,38 @@ mod tests {
     #[tokio::test]
     async fn mint_token_defaults_to_an_empty_role_list() {
         let response = app()
-            .oneshot(
+            .oneshot(with_connect_info(
+                Request::builder()
+                    .method("POST")
+                    .uri("/token")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(serde_json::json!({"sub": "bob"}).to_string()))
+                    .unwrap(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn mint_token_returns_429_once_the_per_caller_limit_is_exceeded() {
+        let settings = std::sync::Arc::new(Settings {
+            rate_limit_mock_token_per_minute: 1,
+            ..mock_defaults()
+        });
+        let state = AppState {
+            oidc: std::sync::Arc::new(OidcVerifier::new(settings.clone())),
+            settings,
+            health_registry: std::sync::Arc::new(HealthRegistry::new()),
+            hero_crud: std::sync::Arc::new(crate::crud::CrudService::new(DynHeroRepository(
+                Box::new(HeroMemoryRepository::new()),
+            ))),
+            rate_limiter: std::sync::Arc::new(crate::rate_limit::RateLimiter::mock()),
+        };
+        let shared_app = router().with_state(state);
+
+        let request = || {
+            with_connect_info(
                 Request::builder()
                     .method("POST")
                     .uri("/token")
@@ -141,9 +200,12 @@ mod tests {
                     .body(Body::from(serde_json::json!({"sub": "bob"}).to_string()))
                     .unwrap(),
             )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
+        };
+
+        let first = shared_app.clone().oneshot(request()).await.unwrap();
+        assert_eq!(first.status(), StatusCode::OK);
+        let second = shared_app.oneshot(request()).await.unwrap();
+        assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
     }
 
     fn mock_defaults() -> Settings {
@@ -160,6 +222,8 @@ mod tests {
             s3_access_key: "rustfsadmin".to_string(),
             s3_secret_key: "rustfsadmin".to_string(),
             redis_url: "redis://localhost:6379/0".to_string(),
+            rate_limit_mock_token_per_minute: 10,
+            rate_limit_hero_write_per_minute: 20,
             oidc_issuer_url: "http://localhost:8080".to_string(),
             oidc_authorization_url: "http://localhost:8080/auth".to_string(),
             oidc_token_url: "http://localhost:8080/token".to_string(),

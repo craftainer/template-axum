@@ -95,6 +95,8 @@ mod tests {
             s3_access_key: "rustfsadmin".to_string(),
             s3_secret_key: "rustfsadmin".to_string(),
             redis_url: "redis://localhost:6379/0".to_string(),
+            rate_limit_mock_token_per_minute: 10,
+            rate_limit_hero_write_per_minute: 20,
             oidc_issuer_url: "http://localhost:8080".to_string(),
             oidc_authorization_url: "http://localhost:8080/auth".to_string(),
             oidc_token_url: "http://localhost:8080/token".to_string(),
@@ -108,6 +110,7 @@ mod tests {
             hero_crud: Arc::new(crate::crud::CrudService::new(DynHeroRepository(Box::new(
                 HeroMemoryRepository::new(),
             )))),
+            rate_limiter: Arc::new(crate::rate_limit::RateLimiter::mock()),
         }
     }
 

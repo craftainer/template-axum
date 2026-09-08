@@ -10,10 +10,12 @@ mod migration;
 mod models;
 mod oidc;
 mod problem_details;
+mod rate_limit;
 mod repositories;
 mod telemetry;
 mod views;
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::Router;
@@ -28,6 +30,7 @@ use health::checks::{
 };
 use health::HealthRegistry;
 use oidc::OidcVerifier;
+use rate_limit::RateLimiter;
 use repositories::hero_memory::HeroMemoryRepository;
 use repositories::hero_sea_orm::HeroSeaOrmRepository;
 
@@ -111,11 +114,20 @@ async fn main() {
 
     let health_registry = build_health_registry(&settings, db_for_health).await;
 
+    let rate_limiter = if settings.mode == Mode::Mock {
+        RateLimiter::mock()
+    } else {
+        RateLimiter::connect(&settings.redis_url)
+            .await
+            .expect("failed to connect to Redis for rate limiting")
+    };
+
     let state = AppState {
         settings: settings.clone(),
         oidc: Arc::new(OidcVerifier::new(settings.clone())),
         health_registry: Arc::new(health_registry),
         hero_crud: Arc::new(CrudService::new(hero_repository)),
+        rate_limiter: Arc::new(rate_limiter),
     };
 
     let mut app = Router::new()
@@ -133,5 +145,14 @@ async fn main() {
         .expect("failed to bind 0.0.0.0:8000");
     tracing::info!("listening on {}", listener.local_addr().unwrap());
 
-    axum::serve(listener, app).await.expect("server error");
+    // `into_make_service_with_connect_info` (rather than plain `app.
+    // into_make_service()`) makes the caller's socket address available to
+    // handlers via the `ConnectInfo<SocketAddr>` extractor -- src/
+    // rate_limit.rs's per-IP check needs it.
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await
+    .expect("server error");
 }

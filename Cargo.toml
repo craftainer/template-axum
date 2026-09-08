@@ -38,8 +38,12 @@ tracing-subscriber = { version = "=0.3.20", features = ["json", "env-filter"] }
 sea-orm = { version = "=1.1.16", features = ["sqlx-postgres", "runtime-tokio-rustls", "macros", "postgres-array"] }
 sea-orm-migration = { version = "=1.1.16", features = ["runtime-tokio-rustls", "sqlx-postgres"] }
 
-# Cache client -- phase 2's Redis/Valkey-backed caching.
-redis = { version = "=0.32.7", features = ["tokio-comp"] }
+# Cache client -- phase 2's Redis/Valkey-backed caching, and Tier B's
+# Redis-backed rate limiting (src/rate_limit.rs): "connection-manager" for a
+# long-lived, auto-reconnecting async connection reused across requests
+# (rather than opening one per check), "script" for the atomic Lua
+# INCR+PEXPIRE the limiter runs.
+redis = { version = "=0.32.7", features = ["tokio-comp", "connection-manager", "script"] }
 
 # Object storage client -- phase 2's S3/RustFS-backed file storage.
 # default-features off, "rustls" (not in this list) dropped: aws-sdk-s3's

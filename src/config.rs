@@ -64,6 +64,17 @@ pub struct Settings {
 
     pub redis_url: String,
 
+    /// Requests per 60s window a caller may make to `POST /mock/token`
+    /// before `AppError::TooManyRequests` (`src/rate_limit.rs`) -- mirrors
+    /// `config.py`'s `rate_limit_mock_token` ("10/minute"), as a bare count
+    /// rather than a `"<count>/<period>"` expression since this app's
+    /// hand-rolled limiter has no expression parser to reuse (see
+    /// `docs/adrs/0011`).
+    pub rate_limit_mock_token_per_minute: u32,
+    /// Requests per 60s window a caller may make to a Hero
+    /// create/update/delete route before the same error.
+    pub rate_limit_hero_write_per_minute: u32,
+
     pub oidc_issuer_url: String,
     pub oidc_authorization_url: String,
     pub oidc_token_url: String,
@@ -99,6 +110,17 @@ impl Settings {
                 .unwrap_or_else(|_| "rustfsadmin".to_string()),
 
             redis_url: env_or("REDIS_URL", "redis://localhost:6379/0"),
+
+            rate_limit_mock_token_per_minute: env_or("RATE_LIMIT_MOCK_TOKEN_PER_MINUTE", "10")
+                .parse()
+                .map_err(|_| {
+                    "RATE_LIMIT_MOCK_TOKEN_PER_MINUTE must be a valid integer".to_string()
+                })?,
+            rate_limit_hero_write_per_minute: env_or("RATE_LIMIT_HERO_WRITE_PER_MINUTE", "20")
+                .parse()
+                .map_err(|_| {
+                    "RATE_LIMIT_HERO_WRITE_PER_MINUTE must be a valid integer".to_string()
+                })?,
 
             oidc_issuer_url: env_or(
                 "OIDC_ISSUER_URL",
@@ -221,6 +243,8 @@ mod tests {
             "S3_SECRET_KEY",
             "S3_ENDPOINT_URL",
             "REDIS_URL",
+            "RATE_LIMIT_MOCK_TOKEN_PER_MINUTE",
+            "RATE_LIMIT_HERO_WRITE_PER_MINUTE",
             "OIDC_ISSUER_URL",
             "OIDC_AUDIENCE",
             "DATABASE_URL",

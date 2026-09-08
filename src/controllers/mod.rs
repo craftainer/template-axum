@@ -13,6 +13,7 @@ use crate::crud::CrudService;
 use crate::health::HealthRegistry;
 use crate::models::hero;
 use crate::oidc::{HasOidcVerifier, OidcVerifier};
+use crate::rate_limit::RateLimiter;
 use crate::views::hero::{HeroCreate, HeroUpdate};
 
 crate::dyn_repository!(
@@ -38,6 +39,7 @@ pub struct AppState {
     pub oidc: Arc<OidcVerifier>,
     pub health_registry: Arc<HealthRegistry>,
     pub hero_crud: Arc<CrudService<DynHeroRepository>>,
+    pub rate_limiter: Arc<RateLimiter>,
 }
 
 impl HasOidcVerifier for AppState {
