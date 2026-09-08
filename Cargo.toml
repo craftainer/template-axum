@@ -35,7 +35,7 @@ tracing-subscriber = { version = "=0.3.20", features = ["json", "env-filter"] }
 # docs/plans/ for the phase 2 plan that adds the code using them.
 
 # Database ORM/migrations -- phase 2's Postgres-backed CRUD resource.
-sea-orm = { version = "=1.1.16", features = ["sqlx-postgres", "runtime-tokio-rustls", "macros"] }
+sea-orm = { version = "=1.1.16", features = ["sqlx-postgres", "runtime-tokio-rustls", "macros", "postgres-array"] }
 sea-orm-migration = { version = "=1.1.16", features = ["runtime-tokio-rustls", "sqlx-postgres"] }
 
 # Cache client -- phase 2's Redis/Valkey-backed caching.
@@ -54,9 +54,45 @@ aws-config = "=1.8.11"
 openidconnect = "=4.0.1"
 oauth2 = "=5.0.0"
 
+# Bearer-token decode/verify against a fetched JWKS (see src/oidc/mod.rs) --
+# openidconnect/oauth2 above cover the Authorization Code + PKCE flow the
+# frontend runs to obtain a token; this resource-server side needs its own
+# JWT decode since openidconnect's own verifier is tied to its own
+# authorization-flow-scoped nonce/state, not a bare bearer token on an
+# unrelated request.
+jsonwebtoken = "=9.3.1"
+
+# HTTP client for OIDC discovery + JWKS fetch, and the OIDC health check --
+# default-features off, "rustls-tls" only, for the same
+# single-rustls-copy reasoning as aws-sdk-s3 above.
+reqwest = { version = "=0.12.24", default-features = false, features = ["json", "rustls-tls"] }
+
+# Object-safe async trait methods for the health-check registry (see
+# src/health/mod.rs) -- native async-fn-in-traits (stable since Rust 1.75)
+# isn't dyn-compatible, and HealthRegistry holds a heterogeneous
+# Vec<Box<dyn HealthCheck>>.
+async-trait = "=0.1.83"
+
+# Concurrent execution of every registered health check (see
+# src/health/mod.rs's HealthRegistry::run_all) -- the standard
+# join-a-heterogeneous-set-of-futures primitive; tokio itself only offers
+# join!/select! for a statically-known, fixed set of futures.
+futures = "=0.3.31"
+
 serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = "=1.0.145"
 thiserror = "=2.0.17"
+chrono = { version = "=0.4.42", features = ["serde"] }
+
+# Decodes MODE=mock's unsigned/untrusted-signature bearer tokens (see
+# src/oidc/mod.rs::decode_without_verification) -- jsonwebtoken's own
+# decode() always verifies a signature, so the mock-mode "trust the
+# claims as-is" path needs a bare base64url decode of the JWT payload
+# segment instead.
+base64 = "=0.22.1"
+
+[dev-dependencies]
+tower = { version = "=0.5.2", features = ["util"] }
 
 [profile.release]
 # Smaller, faster runner-stage binary at the cost of build time -- worth it
