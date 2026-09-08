@@ -27,14 +27,18 @@ use crate::views::hero::{HeroCreate, HeroListQuery, HeroRead, HeroUpdate};
 /// delete -- a single record edit shares the same per-caller budget as
 /// every other mutating call, matching `rate_limit.py`'s own reasoning
 /// (see that module's doc comment) for applying the limit to a route's
-/// handler as a whole rather than exempting any one verb.
-const HERO_WRITE_RATE_SCOPE: &str = "hero-write";
+/// handler as a whole rather than exempting any one verb. `pub(crate)`:
+/// shared with `controllers::heroes_xml` (`docs/adrs/0014`) so both
+/// sibling routers draw from the same per-caller budget rather than each
+/// format getting its own.
+pub(crate) const HERO_WRITE_RATE_SCOPE: &str = "hero-write";
 
 /// Hero's filterable/sortable fields, derived by hand from `HeroRead`'s
 /// scalar fields (`docs/adrs/0013`) -- `powers` (a list, not a scalar) has
 /// no equivalent here, matching `crud_query.py`'s own field-classifier
-/// skipping non-scalar fields.
-const HERO_FIELD_SPECS: &[FieldSpec] = &[
+/// skipping non-scalar fields. `pub(crate)`: shared with
+/// `controllers::heroes_xml`, same reasoning as the rate-limit scope above.
+pub(crate) const HERO_FIELD_SPECS: &[FieldSpec] = &[
     FieldSpec::number("id"),
     FieldSpec::string("name"),
     FieldSpec::number("power_level"),

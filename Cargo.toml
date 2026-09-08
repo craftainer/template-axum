@@ -88,6 +88,12 @@ serde_json = "=1.0.145"
 thiserror = "=2.0.17"
 chrono = { version = "=0.4.42", features = ["serde"] }
 
+# XML sibling representation for Hero -- docs/adrs/0014, Tier C item 4.
+# "serialize" pulls in the serde-based (de)serializer/deserializer
+# (quick_xml::se/de) this app uses directly rather than through a
+# hand-rolled wrapper (see that ADR's "why no xml_codec.rs" section).
+quick-xml = { version = "=0.42.0", features = ["serialize"] }
+
 # Decodes MODE=mock's unsigned/untrusted-signature bearer tokens (see
 # src/oidc/mod.rs::decode_without_verification) -- jsonwebtoken's own
 # decode() always verifies a signature, so the mock-mode "trust the

@@ -143,7 +143,10 @@ hero_memory}` / `controllers::heroes` are the worked example of the
 generic CRUD layer (`crud::CrudService`), wired up as
 `/crud/v1/heroes/v2/json` (list/get/create/update/delete, plus
 filtering/sorting on list and a bulk update/delete form — `docs/adrs/
-0013`). Adding another resource follows the same shape: a SeaORM entity
+0013`) and its XML sibling, `controllers::heroes_xml` at
+`/crud/v1/heroes/v2/xml` (`docs/adrs/0014`), sharing the same
+`CrudService`/repository dependency. Adding another resource follows
+the same shape: a SeaORM entity
 in `models/` (implementing `HasId`), DTOs in `views/`, one `Repository`
 `impl` per backend in `repositories/` (or `crate::dyn_repository!` plus
 two small `impl`s, if `MODE=mock` needs a fake — each mapping

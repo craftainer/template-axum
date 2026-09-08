@@ -29,6 +29,11 @@ The Controller layer: axum routers. Highest layer besides `main` itself
   -> filtered list, or a bulk action over the given filters" decision,
   generic over any `R: Repository` so a future sibling router can reuse
   it without duplicating business logic.
+- `heroes_xml.rs` — the XML sibling of `heroes.rs`, mounted by
+  `main.rs` at `/crud/v1/heroes/v2/xml` (`FR-0027`, `docs/adrs/0014`).
+  Shares `heroes.rs`'s `HERO_FIELD_SPECS`/`HERO_WRITE_RATE_SCOPE` and
+  calls the exact same `crud_actions` functions — only the request/
+  response (de)serialization (`quick_xml` instead of `Json`) differs.
 - `mock.rs` — `POST /mock/token`, mounted by `main.rs` only under
   `Mode::Mock` (`FR-0017`); also rate-limited (`FR-0023`).
 

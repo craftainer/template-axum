@@ -133,7 +133,8 @@ async fn main() {
 
     let mut app = Router::new()
         .nest("/health", controllers::health::router())
-        .nest("/crud/v1/heroes/v2/json", controllers::heroes::router());
+        .nest("/crud/v1/heroes/v2/json", controllers::heroes::router())
+        .nest("/crud/v1/heroes/v2/xml", controllers::heroes_xml::router());
 
     if settings.mode == Mode::Mock {
         app = app.nest("/mock", controllers::mock::router());

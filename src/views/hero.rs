@@ -52,6 +52,12 @@ fn validate_powers(powers: &[String], errors: &mut Vec<FieldError>) {
 pub struct HeroCreate {
     pub name: String,
     pub powers: Vec<String>,
+    /// `#[serde(default)]` (harmless for JSON, where an `Option` field
+    /// already defaults to `None` when absent) is needed for the XML
+    /// sibling router (`docs/adrs/0014`): `quick_xml`'s deserializer, unlike
+    /// `serde_json`'s, doesn't implicitly default a missing `Option` field
+    /// without it.
+    #[serde(default)]
     pub power_level: Option<i32>,
 }
 
@@ -72,8 +78,13 @@ impl HeroCreate {
 /// optional; an omitted field is left unchanged (FR-0004).
 #[derive(Debug, Deserialize, Default)]
 pub struct HeroUpdate {
+    // #[serde(default)] on every field here: see HeroCreate::power_level's
+    // doc comment -- needed for quick_xml's deserializer, harmless for JSON.
+    #[serde(default)]
     pub name: Option<String>,
+    #[serde(default)]
     pub powers: Option<Vec<String>>,
+    #[serde(default)]
     pub power_level: Option<i32>,
 }
 

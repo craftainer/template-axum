@@ -7,6 +7,12 @@ The View layer: request/response DTOs. May import from `models` (for
   shape every resource's `*Create`/`*Update::validate()` returns.
 - `hero.rs` — `HeroCreate`/`HeroUpdate`/`HeroRead`/`HeroListQuery` and
   their validation (`FR-0003`).
+- `hero_xml.rs` — `HeroReadXml`, a field-for-field mirror of `HeroRead`
+  with `Option` fields omitted (rather than rendered) when absent, for
+  `controllers::heroes_xml`'s XML responses (`docs/adrs/0014`).
+  `HeroCreate`/`HeroUpdate` are reused as-is for XML input.
+- `bulk.rs` — `BulkUpdateResult`/`BulkDeleteResult`, the resource-
+  agnostic result shapes a bulk update/delete returns (`docs/adrs/0013`).
 
 Convention: three DTOs per resource — a `*Create` (required fields), a
 `*Update` (all-optional, PATCH semantics per `FR-0004`), and a plain

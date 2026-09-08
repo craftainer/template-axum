@@ -6,6 +6,7 @@ pub mod crud_actions;
 pub mod crud_query;
 pub mod health;
 pub mod heroes;
+pub mod heroes_xml;
 pub mod mock;
 
 use std::sync::Arc;
