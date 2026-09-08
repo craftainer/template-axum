@@ -6,6 +6,7 @@ mod config;
 mod controllers;
 mod crud;
 mod health;
+mod http_headers;
 mod migration;
 mod models;
 mod oidc;

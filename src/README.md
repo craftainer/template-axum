@@ -16,9 +16,9 @@ each with its own `README.md`:
 - `migration/` — SeaORM migrations, applied automatically at startup.
 
 `config.rs`/`main.rs`/`telemetry.rs`/`problem_details.rs`/
-`rate_limit.rs` stay flat, outside any submodule — each has no
-resource-specific code and no state of its own beyond what it's
-explicitly passed or reads from `config::Settings`.
+`rate_limit.rs`/`http_headers.rs` stay flat, outside any submodule —
+each has no resource-specific code and no state of its own beyond
+what it's explicitly passed or reads from `config::Settings`.
 
 - `config.rs` — settings, read from environment variables only; see
   "Configuration" and "MODE" below.
@@ -32,6 +32,10 @@ explicitly passed or reads from `config::Settings`.
   `Mode::Mock`) per-caller rate limiter checked inline by Hero's
   create/update/delete handlers and `POST /mock/token`; see
   `docs/adrs/0011`.
+- `http_headers.rs` — `Sunset`, an `IntoResponseParts` type a handler
+  combines into its return value to attach RFC 8594 `Sunset`/
+  `Deprecation`/`Link` headers; not yet used by any route (see
+  `docs/adrs/0012`).
 
 ## Layering
 
