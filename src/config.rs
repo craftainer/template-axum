@@ -75,6 +75,11 @@ pub struct Settings {
     /// create/update/delete route before the same error.
     pub rate_limit_hero_write_per_minute: u32,
 
+    /// Refuse a bulk update/delete whose filters match more than this many
+    /// records -- mirrors `config.py`'s `bulk_action_max_matched` (1000).
+    /// See `docs/adrs/0013`.
+    pub bulk_action_max_matched: u64,
+
     pub oidc_issuer_url: String,
     pub oidc_authorization_url: String,
     pub oidc_token_url: String,
@@ -121,6 +126,10 @@ impl Settings {
                 .map_err(|_| {
                     "RATE_LIMIT_HERO_WRITE_PER_MINUTE must be a valid integer".to_string()
                 })?,
+
+            bulk_action_max_matched: env_or("BULK_ACTION_MAX_MATCHED", "1000")
+                .parse()
+                .map_err(|_| "BULK_ACTION_MAX_MATCHED must be a valid integer".to_string())?,
 
             oidc_issuer_url: env_or(
                 "OIDC_ISSUER_URL",
@@ -245,6 +254,7 @@ mod tests {
             "REDIS_URL",
             "RATE_LIMIT_MOCK_TOKEN_PER_MINUTE",
             "RATE_LIMIT_HERO_WRITE_PER_MINUTE",
+            "BULK_ACTION_MAX_MATCHED",
             "OIDC_ISSUER_URL",
             "OIDC_AUDIENCE",
             "DATABASE_URL",

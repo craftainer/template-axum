@@ -17,7 +17,18 @@ The Controller layer: axum routers. Highest layer besides `main` itself
   scoped (`docs/adrs/0007`), soft-deleted (`docs/adrs/0008`), RBAC-gated
   per the role constants above. create/update/delete are rate-limited
   (`FR-0023`, `docs/adrs/0011`) via `AppState::rate_limiter`, keyed by
-  the caller's `ConnectInfo<SocketAddr>`.
+  the caller's `ConnectInfo<SocketAddr>`. list supports filtering/
+  sorting, and update/delete support a bulk form over filters
+  (`FR-0025`/`FR-0026`, `docs/adrs/0013`) via `crud_query`/
+  `crud_actions` below.
+- `crud_query.rs` — `FieldSpec`/`parse_filters`/`parse_sort`: generic
+  query-string-to-`FilterClause`/`SortClause` parsing, driven by a
+  resource's own field table (`heroes.rs`'s `HERO_FIELD_SPECS`).
+- `crud_actions.rs` — `resolve_list_or_get`/`resolve_update`/
+  `resolve_delete`: the shared "id present -> single record; otherwise
+  -> filtered list, or a bulk action over the given filters" decision,
+  generic over any `R: Repository` so a future sibling router can reuse
+  it without duplicating business logic.
 - `mock.rs` — `POST /mock/token`, mounted by `main.rs` only under
   `Mode::Mock` (`FR-0017`); also rate-limited (`FR-0023`).
 

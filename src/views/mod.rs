@@ -3,6 +3,7 @@
 //! `src/README.md`) -- may import `models` types for `From` conversions,
 //! never the reverse.
 
+pub mod bulk;
 pub mod hero;
 
 /// One field-level validation failure -- rendered into RFC 9457's `detail`

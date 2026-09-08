@@ -31,3 +31,9 @@ pub struct Model {
 pub enum Relation {}
 
 impl ActiveModelBehavior for ActiveModel {}
+
+impl crate::models::HasId for Model {
+    fn id(&self) -> i32 {
+        self.id
+    }
+}

@@ -3,8 +3,10 @@
 The axum application, laid out as an MVC-ish split across submodules,
 each with its own `README.md`:
 
-- `models/` — the Model layer: SeaORM entities.
-- `views/` — the View layer: request/response DTOs.
+- `models/` — the Model layer: SeaORM entities, plus `HasId` (a model
+  with a stable integer identity, used by `controllers::crud_actions`).
+- `views/` — the View layer: request/response DTOs, plus `bulk` (the
+  resource-agnostic `BulkUpdateResult`/`BulkDeleteResult` shapes).
 - `controllers/` — the Controller layer: axum routers, shared
   `AppState`, RBAC role constants.
 - `repositories/` — storage-agnostic CRUD access, backing `crud/`.
@@ -139,12 +141,16 @@ first.
 `models::hero` / `views::hero` / `repositories::{hero_sea_orm,
 hero_memory}` / `controllers::heroes` are the worked example of the
 generic CRUD layer (`crud::CrudService`), wired up as
-`/crud/v1/heroes/v2/json` (list/get/create/update/delete). Adding
-another resource follows the same shape: a SeaORM entity in `models/`,
-DTOs in `views/`, one `Repository` `impl` per backend in
-`repositories/` (or `crate::dyn_repository!` plus two small `impl`s, if
-`MODE=mock` needs a fake), and a router in `controllers/` built from
-`crud::CrudService::new(repository)`.
+`/crud/v1/heroes/v2/json` (list/get/create/update/delete, plus
+filtering/sorting on list and a bulk update/delete form — `docs/adrs/
+0013`). Adding another resource follows the same shape: a SeaORM entity
+in `models/` (implementing `HasId`), DTOs in `views/`, one `Repository`
+`impl` per backend in `repositories/` (or `crate::dyn_repository!` plus
+two small `impl`s, if `MODE=mock` needs a fake — each mapping
+`repositories::filtering::FilterClause`/`SortClause` onto its own
+storage), a `FIELD_SPECS` table for `controllers::crud_query`, and a
+router in `controllers/` built from `crud::CrudService::new(repository)`
+plus `controllers::crud_actions`'s shared resolve functions.
 
 ```mermaid
 sequenceDiagram

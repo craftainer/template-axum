@@ -20,18 +20,24 @@
 //! just with the entity-specific column mapping living one layer lower
 //! than in the Python original.
 
+pub mod filtering;
 pub mod hero_memory;
 pub mod hero_sea_orm;
 
 use async_trait::async_trait;
 
-/// Pagination/visibility options shared by every resource's `list`/`count`.
-#[derive(Debug, Clone, Copy, Default)]
+use filtering::{FilterClause, SortClause};
+
+/// Pagination/visibility/filter/sort options shared by every resource's
+/// `list` -- `filters`/`sort` added by `docs/adrs/0013` (Tier C item 3).
+#[derive(Debug, Clone, Default)]
 pub struct ListOptions {
     pub skip: u64,
     pub limit: u64,
     /// Include soft-deleted (`archived_at IS NOT NULL`) rows -- ADR 0012.
     pub include_archived: bool,
+    pub filters: Vec<FilterClause>,
+    pub sort: Vec<SortClause>,
 }
 
 /// A repository-layer failure. Deliberately narrow: the CRUD service and
@@ -54,6 +60,14 @@ pub trait Repository: Send + Sync {
     type Update: Send + Sync;
 
     async fn list(&self, opts: ListOptions) -> Result<Vec<Self::Model>, RepoError>;
+    /// How many non-archived (unless `include_archived`) rows match
+    /// `filters` -- used to cap a bulk update/delete before it runs
+    /// (`docs/adrs/0013`), same role as `count()` in the reference.
+    async fn count(
+        &self,
+        filters: &[FilterClause],
+        include_archived: bool,
+    ) -> Result<u64, RepoError>;
     async fn get(&self, id: i32, include_archived: bool) -> Result<Option<Self::Model>, RepoError>;
     async fn create(&self, owner_id: &str, data: Self::Create) -> Result<Self::Model, RepoError>;
     /// `None` if no row matched `id` (not found or not owned by `owner_id`).
@@ -63,9 +77,20 @@ pub trait Repository: Send + Sync {
         owner_id: &str,
         data: Self::Update,
     ) -> Result<Option<Self::Model>, RepoError>;
+    /// Apply `data` to every non-archived row matching `filters`; returns
+    /// the updated rows.
+    async fn update_many(
+        &self,
+        filters: &[FilterClause],
+        data: Self::Update,
+    ) -> Result<Vec<Self::Model>, RepoError>;
     /// `false` if no row matched `id` (not found, not owned, or already
     /// archived).
     async fn delete(&self, id: i32, owner_id: &str) -> Result<bool, RepoError>;
+    /// Soft-delete every non-archived row matching `filters`; returns the
+    /// rows that were deleted (post-delete state, matching the
+    /// reference's `delete_many`).
+    async fn delete_many(&self, filters: &[FilterClause]) -> Result<Vec<Self::Model>, RepoError>;
 }
 
 /// A macro (not a generic blanket `impl`, which trips an async-trait/HRTB
@@ -103,6 +128,14 @@ macro_rules! dyn_repository {
                 self.0.list(opts).await
             }
 
+            async fn count(
+                &self,
+                filters: &[$crate::repositories::filtering::FilterClause],
+                include_archived: bool,
+            ) -> Result<u64, $crate::repositories::RepoError> {
+                self.0.count(filters, include_archived).await
+            }
+
             async fn get(
                 &self,
                 id: i32,
@@ -128,12 +161,27 @@ macro_rules! dyn_repository {
                 self.0.update(id, owner_id, data).await
             }
 
+            async fn update_many(
+                &self,
+                filters: &[$crate::repositories::filtering::FilterClause],
+                data: $update,
+            ) -> Result<Vec<$model>, $crate::repositories::RepoError> {
+                self.0.update_many(filters, data).await
+            }
+
             async fn delete(
                 &self,
                 id: i32,
                 owner_id: &str,
             ) -> Result<bool, $crate::repositories::RepoError> {
                 self.0.delete(id, owner_id).await
+            }
+
+            async fn delete_many(
+                &self,
+                filters: &[$crate::repositories::filtering::FilterClause],
+            ) -> Result<Vec<$model>, $crate::repositories::RepoError> {
+                self.0.delete_many(filters).await
             }
         }
     };

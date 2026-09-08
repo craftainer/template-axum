@@ -4,14 +4,20 @@
 //! Owner-scoped per ADR 0011 (reads open, writes/deletes restricted to the
 //! caller's own `sub`); soft-deleted per ADR 0012.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 
 use axum::extract::{ConnectInfo, Query, State};
 use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 
-use crate::controllers::{AppState, HERO_DELETE_ROLES, HERO_READ_ROLES, HERO_WRITE_ROLES};
+use crate::controllers::crud_actions::{DeleteOutcome, ListOrGet, UpdateOutcome};
+use crate::controllers::crud_query::{parse_filters, parse_sort, FieldSpec};
+use crate::controllers::{
+    crud_actions, AppState, HERO_DELETE_ROLES, HERO_READ_ROLES, HERO_WRITE_ROLES,
+};
 use crate::crud::DEFAULT_LIMIT;
 use crate::oidc::AuthClaims;
 use crate::problem_details::AppError;
@@ -24,33 +30,61 @@ use crate::views::hero::{HeroCreate, HeroListQuery, HeroRead, HeroUpdate};
 /// handler as a whole rather than exempting any one verb.
 const HERO_WRITE_RATE_SCOPE: &str = "hero-write";
 
+/// Hero's filterable/sortable fields, derived by hand from `HeroRead`'s
+/// scalar fields (`docs/adrs/0013`) -- `powers` (a list, not a scalar) has
+/// no equivalent here, matching `crud_query.py`'s own field-classifier
+/// skipping non-scalar fields.
+const HERO_FIELD_SPECS: &[FieldSpec] = &[
+    FieldSpec::number("id"),
+    FieldSpec::string("name"),
+    FieldSpec::number("power_level"),
+    FieldSpec::string("owner_id"),
+    FieldSpec::datetime("archived_at"),
+    FieldSpec::datetime("created_at"),
+    FieldSpec::datetime("updated_at"),
+];
+
+fn hero_read_json(hero: crate::models::hero::Model) -> serde_json::Value {
+    serde_json::to_value(HeroRead::from(hero)).expect("HeroRead always serializes")
+}
+
 /// `GET ?id=` (single) or `GET ` (list, `?skip=`/`?limit=`/
-/// `?include_archived=`) -- record addressing is a query parameter, never
-/// a path segment, matching `crud_router.py`'s `?id=` convention.
+/// `?include_archived=`, plus any `field[__op]=`/`sort=` filter/sort
+/// params -- `docs/adrs/0013`) -- record addressing is a query parameter,
+/// never a path segment, matching `crud_router.py`'s `?id=` convention.
 async fn list_or_get(
     State(state): State<AppState>,
     AuthClaims(claims): AuthClaims,
     Query(query): Query<HeroListQuery>,
+    Query(raw_params): Query<HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     claims.require_any_role(&state.settings.oidc_client_id, HERO_READ_ROLES)?;
     let include_archived = query.include_archived.unwrap_or(false);
-
-    if let Some(id) = query.id {
-        let hero = state.hero_crud.get(id, include_archived).await?;
-        let hero = hero.ok_or_else(|| AppError::NotFound(format!("hero {id} not found")))?;
-        return Ok(Json(serde_json::to_value(HeroRead::from(hero)).unwrap()));
-    }
-
+    let filters =
+        parse_filters(HERO_FIELD_SPECS, &raw_params).map_err(AppError::UnprocessableEntity)?;
+    let sort = parse_sort(HERO_FIELD_SPECS, &raw_params).map_err(AppError::UnprocessableEntity)?;
     let skip = query.skip.unwrap_or(0);
     let limit = query.limit.unwrap_or(DEFAULT_LIMIT);
-    let heroes: Vec<HeroRead> = state
-        .hero_crud
-        .list(skip, limit, include_archived)
-        .await?
-        .into_iter()
-        .map(HeroRead::from)
-        .collect();
-    Ok(Json(serde_json::to_value(heroes).unwrap()))
+
+    match crud_actions::resolve_list_or_get(
+        &state.hero_crud,
+        query.id,
+        skip,
+        limit,
+        include_archived,
+        filters,
+        sort,
+    )
+    .await?
+    {
+        ListOrGet::One(hero) => Ok(Json(hero_read_json(hero))),
+        ListOrGet::Many(heroes) => {
+            let heroes: Vec<HeroRead> = heroes.into_iter().map(HeroRead::from).collect();
+            Ok(Json(
+                serde_json::to_value(heroes).expect("Vec<HeroRead> always serializes"),
+            ))
+        }
+    }
 }
 
 /// `POST ` -> 201. Stamps `owner_id` from the caller's `sub`, never trusts
@@ -77,15 +111,19 @@ async fn create(
     Ok((StatusCode::CREATED, Json(HeroRead::from(hero))))
 }
 
-/// `PATCH ?id=` -- partial update; an omitted field is left unchanged
-/// (FR-0004). Owner-scoped: a caller can only update their own hero.
+/// `PATCH ?id=` -- partial update of one record; an omitted field is left
+/// unchanged (FR-0004). `PATCH` with no `?id=` but at least one filter
+/// (`field[__op]=`) instead bulk-updates every matching record
+/// (`docs/adrs/0013`) with the same payload. Owner-scoped either way: a
+/// caller can only update their own heroes.
 async fn update(
     State(state): State<AppState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     AuthClaims(claims): AuthClaims,
     Query(query): Query<HeroListQuery>,
+    Query(raw_params): Query<HashMap<String, String>>,
     Json(payload): Json<HeroUpdate>,
-) -> Result<Json<HeroRead>, AppError> {
+) -> Result<Json<serde_json::Value>, AppError> {
     state
         .rate_limiter
         .check(
@@ -97,26 +135,40 @@ async fn update(
         .await?;
     claims.require_any_role(&state.settings.oidc_client_id, HERO_WRITE_ROLES)?;
     payload.validate().map_err(AppError::UnprocessableEntity)?;
-    let id = query.id.ok_or_else(|| {
-        AppError::UnprocessableEntity(vec![crate::views::FieldError::new(
-            "id",
-            "id query parameter is required",
-        )])
-    })?;
+    let filters =
+        parse_filters(HERO_FIELD_SPECS, &raw_params).map_err(AppError::UnprocessableEntity)?;
     let owner_id = claims.subject()?.to_string();
-    let hero = state.hero_crud.update(id, &owner_id, payload).await?;
-    let hero = hero.ok_or_else(|| AppError::NotFound(format!("hero {id} not found")))?;
-    Ok(Json(HeroRead::from(hero)))
+
+    match crud_actions::resolve_update(
+        &state.hero_crud,
+        query.id,
+        &owner_id,
+        filters,
+        payload,
+        state.settings.bulk_action_max_matched,
+    )
+    .await?
+    {
+        UpdateOutcome::One(hero) => Ok(Json(hero_read_json(hero))),
+        UpdateOutcome::Bulk(result) => Ok(Json(
+            serde_json::to_value(result).expect("BulkUpdateResult always serializes"),
+        )),
+    }
 }
 
 /// `DELETE ?id=` -> 204. Soft-delete (sets `archived_at`, ADR 0012), owner-
-/// scoped, restricted to the `maintainer` role (FR-0015).
+/// scoped, restricted to the `maintainer` role (FR-0015). `DELETE` with no
+/// `?id=` but at least one filter instead bulk-deletes every matching
+/// record (`docs/adrs/0013`), returning a `BulkDeleteResult` (200) rather
+/// than 204 -- there's no single record's absence to signal with an empty
+/// body.
 async fn delete_hero(
     State(state): State<AppState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     AuthClaims(claims): AuthClaims,
     Query(query): Query<HeroListQuery>,
-) -> Result<StatusCode, AppError> {
+    Query(raw_params): Query<HashMap<String, String>>,
+) -> Result<Response, AppError> {
     state
         .rate_limiter
         .check(
@@ -127,18 +179,21 @@ async fn delete_hero(
         )
         .await?;
     claims.require_any_role(&state.settings.oidc_client_id, HERO_DELETE_ROLES)?;
-    let id = query.id.ok_or_else(|| {
-        AppError::UnprocessableEntity(vec![crate::views::FieldError::new(
-            "id",
-            "id query parameter is required",
-        )])
-    })?;
+    let filters =
+        parse_filters(HERO_FIELD_SPECS, &raw_params).map_err(AppError::UnprocessableEntity)?;
     let owner_id = claims.subject()?.to_string();
-    let deleted = state.hero_crud.delete(id, &owner_id).await?;
-    if deleted {
-        Ok(StatusCode::NO_CONTENT)
-    } else {
-        Err(AppError::NotFound(format!("hero {id} not found")))
+
+    match crud_actions::resolve_delete(
+        &state.hero_crud,
+        query.id,
+        &owner_id,
+        filters,
+        state.settings.bulk_action_max_matched,
+    )
+    .await?
+    {
+        DeleteOutcome::One => Ok(StatusCode::NO_CONTENT.into_response()),
+        DeleteOutcome::Bulk(result) => Ok(Json(result).into_response()),
     }
 }
 
@@ -181,6 +236,7 @@ mod tests {
             redis_url: "redis://localhost:6379/0".to_string(),
             rate_limit_mock_token_per_minute: 10,
             rate_limit_hero_write_per_minute: 20,
+            bulk_action_max_matched: 1000,
             oidc_issuer_url: "http://localhost:8080/realms/template-fastapi".to_string(),
             oidc_authorization_url: "http://localhost:8080/auth".to_string(),
             oidc_token_url: "http://localhost:8080/token".to_string(),
@@ -498,5 +554,219 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    // -- generic filter/sort/bulk (docs/adrs/0013, Tier C item 3). --
+
+    async fn create_hero(app: &Router, sub: &str, body: serde_json::Value) -> i64 {
+        let response = app
+            .clone()
+            .oneshot(authed("POST", "/", sub, &["editor"], body))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        json_body(response).await["id"].as_i64().unwrap()
+    }
+
+    #[tokio::test]
+    async fn list_filters_by_an_equality_query_param() {
+        let shared_app = app();
+        create_hero(
+            &shared_app,
+            "alice",
+            serde_json::json!({"name": "Spectra", "powers": ["flight"], "power_level": 5}),
+        )
+        .await;
+        create_hero(
+            &shared_app,
+            "alice",
+            serde_json::json!({"name": "Umbra", "powers": ["stealth"], "power_level": 3}),
+        )
+        .await;
+
+        let response = shared_app
+            .oneshot(authed(
+                "GET",
+                "/?name=Umbra",
+                "alice",
+                &["viewer"],
+                serde_json::Value::Null,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        let heroes = body.as_array().unwrap();
+        assert_eq!(heroes.len(), 1);
+        assert_eq!(heroes[0]["name"], "Umbra");
+    }
+
+    #[tokio::test]
+    async fn list_sorts_descending_with_a_leading_dash() {
+        let shared_app = app();
+        create_hero(
+            &shared_app,
+            "alice",
+            serde_json::json!({"name": "Low", "powers": ["a"], "power_level": 1}),
+        )
+        .await;
+        create_hero(
+            &shared_app,
+            "alice",
+            serde_json::json!({"name": "High", "powers": ["a"], "power_level": 9}),
+        )
+        .await;
+
+        let response = shared_app
+            .oneshot(authed(
+                "GET",
+                "/?sort=-power_level",
+                "alice",
+                &["viewer"],
+                serde_json::Value::Null,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        let heroes = body.as_array().unwrap();
+        assert_eq!(heroes[0]["name"], "High");
+        assert_eq!(heroes[1]["name"], "Low");
+    }
+
+    #[tokio::test]
+    async fn list_rejects_an_unrecognized_filter_field_with_422() {
+        let response = app()
+            .oneshot(authed(
+                "GET",
+                "/?nope=1",
+                "alice",
+                &["viewer"],
+                serde_json::Value::Null,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn bulk_update_applies_the_payload_to_every_matching_owned_record() {
+        let shared_app = app();
+        create_hero(
+            &shared_app,
+            "alice",
+            serde_json::json!({"name": "Spectra", "powers": ["flight"], "power_level": 5}),
+        )
+        .await;
+        create_hero(
+            &shared_app,
+            "alice",
+            serde_json::json!({"name": "Umbra", "powers": ["stealth"], "power_level": 5}),
+        )
+        .await;
+        // A different owner's matching record must not be touched.
+        create_hero(
+            &shared_app,
+            "mallory",
+            serde_json::json!({"name": "Ghost", "powers": ["stealth"], "power_level": 5}),
+        )
+        .await;
+
+        let response = shared_app
+            .clone()
+            .oneshot(authed(
+                "PATCH",
+                "/?power_level=5",
+                "alice",
+                &["editor"],
+                serde_json::json!({"power_level": 10}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["matched"], 2);
+        assert_eq!(body["ids"].as_array().unwrap().len(), 2);
+
+        let mallory_check = shared_app
+            .oneshot(authed(
+                "GET",
+                "/?power_level=5",
+                "alice",
+                &["viewer"],
+                serde_json::Value::Null,
+            ))
+            .await
+            .unwrap();
+        let body = json_body(mallory_check).await;
+        // Only mallory's untouched record still has power_level=5.
+        assert_eq!(body.as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn bulk_update_with_no_id_and_no_filters_returns_422() {
+        let response = app()
+            .oneshot(authed(
+                "PATCH",
+                "/",
+                "alice",
+                &["editor"],
+                serde_json::json!({"power_level": 10}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn bulk_delete_soft_deletes_every_matching_owned_record() {
+        let shared_app = app();
+        let id_a = create_hero(
+            &shared_app,
+            "alice",
+            serde_json::json!({"name": "Spectra", "powers": ["flight"], "power_level": 7}),
+        )
+        .await;
+        let id_b = create_hero(
+            &shared_app,
+            "alice",
+            serde_json::json!({"name": "Umbra", "powers": ["stealth"], "power_level": 7}),
+        )
+        .await;
+
+        let response = shared_app
+            .clone()
+            .oneshot(authed(
+                "DELETE",
+                "/?power_level=7",
+                "alice",
+                &["maintainer"],
+                serde_json::Value::Null,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["matched"], 2);
+        let mut ids: Vec<i64> = body["ids"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_i64().unwrap())
+            .collect();
+        ids.sort_unstable();
+        assert_eq!(ids, vec![id_a, id_b]);
+
+        let after = shared_app
+            .oneshot(authed(
+                "GET",
+                &format!("/?id={id_a}"),
+                "alice",
+                &["viewer"],
+                serde_json::Value::Null,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(after.status(), StatusCode::NOT_FOUND);
     }
 }
