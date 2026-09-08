@@ -13,6 +13,8 @@ The View layer: request/response DTOs. May import from `models` (for
   `HeroCreate`/`HeroUpdate` are reused as-is for XML input.
 - `bulk.rs` — `BulkUpdateResult`/`BulkDeleteResult`, the resource-
   agnostic result shapes a bulk update/delete returns (`docs/adrs/0013`).
+- `stats.rs` — `ResourceStats`/`Prediction` and their sub-shapes, the
+  `GET /stats`/`GET /predict` response bodies (`docs/adrs/0015`).
 
 Convention: three DTOs per resource — a `*Create` (required fields), a
 `*Update` (all-optional, PATCH semantics per `FR-0004`), and a plain

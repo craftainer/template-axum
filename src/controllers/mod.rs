@@ -4,6 +4,7 @@
 
 pub mod crud_actions;
 pub mod crud_query;
+pub mod crud_stats;
 pub mod health;
 pub mod heroes;
 pub mod heroes_xml;

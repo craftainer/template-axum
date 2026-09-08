@@ -15,13 +15,19 @@ use axum::{Json, Router};
 
 use crate::controllers::crud_actions::{DeleteOutcome, ListOrGet, UpdateOutcome};
 use crate::controllers::crud_query::{parse_filters, parse_sort, FieldSpec};
+use crate::controllers::crud_stats;
 use crate::controllers::{
     crud_actions, AppState, HERO_DELETE_ROLES, HERO_READ_ROLES, HERO_WRITE_ROLES,
 };
 use crate::crud::DEFAULT_LIMIT;
+use crate::models::hero;
 use crate::oidc::AuthClaims;
 use crate::problem_details::AppError;
 use crate::views::hero::{HeroCreate, HeroListQuery, HeroRead, HeroUpdate};
+use crate::views::stats::{
+    CategoricalValueCount, LifecycleStats, NumericFieldStat, Prediction, ResourceStats,
+    SeriesPoint, TimeBucketCount,
+};
 
 /// Rate-limit scope key (`src/rate_limit.rs`) shared by create/update/
 /// delete -- a single record edit shares the same per-caller budget as
@@ -201,14 +207,246 @@ async fn delete_hero(
     }
 }
 
+/// Compute one field's count/min/max/avg/sum over `values` (already
+/// filtered to the non-null values seen) -- `count`/all-`None` when
+/// `values` is empty, matching SQL's own `SUM()`/`AVG()` over zero rows.
+fn numeric_stat(field: &'static str, values: &[f64]) -> NumericFieldStat {
+    if values.is_empty() {
+        return NumericFieldStat {
+            field,
+            count: 0,
+            minimum: None,
+            maximum: None,
+            average: None,
+            total: None,
+        };
+    }
+    let count = values.len() as u64;
+    let total: f64 = values.iter().sum();
+    let minimum = values.iter().cloned().fold(f64::INFINITY, f64::min);
+    let maximum = values.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    NumericFieldStat {
+        field,
+        count,
+        minimum: Some(minimum),
+        maximum: Some(maximum),
+        average: Some(total / count as f64),
+        total: Some(total),
+    }
+}
+
+/// `field`'s value for one Hero record, as a stats-eligible `f64` -- the
+/// one place `crud_stats`'s field-name strings become Hero-specific
+/// field access (mirrors `hero_sea_orm.rs`'s `column_for`).
+fn numeric_value(hero: &hero::Model, field: &str) -> Option<f64> {
+    match field {
+        "id" => Some(f64::from(hero.id)),
+        "power_level" => hero.power_level.map(f64::from),
+        _ => None,
+    }
+}
+
+/// `field`'s value for one Hero record, as a categorical-distribution
+/// value -- always `None` for Hero (it has no boolean/enum field), kept
+/// alongside `numeric_value` above so a future boolean field needs only
+/// one match arm added here, not a new mechanism.
+fn boolean_value(_hero: &hero::Model, _field: &str) -> Option<bool> {
+    None
+}
+
+fn time_series(records: &[hero::Model], bucket: crud_stats::TimeBucket) -> Vec<TimeBucketCount> {
+    let mut counts: std::collections::BTreeMap<chrono::NaiveDateTime, u64> =
+        std::collections::BTreeMap::new();
+    for record in records {
+        let start = crud_stats::bucket_start(bucket, record.created_at);
+        *counts.entry(start).or_insert(0) += 1;
+    }
+    counts
+        .into_iter()
+        .map(|(bucket_start, count)| TimeBucketCount {
+            bucket_start,
+            count,
+        })
+        .collect()
+}
+
+#[derive(serde::Deserialize)]
+struct StatsQuery {
+    bucket: Option<String>,
+    include_archived: Option<bool>,
+}
+
+/// `GET /stats` -- count/numeric/categorical/time-series/lifecycle
+/// aggregates over the (capped, `crud_stats::MAX_HISTORY_RECORDS`)
+/// matching records (`docs/adrs/0015`).
+async fn get_stats(
+    State(state): State<AppState>,
+    AuthClaims(claims): AuthClaims,
+    Query(query): Query<StatsQuery>,
+) -> Result<Json<ResourceStats>, AppError> {
+    claims.require_any_role(&state.settings.oidc_client_id, HERO_READ_ROLES)?;
+    let include_archived = query.include_archived.unwrap_or(false);
+    let bucket = crud_stats::parse_bucket(query.bucket.as_ref())?;
+
+    let total_visible = state.hero_crud.count(&[], false).await?;
+    let total_all = state.hero_crud.count(&[], true).await?;
+    let total = if include_archived {
+        total_all
+    } else {
+        total_visible
+    };
+
+    let records = state
+        .hero_crud
+        .list(
+            0,
+            crud_stats::MAX_HISTORY_RECORDS,
+            include_archived,
+            vec![],
+            vec![],
+        )
+        .await?;
+
+    let numeric = crud_stats::numeric_fields(HERO_FIELD_SPECS)
+        .into_iter()
+        .map(|field| {
+            let values: Vec<f64> = records
+                .iter()
+                .filter_map(|r| numeric_value(r, field))
+                .collect();
+            numeric_stat(field, &values)
+        })
+        .collect();
+    // Hero has no boolean/enum field, so crud_stats::categorical_fields
+    // (HERO_FIELD_SPECS has no FieldSpec::boolean entries) is always
+    // empty here -- kept generic rather than hardcoded so a future
+    // resource with one gets a value distribution for free.
+    let categorical: Vec<CategoricalValueCount> = crud_stats::categorical_fields(HERO_FIELD_SPECS)
+        .into_iter()
+        .flat_map(|field| {
+            let mut counts: std::collections::HashMap<String, u64> =
+                std::collections::HashMap::new();
+            for record in &records {
+                if let Some(value) = boolean_value(record, field) {
+                    *counts.entry(value.to_string()).or_insert(0) += 1;
+                }
+            }
+            counts
+                .into_iter()
+                .map(move |(value, count)| CategoricalValueCount {
+                    field,
+                    value,
+                    count,
+                })
+        })
+        .collect();
+
+    Ok(Json(ResourceStats {
+        total,
+        numeric,
+        categorical,
+        time_series: bucket.map(|bucket| time_series(&records, bucket)),
+        lifecycle: LifecycleStats {
+            archived: total_all - total_visible,
+        },
+    }))
+}
+
+#[derive(serde::Deserialize)]
+struct PredictQuery {
+    field: Option<String>,
+    periods: Option<String>,
+    bucket: Option<String>,
+}
+
+/// `GET /predict` -- an OLS trend forecast over record count (or a
+/// numeric field's per-bucket sum) time-bucketed history
+/// (`docs/adrs/0015`). `422` (typed `FieldError`) below two buckets of
+/// history, matching `crud_stats::forecast`'s own contract.
+async fn get_prediction(
+    State(state): State<AppState>,
+    AuthClaims(claims): AuthClaims,
+    Query(query): Query<PredictQuery>,
+) -> Result<Json<Prediction>, AppError> {
+    claims.require_any_role(&state.settings.oidc_client_id, HERO_READ_ROLES)?;
+    let bucket =
+        crud_stats::parse_bucket(query.bucket.as_ref())?.unwrap_or(crud_stats::TimeBucket::Day);
+    let field = crud_stats::parse_predict_field(HERO_FIELD_SPECS, query.field.as_ref())?;
+    let periods = crud_stats::parse_periods(query.periods.as_ref())?;
+
+    let records = state
+        .hero_crud
+        .list(0, crud_stats::MAX_HISTORY_RECORDS, false, vec![], vec![])
+        .await?;
+
+    let series: Vec<crud_stats::BucketValue> = match field {
+        None => time_series(&records, bucket)
+            .into_iter()
+            .map(|point| crud_stats::BucketValue {
+                bucket_start: point.bucket_start,
+                value: point.count as f64,
+            })
+            .collect(),
+        Some(field_name) => {
+            let mut sums: std::collections::BTreeMap<chrono::NaiveDateTime, f64> =
+                std::collections::BTreeMap::new();
+            for record in &records {
+                if let Some(value) = numeric_value(record, field_name) {
+                    let start = crud_stats::bucket_start(bucket, record.created_at);
+                    *sums.entry(start).or_insert(0.0) += value;
+                }
+            }
+            sums.into_iter()
+                .map(|(bucket_start, value)| crud_stats::BucketValue {
+                    bucket_start,
+                    value,
+                })
+                .collect()
+        }
+    };
+
+    let predictions = crud_stats::forecast(&series, periods, bucket).map_err(|err| {
+        AppError::UnprocessableEntity(vec![crate::views::FieldError::new(
+            "periods",
+            format!(
+                "need at least 2 time buckets of history to forecast a trend, got {}",
+                err.have
+            ),
+        )])
+    })?;
+    let last_known = series
+        .last()
+        .expect("forecast() already rejects fewer than 2 buckets");
+
+    Ok(Json(Prediction {
+        field,
+        bucket: bucket.as_str(),
+        method: "linear_regression",
+        last_known: SeriesPoint {
+            bucket_start: last_known.bucket_start,
+            value: last_known.value,
+        },
+        predictions: predictions
+            .into_iter()
+            .map(|p| SeriesPoint {
+                bucket_start: p.bucket_start,
+                value: p.value,
+            })
+            .collect(),
+    }))
+}
+
 pub fn router() -> Router<AppState> {
-    Router::new().route(
-        "/",
-        get(list_or_get)
-            .post(create)
-            .patch(update)
-            .delete(delete_hero),
-    )
+    Router::new()
+        .route("/stats", get(get_stats))
+        .route("/predict", get(get_prediction))
+        .route(
+            "/",
+            get(list_or_get)
+                .post(create)
+                .patch(update)
+                .delete(delete_hero),
+        )
 }
 
 #[cfg(test)]
@@ -772,5 +1010,204 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(after.status(), StatusCode::NOT_FOUND);
+    }
+
+    // -- /stats, /predict (docs/adrs/0015, Tier C item 5). --
+
+    #[tokio::test]
+    async fn stats_reports_total_and_numeric_aggregates() {
+        let shared_app = app();
+        create_hero(
+            &shared_app,
+            "alice",
+            serde_json::json!({"name": "A", "powers": ["x"], "power_level": 2}),
+        )
+        .await;
+        create_hero(
+            &shared_app,
+            "alice",
+            serde_json::json!({"name": "B", "powers": ["x"], "power_level": 4}),
+        )
+        .await;
+
+        let response = shared_app
+            .oneshot(authed(
+                "GET",
+                "/stats",
+                "alice",
+                &["viewer"],
+                serde_json::Value::Null,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["total"], 2);
+        let numeric = body["numeric"].as_array().unwrap();
+        let power_level = numeric
+            .iter()
+            .find(|entry| entry["field"] == "power_level")
+            .unwrap();
+        assert_eq!(power_level["count"], 2);
+        assert_eq!(power_level["total"], 6.0);
+        assert_eq!(power_level["average"], 3.0);
+        assert!(body["categorical"].as_array().unwrap().is_empty());
+        assert_eq!(body["lifecycle"]["archived"], 0);
+    }
+
+    #[tokio::test]
+    async fn stats_includes_a_time_series_when_bucket_is_given() {
+        let shared_app = app();
+        create_hero(
+            &shared_app,
+            "alice",
+            serde_json::json!({"name": "A", "powers": ["x"], "power_level": 1}),
+        )
+        .await;
+
+        let no_bucket = shared_app
+            .clone()
+            .oneshot(authed(
+                "GET",
+                "/stats",
+                "alice",
+                &["viewer"],
+                serde_json::Value::Null,
+            ))
+            .await
+            .unwrap();
+        let body = json_body(no_bucket).await;
+        assert!(body.get("time_series").is_none());
+
+        let with_bucket = shared_app
+            .oneshot(authed(
+                "GET",
+                "/stats?bucket=day",
+                "alice",
+                &["viewer"],
+                serde_json::Value::Null,
+            ))
+            .await
+            .unwrap();
+        let body = json_body(with_bucket).await;
+        let series = body["time_series"].as_array().unwrap();
+        assert_eq!(series.len(), 1);
+        assert_eq!(series[0]["count"], 1);
+    }
+
+    #[tokio::test]
+    async fn stats_rejects_an_unrecognized_bucket_with_422() {
+        let response = app()
+            .oneshot(authed(
+                "GET",
+                "/stats?bucket=fortnight",
+                "alice",
+                &["viewer"],
+                serde_json::Value::Null,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    // A happy-path forecast (>= 2 distinct day buckets of history) isn't
+    // practical to exercise end-to-end here: every record this harness
+    // creates is stamped with the real "now", so multiple heroes created
+    // within one test run always land in the same day bucket -- the
+    // regression math itself (multi-bucket, day/week/month bucketing,
+    // straight-line projection) is covered directly by
+    // `crud_stats::tests`, which controls `bucket_start`/series values
+    // without needing real distinct calendar days.
+
+    #[tokio::test]
+    async fn predict_reports_the_linear_regression_method_and_field_on_success_shape() {
+        // Even the insufficient-history 422 case exercises parse_bucket/
+        // parse_predict_field/parse_periods and the series-building code
+        // path up to forecast() -- this asserts that path runs cleanly
+        // (a well-formed 422, not a 500) for a caller who supplied every
+        // valid parameter.
+        let response = app()
+            .oneshot(authed(
+                "GET",
+                "/predict?periods=2&bucket=week",
+                "alice",
+                &["viewer"],
+                serde_json::Value::Null,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn predict_below_two_buckets_of_history_returns_422() {
+        let response = app()
+            .oneshot(authed(
+                "GET",
+                "/predict",
+                "alice",
+                &["viewer"],
+                serde_json::Value::Null,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn predict_rejects_a_non_numeric_field_with_422() {
+        let response = app()
+            .oneshot(authed(
+                "GET",
+                "/predict?field=name",
+                "alice",
+                &["viewer"],
+                serde_json::Value::Null,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn predict_rejects_periods_out_of_range_with_422() {
+        let response = app()
+            .oneshot(authed(
+                "GET",
+                "/predict?periods=0",
+                "alice",
+                &["viewer"],
+                serde_json::Value::Null,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn stats_and_predict_require_a_read_role() {
+        let stats = app()
+            .oneshot(authed(
+                "GET",
+                "/stats",
+                "alice",
+                &["security"],
+                serde_json::Value::Null,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(stats.status(), StatusCode::FORBIDDEN);
+
+        let predict = app()
+            .oneshot(authed(
+                "GET",
+                "/predict",
+                "alice",
+                &["security"],
+                serde_json::Value::Null,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(predict.status(), StatusCode::FORBIDDEN);
     }
 }

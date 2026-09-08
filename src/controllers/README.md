@@ -20,7 +20,8 @@ The Controller layer: axum routers. Highest layer besides `main` itself
   the caller's `ConnectInfo<SocketAddr>`. list supports filtering/
   sorting, and update/delete support a bulk form over filters
   (`FR-0025`/`FR-0026`, `docs/adrs/0013`) via `crud_query`/
-  `crud_actions` below.
+  `crud_actions` below. Also mounts `/stats`/`/predict`
+  (`FR-0028`/`FR-0029`, `docs/adrs/0015`) via `crud_stats`.
 - `crud_query.rs` — `FieldSpec`/`parse_filters`/`parse_sort`: generic
   query-string-to-`FilterClause`/`SortClause` parsing, driven by a
   resource's own field table (`heroes.rs`'s `HERO_FIELD_SPECS`).
@@ -29,6 +30,13 @@ The Controller layer: axum routers. Highest layer besides `main` itself
   -> filtered list, or a bulk action over the given filters" decision,
   generic over any `R: Repository` so a future sibling router can reuse
   it without duplicating business logic.
+- `crud_stats.rs` — resource-agnostic parts of `GET /stats`/`GET
+  /predict` (`FR-0028`/`FR-0029`, `docs/adrs/0015`): `TimeBucket`,
+  `numeric_fields`/`categorical_fields` (narrowing `crud_query`'s
+  `FieldSpec`s), query parsing, and the OLS `forecast`. The Hero-
+  specific field access and route handlers live in `heroes.rs` itself
+  — see that ADR for why this instance doesn't generalize `stats` onto
+  `Repository` with a single resource to justify it.
 - `heroes_xml.rs` — the XML sibling of `heroes.rs`, mounted by
   `main.rs` at `/crud/v1/heroes/v2/xml` (`FR-0027`, `docs/adrs/0014`).
   Shares `heroes.rs`'s `HERO_FIELD_SPECS`/`HERO_WRITE_RATE_SCOPE` and

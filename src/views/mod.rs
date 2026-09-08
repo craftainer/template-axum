@@ -6,6 +6,7 @@
 pub mod bulk;
 pub mod hero;
 pub mod hero_xml;
+pub mod stats;
 
 /// One field-level validation failure -- rendered into RFC 9457's `detail`
 /// as a list, mirroring FastAPI/Pydantic's `RequestValidationError.errors()`
