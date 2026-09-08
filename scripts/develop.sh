@@ -9,13 +9,14 @@ rust_version=$1
 rustup_version=$2
 cargo_audit_version=$3
 cargo_cyclonedx_version=$4
-prek_version=$5
-claude_code_version=$6
-snip_version=$7
-rustfs_cli_version=$8
-uv_version=$9
-python_version=${10}
-node_version=${11}
+cargo_llvm_cov_version=$5
+prek_version=$6
+claude_code_version=$7
+snip_version=$8
+rustfs_cli_version=$9
+uv_version=${10}
+python_version=${11}
+node_version=${12}
 
 # postgresql-client/redis-tools give psql/redis-cli for connecting to the
 # stack's postgres/redis services (see .devcontainer/stack/postgres and
@@ -67,6 +68,14 @@ sudo -u vscode env HOME=/home/vscode CARGO_TARGET_DIR=/home/vscode/.cache/cargo-
     /home/vscode/.cargo/bin/cargo install --locked "cargo-audit@${cargo_audit_version}"
 sudo -u vscode env HOME=/home/vscode CARGO_TARGET_DIR=/home/vscode/.cache/cargo-target \
     /home/vscode/.cargo/bin/cargo install --locked "cargo-cyclonedx@${cargo_cyclonedx_version}"
+
+# For the `cargo-llvm-cov` pre-commit hook (tests/README.md's "Coverage
+# gate", docs/nfrs/NFR-0023-test-coverage-gate.md) -- needs the
+# `llvm-tools-preview` rustup component to instrument coverage, on top of
+# the cargo-installed subcommand itself.
+sudo -u vscode env HOME=/home/vscode /home/vscode/.cargo/bin/rustup component add llvm-tools-preview
+sudo -u vscode env HOME=/home/vscode CARGO_TARGET_DIR=/home/vscode/.cache/cargo-target \
+    /home/vscode/.cargo/bin/cargo install --locked "cargo-llvm-cov@${cargo_llvm_cov_version}"
 
 curl -LsSf "https://releases.astral.sh/github/uv/releases/download/${uv_version}/uv-installer.sh" \
     | sudo -u vscode env HOME=/home/vscode INSTALLER_NO_MODIFY_PATH=1 sh
