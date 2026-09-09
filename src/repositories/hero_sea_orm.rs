@@ -4,7 +4,7 @@
 
 use async_trait::async_trait;
 use chrono::Utc;
-use sea_orm::sea_query::{Condition, Expr, Func, SimpleExpr};
+use sea_orm::sea_query::{Condition, Expr, ExprTrait, Func, SimpleExpr};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter,
     QueryOrder, QuerySelect, Set,

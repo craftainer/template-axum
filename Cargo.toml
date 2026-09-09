@@ -44,8 +44,8 @@ tracing-subscriber = { version = "=0.3.23", features = ["json", "env-filter"] }
 # docs/plans/ for the phase 2 plan that adds the code using them.
 
 # Database ORM/migrations -- phase 2's Postgres-backed CRUD resource.
-sea-orm = { version = "=1.1.16", features = ["sqlx-postgres", "runtime-tokio-rustls", "macros", "postgres-array"] }
-sea-orm-migration = { version = "=1.1.16", features = ["runtime-tokio-rustls", "sqlx-postgres"] }
+sea-orm = { version = "=2.0.2", features = ["sqlx-postgres", "runtime-tokio-rustls", "macros", "postgres-array"] }
+sea-orm-migration = { version = "=2.0.2", features = ["runtime-tokio-rustls", "sqlx-postgres"] }
 
 # Cache client -- phase 2's Redis/Valkey-backed caching, and Tier B's
 # Redis-backed rate limiting (src/rate_limit.rs): "connection-manager" for a
