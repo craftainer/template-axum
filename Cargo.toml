@@ -32,7 +32,7 @@ path = "src/main.rs"
 axum = { version = "=0.8.9", features = ["json"] }
 tokio = { version = "=1.53.1", features = ["rt-multi-thread", "macros", "signal", "time"] }
 tower = "=0.5.3"
-tower-http = { version = "=0.6.11", features = ["trace"] }
+tower-http = { version = "=0.7.1", features = ["trace"] }
 
 # Structured JSON logging -- see docs/adrs/0007-structured-json-logging-only.md
 # in template-fastapi, ported to this instance's own docs in phase 3.
