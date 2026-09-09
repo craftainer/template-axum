@@ -73,7 +73,11 @@ oauth2 = "=5.0.0"
 # JWT decode since openidconnect's own verifier is tied to its own
 # authorization-flow-scoped nonce/state, not a bare bearer token on an
 # unrelated request.
-jsonwebtoken = "=9.3.1"
+# "aws_lc_rs": 11.x requires picking a CryptoProvider explicitly (no
+# longer implicit), and aws-lc-rs is already in the dependency graph via
+# rustls's default backend, so this reuses that copy rather than pulling
+# in rust_crypto's separate p256/p384/rsa/ed25519-dalek/sha2/hmac stack.
+jsonwebtoken = { version = "=11.0.0", features = ["aws_lc_rs"] }
 
 # HTTP client for OIDC discovery + JWKS fetch, and the OIDC health check --
 # default-features off, "rustls-tls" only, for the same
