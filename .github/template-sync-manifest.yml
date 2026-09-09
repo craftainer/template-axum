@@ -86,6 +86,7 @@ ignore:
   - Cargo.toml
   - Cargo.lock
   - src/
+  - tests/
   - .cargo/
 
   # Product/domain knowledge and working plans: instance-owned from the

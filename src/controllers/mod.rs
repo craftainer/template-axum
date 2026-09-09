@@ -3,6 +3,7 @@
 //! every layer below it, nothing may import from here.
 
 pub mod crud_actions;
+pub mod crud_events;
 pub mod crud_query;
 pub mod crud_stats;
 pub mod health;
@@ -14,6 +15,7 @@ use std::sync::Arc;
 
 use crate::config::Settings;
 use crate::crud::CrudService;
+use crate::events::EventBus;
 use crate::health::HealthRegistry;
 use crate::models::hero;
 use crate::oidc::{HasOidcVerifier, OidcVerifier};
@@ -44,7 +46,16 @@ pub struct AppState {
     pub health_registry: Arc<HealthRegistry>,
     pub hero_crud: Arc<CrudService<DynHeroRepository>>,
     pub rate_limiter: Arc<RateLimiter>,
+    /// CRUD event publish/subscribe backing `GET <prefix>/events`
+    /// (`docs/adrs/0016`) -- MQTT-backed, or an in-memory fan-out under
+    /// `Mode::Mock`.
+    pub events: Arc<EventBus>,
 }
+
+/// The resource segment Hero's events publish under
+/// (`crud-events/heroes`), shared by the JSON and XML sibling routers so
+/// both announce onto the same topic.
+pub const HERO_EVENT_RESOURCE: &str = "heroes";
 
 impl HasOidcVerifier for AppState {
     fn oidc_verifier(&self) -> &OidcVerifier {

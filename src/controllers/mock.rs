@@ -94,6 +94,8 @@ mod tests {
             s3_access_key: "rustfsadmin".to_string(),
             s3_secret_key: "rustfsadmin".to_string(),
             redis_url: "redis://localhost:6379/0".to_string(),
+            mqtt_host: "localhost".to_string(),
+            mqtt_port: 1883,
             rate_limit_mock_token_per_minute: 10,
             rate_limit_hero_write_per_minute: 20,
             bulk_action_max_matched: 1000,
@@ -111,6 +113,7 @@ mod tests {
                 Box::new(HeroMemoryRepository::new()),
             ))),
             rate_limiter: std::sync::Arc::new(crate::rate_limit::RateLimiter::mock()),
+            events: std::sync::Arc::new(crate::events::EventBus::mock()),
         };
         router().with_state(state)
     }
@@ -189,6 +192,7 @@ mod tests {
                 Box::new(HeroMemoryRepository::new()),
             ))),
             rate_limiter: std::sync::Arc::new(crate::rate_limit::RateLimiter::mock()),
+            events: std::sync::Arc::new(crate::events::EventBus::mock()),
         };
         let shared_app = router().with_state(state);
 
@@ -223,6 +227,8 @@ mod tests {
             s3_access_key: "rustfsadmin".to_string(),
             s3_secret_key: "rustfsadmin".to_string(),
             redis_url: "redis://localhost:6379/0".to_string(),
+            mqtt_host: "localhost".to_string(),
+            mqtt_port: 1883,
             rate_limit_mock_token_per_minute: 10,
             rate_limit_hero_write_per_minute: 20,
             bulk_action_max_matched: 1000,

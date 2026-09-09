@@ -21,12 +21,15 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 
 use crate::controllers::crud_actions::{DeleteOutcome, ListOrGet, UpdateOutcome};
+use crate::controllers::crud_events;
 use crate::controllers::crud_query::{parse_filters, parse_sort};
 use crate::controllers::heroes::{HERO_FIELD_SPECS, HERO_WRITE_RATE_SCOPE};
 use crate::controllers::{
-    crud_actions, AppState, HERO_DELETE_ROLES, HERO_READ_ROLES, HERO_WRITE_ROLES,
+    crud_actions, AppState, HERO_DELETE_ROLES, HERO_EVENT_RESOURCE, HERO_READ_ROLES,
+    HERO_WRITE_ROLES,
 };
 use crate::crud::DEFAULT_LIMIT;
+use crate::events::EventAction;
 use crate::oidc::AuthClaims;
 use crate::problem_details::AppError;
 use crate::views::hero::{HeroCreate, HeroListQuery, HeroUpdate};
@@ -125,6 +128,17 @@ async fn create(
     payload.validate().map_err(AppError::UnprocessableEntity)?;
     let owner_id = claims.subject()?.to_string();
     let hero = state.hero_crud.create(&owner_id, payload).await?;
+    // Onto the same `crud-events/heroes` topic the JSON sibling
+    // publishes to (docs/adrs/0016): a subscriber watches the *records*,
+    // and which representation a writer happened to use is not something
+    // it should have to care about.
+    crud_events::publish(
+        &state.events,
+        HERO_EVENT_RESOURCE,
+        EventAction::Create,
+        vec![hero.id],
+    )
+    .await;
     let response = xml_response("hero", &HeroReadXml::from(hero))?;
     Ok((StatusCode::CREATED, response).into_response())
 }
@@ -163,8 +177,26 @@ async fn update(
     )
     .await?
     {
-        UpdateOutcome::One(hero) => xml_response("hero", &HeroReadXml::from(hero)),
-        UpdateOutcome::Bulk(result) => xml_response("bulk_update_result", &result),
+        UpdateOutcome::One(hero) => {
+            crud_events::publish(
+                &state.events,
+                HERO_EVENT_RESOURCE,
+                EventAction::Update,
+                vec![hero.id],
+            )
+            .await;
+            xml_response("hero", &HeroReadXml::from(hero))
+        }
+        UpdateOutcome::Bulk(result) => {
+            crud_events::publish(
+                &state.events,
+                HERO_EVENT_RESOURCE,
+                EventAction::UpdateMany,
+                result.ids.clone(),
+            )
+            .await;
+            xml_response("bulk_update_result", &result)
+        }
     }
 }
 
@@ -198,8 +230,22 @@ async fn delete_hero(
     )
     .await?
     {
-        DeleteOutcome::One => Ok(StatusCode::NO_CONTENT.into_response()),
-        DeleteOutcome::Bulk(result) => xml_response("bulk_delete_result", &result),
+        DeleteOutcome::One => {
+            let ids = query.id.into_iter().collect();
+            crud_events::publish(&state.events, HERO_EVENT_RESOURCE, EventAction::Delete, ids)
+                .await;
+            Ok(StatusCode::NO_CONTENT.into_response())
+        }
+        DeleteOutcome::Bulk(result) => {
+            crud_events::publish(
+                &state.events,
+                HERO_EVENT_RESOURCE,
+                EventAction::DeleteMany,
+                result.ids.clone(),
+            )
+            .await;
+            xml_response("bulk_delete_result", &result)
+        }
     }
 }
 
@@ -241,6 +287,8 @@ mod tests {
             s3_access_key: "rustfsadmin".to_string(),
             s3_secret_key: "rustfsadmin".to_string(),
             redis_url: "redis://localhost:6379/0".to_string(),
+            mqtt_host: "localhost".to_string(),
+            mqtt_port: 1883,
             rate_limit_mock_token_per_minute: 10,
             rate_limit_hero_write_per_minute: 20,
             bulk_action_max_matched: 1000,
@@ -262,6 +310,7 @@ mod tests {
                 HeroMemoryRepository::new(),
             )))),
             rate_limiter: Arc::new(RateLimiter::mock()),
+            events: Arc::new(crate::events::EventBus::mock()),
         };
         router().with_state(state)
     }

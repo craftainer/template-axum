@@ -76,6 +76,9 @@ repos:
 
       - id: cargo-test
         name: cargo test
+        # Runs the unit tier (src/'s colocated `mod tests`) and the
+        # integration tier (tests/), which reaches the devcontainer
+        # stack's own Postgres and MQTT services -- see tests/README.md.
         entry: cargo test
         language: system
         pass_filenames: false
@@ -83,12 +86,14 @@ repos:
         stages: [pre-push, manual]
 
       - id: cargo-llvm-cov
-        name: cargo llvm-cov (80% line-coverage floor)
+        name: cargo llvm-cov (92% line-coverage floor)
         # See docs/adrs/0010-80-percent-line-coverage-floor-via-cargo-llvm-cov.md
-        # for why 80%, not template-fastapi's 95%, and
+        # for why this number rather than template-fastapi's 95%, and
         # docs/nfrs/NFR-0023-test-coverage-gate.md for the requirement
-        # this enforces.
-        entry: cargo llvm-cov --fail-under-lines 80
+        # this enforces. Raised from 80 to 92 when the integration tier
+        # (tests/) landed -- which also means this hook now needs the
+        # devcontainer stack's Postgres and MQTT services running.
+        entry: cargo llvm-cov --fail-under-lines 92
         language: system
         pass_filenames: false
         always_run: true

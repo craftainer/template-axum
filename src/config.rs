@@ -64,6 +64,14 @@ pub struct Settings {
 
     pub redis_url: String,
 
+    /// The MQTT broker backing the CRUD event stream (`src/events.rs`,
+    /// `docs/adrs/0016`). Host/port rather than a URL, matching rumqttc's
+    /// own `MqttOptions::new(id, host, port)` shape -- there is no
+    /// credential here to protect, so `validate()`'s production checks have
+    /// nothing to add beyond what the stack's own network isolation gives.
+    pub mqtt_host: String,
+    pub mqtt_port: u16,
+
     /// Requests per 60s window a caller may make to `POST /mock/token`
     /// before `AppError::TooManyRequests` (`src/rate_limit.rs`) -- mirrors
     /// `config.py`'s `rate_limit_mock_token` ("10/minute"), as a bare count
@@ -115,6 +123,11 @@ impl Settings {
                 .unwrap_or_else(|_| "rustfsadmin".to_string()),
 
             redis_url: env_or("REDIS_URL", "redis://localhost:6379/0"),
+
+            mqtt_host: env_or("MQTT_HOST", "localhost"),
+            mqtt_port: env_or("MQTT_PORT", "1883")
+                .parse()
+                .map_err(|_| "MQTT_PORT must be a valid port number".to_string())?,
 
             rate_limit_mock_token_per_minute: env_or("RATE_LIMIT_MOCK_TOKEN_PER_MINUTE", "10")
                 .parse()
@@ -245,7 +258,18 @@ mod tests {
         for key in [
             "MODE",
             "ALLOW_MOCK_MODE",
+            // Every POSTGRES_*/MQTT_* key, not just the ones a test sets:
+            // the devcontainer exports POSTGRES_HOST=postgres and
+            // MQTT_HOST=mqtt into the process these tests run in, so a
+            // test asserting on a *default* has to clear the ambient value
+            // first or it reads the stack's, not the default.
+            "POSTGRES_USER",
             "POSTGRES_PASSWORD",
+            "POSTGRES_DB",
+            "POSTGRES_HOST",
+            "POSTGRES_PORT",
+            "MQTT_HOST",
+            "MQTT_PORT",
             "RUSTFS_ACCESS_KEY",
             "S3_ACCESS_KEY",
             "RUSTFS_SECRET_KEY",

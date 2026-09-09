@@ -8,18 +8,21 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 
 use axum::extract::{ConnectInfo, Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 
 use crate::controllers::crud_actions::{DeleteOutcome, ListOrGet, UpdateOutcome};
+use crate::controllers::crud_events::{self, EventSse};
 use crate::controllers::crud_query::{parse_filters, parse_sort, FieldSpec};
 use crate::controllers::crud_stats;
 use crate::controllers::{
-    crud_actions, AppState, HERO_DELETE_ROLES, HERO_READ_ROLES, HERO_WRITE_ROLES,
+    crud_actions, AppState, HERO_DELETE_ROLES, HERO_EVENT_RESOURCE, HERO_READ_ROLES,
+    HERO_WRITE_ROLES,
 };
 use crate::crud::DEFAULT_LIMIT;
+use crate::events::EventAction;
 use crate::models::hero;
 use crate::oidc::AuthClaims;
 use crate::problem_details::AppError;
@@ -118,6 +121,16 @@ async fn create(
     payload.validate().map_err(AppError::UnprocessableEntity)?;
     let owner_id = claims.subject()?.to_string();
     let hero = state.hero_crud.create(&owner_id, payload).await?;
+    // Announced only after the write actually succeeded, and never able to
+    // fail it (docs/adrs/0016) -- a subscriber is told about records that
+    // exist, not about attempts.
+    crud_events::publish(
+        &state.events,
+        HERO_EVENT_RESOURCE,
+        EventAction::Create,
+        vec![hero.id],
+    )
+    .await;
     Ok((StatusCode::CREATED, Json(HeroRead::from(hero))))
 }
 
@@ -159,10 +172,28 @@ async fn update(
     )
     .await?
     {
-        UpdateOutcome::One(hero) => Ok(Json(hero_read_json(hero))),
-        UpdateOutcome::Bulk(result) => Ok(Json(
-            serde_json::to_value(result).expect("BulkUpdateResult always serializes"),
-        )),
+        UpdateOutcome::One(hero) => {
+            crud_events::publish(
+                &state.events,
+                HERO_EVENT_RESOURCE,
+                EventAction::Update,
+                vec![hero.id],
+            )
+            .await;
+            Ok(Json(hero_read_json(hero)))
+        }
+        UpdateOutcome::Bulk(result) => {
+            crud_events::publish(
+                &state.events,
+                HERO_EVENT_RESOURCE,
+                EventAction::UpdateMany,
+                result.ids.clone(),
+            )
+            .await;
+            Ok(Json(
+                serde_json::to_value(result).expect("BulkUpdateResult always serializes"),
+            ))
+        }
     }
 }
 
@@ -202,8 +233,25 @@ async fn delete_hero(
     )
     .await?
     {
-        DeleteOutcome::One => Ok(StatusCode::NO_CONTENT.into_response()),
-        DeleteOutcome::Bulk(result) => Ok(Json(result).into_response()),
+        DeleteOutcome::One => {
+            // `DeleteOutcome::One` is only reachable when `query.id` was
+            // `Some` (see `crud_actions::resolve_delete`), so the id the
+            // event announces is the one the caller addressed.
+            let ids = query.id.into_iter().collect();
+            crud_events::publish(&state.events, HERO_EVENT_RESOURCE, EventAction::Delete, ids)
+                .await;
+            Ok(StatusCode::NO_CONTENT.into_response())
+        }
+        DeleteOutcome::Bulk(result) => {
+            crud_events::publish(
+                &state.events,
+                HERO_EVENT_RESOURCE,
+                EventAction::DeleteMany,
+                result.ids.clone(),
+            )
+            .await;
+            Ok(Json(result).into_response())
+        }
     }
 }
 
@@ -436,10 +484,43 @@ async fn get_prediction(
     }))
 }
 
+#[derive(serde::Deserialize)]
+struct EventsQuery {
+    subscriber_id: Option<String>,
+}
+
+/// `GET /events` -- a Server-Sent Events stream of this resource's
+/// create/update/delete activity (`docs/adrs/0016`, FR-0030).
+///
+/// The first frame carries the `subscriber_id` this connection was issued;
+/// sending it back (`?subscriber_id=`, or automatically via
+/// `Last-Event-ID`) on reconnect resumes the same persistent MQTT session,
+/// which is what replays events published while the client was away. A
+/// client that discards it gets a working stream with no replay.
+///
+/// JSON-only: there is no XML sibling of this route (`docs/adrs/0017` in
+/// the reference), since `text/event-stream` frames carry JSON payloads.
+async fn events(
+    State(state): State<AppState>,
+    AuthClaims(claims): AuthClaims,
+    Query(query): Query<EventsQuery>,
+    headers: HeaderMap,
+) -> Result<EventSse, AppError> {
+    claims.require_any_role(&state.settings.oidc_client_id, HERO_READ_ROLES)?;
+    crud_events::event_stream(
+        &state.events,
+        HERO_EVENT_RESOURCE,
+        query.subscriber_id.as_deref(),
+        &headers,
+    )
+    .await
+}
+
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/stats", get(get_stats))
         .route("/predict", get(get_prediction))
+        .route("/events", get(events))
         .route(
             "/",
             get(list_or_get)
@@ -476,6 +557,8 @@ mod tests {
             s3_access_key: "rustfsadmin".to_string(),
             s3_secret_key: "rustfsadmin".to_string(),
             redis_url: "redis://localhost:6379/0".to_string(),
+            mqtt_host: "localhost".to_string(),
+            mqtt_port: 1883,
             rate_limit_mock_token_per_minute: 10,
             rate_limit_hero_write_per_minute: 20,
             bulk_action_max_matched: 1000,
@@ -497,6 +580,7 @@ mod tests {
                 HeroMemoryRepository::new(),
             )))),
             rate_limiter: Arc::new(crate::rate_limit::RateLimiter::mock()),
+            events: Arc::new(crate::events::EventBus::mock()),
         };
         router().with_state(state)
     }
@@ -752,6 +836,7 @@ mod tests {
                 HeroMemoryRepository::new(),
             )))),
             rate_limiter: Arc::new(crate::rate_limit::RateLimiter::mock()),
+            events: Arc::new(crate::events::EventBus::mock()),
         };
         let shared_app = router().with_state(state);
 
@@ -1209,5 +1294,183 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(predict.status(), StatusCode::FORBIDDEN);
+    }
+
+    // -- /events (docs/adrs/0016, FR-0030). The Mode::Mock bus these run
+    // against has no broker and no replay by design (NFR-0029), so what is
+    // covered here is the route: auth, the subscriber frame, and that a
+    // mutation actually publishes. The delivery guarantee itself is
+    // verified only by tests/mqtt_events.rs, against the real broker.
+
+    /// Read up to `count` non-keep-alive SSE frames from a response.
+    async fn sse_frames(response: axum::response::Response, count: usize) -> String {
+        use futures::StreamExt;
+        let mut body = response.into_body().into_data_stream();
+        let mut collected = String::new();
+        let mut seen = 0;
+        while seen < count {
+            let Ok(Some(Ok(chunk))) =
+                tokio::time::timeout(std::time::Duration::from_millis(500), body.next()).await
+            else {
+                break;
+            };
+            let chunk = String::from_utf8_lossy(&chunk).to_string();
+            if chunk.starts_with(':') {
+                continue;
+            }
+            collected.push_str(&chunk);
+            seen += 1;
+        }
+        collected
+    }
+
+    #[tokio::test]
+    async fn events_stream_starts_with_a_subscriber_frame() {
+        let response = app()
+            .oneshot(authed(
+                "GET",
+                "/events?subscriber_id=my-sub",
+                "alice",
+                &["viewer"],
+                serde_json::Value::Null,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get("content-type")
+                .and_then(|value| value.to_str().ok()),
+            Some("text/event-stream")
+        );
+        let body = sse_frames(response, 1).await;
+        assert!(body.contains("event: subscriber"), "{body}");
+        assert!(body.contains("id: my-sub"), "{body}");
+        assert!(body.contains(r#"{"subscriber_id":"my-sub"}"#), "{body}");
+    }
+
+    #[tokio::test]
+    async fn events_issues_a_subscriber_id_when_the_client_supplies_none() {
+        let response = app()
+            .oneshot(authed(
+                "GET",
+                "/events",
+                "alice",
+                &["viewer"],
+                serde_json::Value::Null,
+            ))
+            .await
+            .unwrap();
+        let body = sse_frames(response, 1).await;
+        assert!(body.contains("event: subscriber"), "{body}");
+        assert!(body.contains("subscriber_id"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn events_requires_a_read_role_and_a_token() {
+        let forbidden = app()
+            .oneshot(authed(
+                "GET",
+                "/events",
+                "alice",
+                &["security"],
+                serde_json::Value::Null,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
+
+        let unauthorized = app()
+            .oneshot(
+                Request::builder()
+                    .uri("/events")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn a_created_hero_is_announced_on_the_event_stream() {
+        // One shared app (and therefore one shared EventBus) so the POST's
+        // publish reaches the stream opened from the same state.
+        let shared_app = app();
+        let stream = shared_app
+            .clone()
+            .oneshot(authed(
+                "GET",
+                "/events?subscriber_id=watcher",
+                "alice",
+                &["viewer"],
+                serde_json::Value::Null,
+            ))
+            .await
+            .unwrap();
+
+        let created = shared_app
+            .oneshot(authed(
+                "POST",
+                "/",
+                "alice",
+                &["editor"],
+                serde_json::from_str(VALID_HERO).unwrap(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(created.status(), StatusCode::CREATED);
+
+        let body = sse_frames(stream, 2).await;
+        assert!(body.contains("event: create"), "{body}");
+        assert!(body.contains(r#""resource":"heroes""#), "{body}");
+        assert!(body.contains("id: watcher"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn a_bulk_delete_is_announced_with_every_affected_id() {
+        let shared_app = app();
+        let id_a = create_hero(
+            &shared_app,
+            "alice",
+            serde_json::json!({"name": "A", "powers": ["x"], "power_level": 7}),
+        )
+        .await;
+        let id_b = create_hero(
+            &shared_app,
+            "alice",
+            serde_json::json!({"name": "B", "powers": ["x"], "power_level": 7}),
+        )
+        .await;
+
+        let stream = shared_app
+            .clone()
+            .oneshot(authed(
+                "GET",
+                "/events?subscriber_id=watcher",
+                "alice",
+                &["viewer"],
+                serde_json::Value::Null,
+            ))
+            .await
+            .unwrap();
+
+        let deleted = shared_app
+            .oneshot(authed(
+                "DELETE",
+                "/?power_level=7",
+                "alice",
+                &["maintainer"],
+                serde_json::Value::Null,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(deleted.status(), StatusCode::OK);
+
+        let body = sse_frames(stream, 2).await;
+        assert!(body.contains("event: delete_many"), "{body}");
+        assert!(body.contains(&format!("{id_a}")), "{body}");
+        assert!(body.contains(&format!("{id_b}")), "{body}");
     }
 }

@@ -14,6 +14,15 @@ edition = "2021"
 rust-version = "1.91"
 publish = false
 
+# Both a library and a binary: src/lib.rs holds every module plus the
+# router/state wiring, and src/main.rs is a thin entry point over it. The
+# library target is what makes tests/'s integration tier possible at all --
+# Cargo integration tests link against a crate's public API, which a
+# bin-only package doesn't have (see tests/README.md).
+[lib]
+name = "template_axum"
+path = "src/lib.rs"
+
 [[bin]]
 name = "template-axum"
 path = "src/main.rs"
@@ -100,6 +109,24 @@ quick-xml = { version = "=0.42.0", features = ["serialize"] }
 # claims as-is" path needs a bare base64url decode of the JWT payload
 # segment instead.
 base64 = "=0.22.1"
+
+# MQTT client backing the CRUD event stream (src/events.rs) -- see
+# docs/adrs/0016-mqtt-backed-sse-crud-event-stream.md for why rumqttc (pure
+# Rust, tokio-native AsyncClient/EventLoop pair) rather than the paho-mqtt C
+# bindings. default-features off: rumqttc's default "use-rustls" feature
+# pulls in its own rustls/tokio-rustls copy for TLS-to-broker support this
+# app doesn't use (the broker is an in-network, plaintext:1883 stack
+# service), and keeping a single rustls copy in the graph is the same
+# reasoning aws-sdk-s3/reqwest above are configured with.
+rumqttc = { version = "=0.25.1", default-features = false }
+
+# Subscriber-id generation for the event stream (src/events.rs): a
+# subscriber id is a capability (whoever holds it resumes that persistent
+# MQTT session), so it comes from the OS CSPRNG, not a counter. getrandom
+# directly rather than uuid/rand -- the id is an opaque string this app
+# never parses, so a UUID's formatting/versioning machinery would buy
+# nothing over 128 hex-encoded random bits.
+getrandom = "=0.3.4"
 
 [dev-dependencies]
 tower = { version = "=0.5.2", features = ["util"] }

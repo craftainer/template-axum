@@ -1,4 +1,4 @@
-# NFR-0023. Enforce an 80% automated line-coverage gate
+# NFR-0023. Enforce a 92% automated line-coverage gate
 
 ## Status
 
@@ -10,16 +10,20 @@ Quality / process.
 
 ## Description
 
-`cargo llvm-cov` shall fail below 80% line coverage of `src/`, measured
-over the unit test tier (`cargo test`). See
+`cargo llvm-cov` shall fail below 92% line coverage of `src/`, measured
+over the unit **and** integration tiers (`cargo test`, which builds
+both -- see `tests/README.md`). See
 `docs/adrs/0010-80-percent-line-coverage-floor-via-cargo-llvm-cov.md`
-for why 80%, not template-fastapi's 95% — a deliberate, justified
+for why 92%, not template-fastapi's 95% — a deliberate, justified
 choice given Rust's compile-time guarantees, not a blind copy of the
-Python original's figure. As the integration/e2e tiers (`tests/README.md`'s
-"What's not here yet") are added, their coverage should fold into the
-same gate the way template-fastapi's `tests/unit` + `tests/integration`
-combine into one run — this NFR's floor may be revisited once that
-happens.
+Python original's figure. The floor was 80% while the unit tier was the
+only one collected; the integration tier's coverage now folds into the
+same run, the way template-fastapi's `tests/unit` + `tests/integration`
+do. It may be revisited again if an e2e/perf tier is added.
+
+Because the integration tier reaches real services, this gate now
+requires the devcontainer stack's Postgres and MQTT services to be
+running — it is no longer satisfiable with zero containers.
 
 ## Source
 
@@ -31,5 +35,5 @@ gate" section.
 
 CI runs `prek run --all-files --hook-stage manual` (`.github/workflows/
 checks.yml`), which includes the `cargo-llvm-cov` hook and fails the
-build if coverage drops below 80%. Locally: `cargo llvm-cov
---fail-under-lines 80`.
+build if coverage drops below 92%. Locally: `cargo llvm-cov
+--fail-under-lines 92`.

@@ -17,15 +17,19 @@ each with its own `README.md`:
   Keycloak client-role RBAC.
 - `migration/` — SeaORM migrations, applied automatically at startup.
 
-`config.rs`/`main.rs`/`telemetry.rs`/`problem_details.rs`/
-`rate_limit.rs`/`http_headers.rs` stay flat, outside any submodule —
-each has no resource-specific code and no state of its own beyond
-what it's explicitly passed or reads from `config::Settings`.
+`config.rs`/`lib.rs`/`main.rs`/`telemetry.rs`/`problem_details.rs`/
+`rate_limit.rs`/`events.rs`/`http_headers.rs` stay flat, outside any
+submodule — each has no resource-specific code and no state of its own
+beyond what it's explicitly passed or reads from `config::Settings`.
 
 - `config.rs` — settings, read from environment variables only; see
   "Configuration" and "MODE" below.
-- `main.rs` — process entry point: settings, migrations, health
-  registry, OIDC verifier, and router wiring.
+- `lib.rs` — the crate's library target: every module declaration plus
+  the wiring (`build_state`, `build_router`, `build_event_bus`,
+  `build_health_registry`, `run_migrations`). See "Library and binary"
+  below.
+- `main.rs` — process entry point, deliberately thin: it only reads
+  settings and calls `lib.rs`'s wiring.
 - `telemetry.rs` — structured JSON logging setup; see "Structured
   logging" below.
 - `problem_details.rs` — the single `AppError` type and its RFC 9457
@@ -34,17 +38,54 @@ what it's explicitly passed or reads from `config::Settings`.
   `Mode::Mock`) per-caller rate limiter checked inline by Hero's
   create/update/delete handlers and `POST /mock/token`; see
   `docs/adrs/0011`.
+- `events.rs` — `EventBus`/`EventStream`, the MQTT-backed (in-memory
+  `tokio::sync::broadcast` fan-out under `Mode::Mock`) publish/subscribe
+  behind `GET <prefix>/events`; see "CRUD event stream" below and
+  `docs/adrs/0016`.
 - `http_headers.rs` — `Sunset`, an `IntoResponseParts` type a handler
   combines into its return value to attach RFC 8594 `Sunset`/
   `Deprecation`/`Link` headers; not yet used by any route (see
   `docs/adrs/0012`).
+
+## Library and binary
+
+This package builds both a `[lib]` (`lib.rs`, crate name
+`template_axum`) and a `[[bin]]` (`main.rs`). The split exists so
+`tests/`' integration tier can link against the crate's public API and
+build the *same* router the binary serves, rather than a test-only
+lookalike — Cargo integration tests cannot reach into a bin-only crate
+at all. See `docs/adrs/0016` and `tests/README.md`.
+
+Practical consequence: everything a test or the binary needs is `pub`
+from `lib.rs`, and `main.rs` refers to it as `template_axum::...`, not
+`crate::...`.
+
+## CRUD event stream
+
+`GET /crud/v1/heroes/v2/json/events` is a Server-Sent Events stream of
+Hero create/update/delete activity (FR-0030). `controllers::crud_events`
+holds the resource-agnostic half (subscriber-id resolution, frame shape,
+the publish helper); `events.rs` holds the transport.
+
+The delivery guarantee is narrow and deliberate: a subscriber that
+reconnects with the same `subscriber_id` gets everything published while
+it was away, because that id *is* the client id of a persistent,
+QoS-1 MQTT session. A client that discards it gets no replay, silently.
+`Mode::Mock` has no broker and no replay at all. `docs/adrs/0016`,
+`docs/nfrs/NFR-0029` and `events.rs`'s module doc all state this; don't
+paraphrase it into something broader.
+
+A mutating handler announces its own event inline (`crud_events::
+publish`) the way it checks its own rate limit — `crud::CrudService`
+stays free of infrastructure concerns (NFR-0004). Publishing never fails
+the request that triggered it.
 
 ## Layering
 
 Import order between all of the above is strict and one-directional —
 lower layers never import from higher ones: `config` → `oidc` →
 `models` → `views` → `repositories` → `crud` → `health` →
-`controllers` → `main`. See `docs/adrs/0009-strict-module-layering-by-
+`controllers` → `lib`/`main`. See `docs/adrs/0009-strict-module-layering-by-
 convention-and-visibility.md` for how this is enforced (by convention
 plus each module's own doc comment, not an automated lint — a
 documented gap against the stricter enforcement template-fastapi's
@@ -53,7 +94,7 @@ documented gap against the stricter enforcement template-fastapi's
 ```mermaid
 graph LR
     config --> oidc --> models --> views --> repositories --> crud
-    crud --> health --> controllers --> main
+    crud --> health --> controllers --> lib --> main
 ```
 
 An arrow means "may import from" — each module may depend on anything
@@ -104,11 +145,11 @@ oidc_client_id, SOME_ROLE_SET)?`.
 `config::Mode` (env var `MODE`) is `dev`, `mock`, or `production`, read
 once in `main()`.
 
-- `dev` (default): real Postgres/Redis/S3/OIDC backends.
+- `dev` (default): real Postgres/Redis/S3/OIDC/MQTT backends.
 - `mock`: every external service is replaced with a local fake — the
-  in-memory Hero repository, always-healthy mock health checks, and
-  unverified bearer-token trust — so the app needs zero containers to
-  boot. Requires `ALLOW_MOCK_MODE=1` (`Settings::allow_mock_mode`), so
+  in-memory Hero repository, always-healthy mock health checks, an
+  in-memory event bus, and unverified bearer-token trust — so the app
+  needs zero containers to boot. Requires `ALLOW_MOCK_MODE=1` (`Settings::allow_mock_mode`), so
   this mode can never be reached by `MODE`'s own default/typo alone.
   `POST /mock/token` (`controllers::mock`, mounted only in this mode)
   mints a Keycloak-shaped token so RBAC is exercisable without
@@ -188,7 +229,9 @@ restricted to the caller's own `sub`) and soft delete via an
 - Add auth to a new route by taking `oidc::AuthClaims` as a handler
   parameter — a handler with no such parameter is public.
 - Register a new external service's health check with
-  `HealthRegistry::register` in `main.rs::build_health_registry`.
+  `HealthRegistry::register` in `lib.rs::build_health_registry`.
+- Give a new resource an event stream by adding one `/events` route and
+  one resource-name constant — `controllers::crud_events` is generic.
 
 ## Don't
 

@@ -20,29 +20,60 @@ directory tree, so this instance's four tiers live in different places:
   JWT). Following upstream Rust convention rather than departing from
   template-fastapi's own layout for a project-specific reason, so this
   particular choice doesn't need its own ADR.
-- **integration**, **e2e**, **perf** — not yet built; see "What's not
-  here yet" below for what each will look like and why they were
-  deferred.
+- **integration** — this directory. Cargo's own "integration test"
+  convention: a black-box binary per file, linked against the crate's
+  public API only (`src/lib.rs` — the `[lib]`/`[[bin]]` split that makes
+  this possible is `docs/adrs/0016`). Each file reaches the **real**
+  devcontainer stack services (`.devcontainer/stack/`), never a
+  container the suite starts itself:
+  - `postgres_hero_repository.rs` — `repositories::hero_sea_orm` against
+    live Postgres: what the operators actually *mean* (`__icontains`
+    case folding, `__in` membership, NULL ordering, the archived-row
+    visibility rule, bulk update/delete round trips), where the
+    colocated unit tests stop at the SQL text SeaORM renders.
+  - `postgres_stats_predict.rs` — `/stats` and `/predict` over HTTP
+    against live Postgres, including the multi-bucket `/predict` happy
+    path that needs backdated `created_at` values.
+  - `mqtt_events.rs` — the CRUD event stream against live Mosquitto.
+    The only place NFR-0029's persistent-session replay guarantee can be
+    verified at all (`Mode::Mock`'s bus has no broker).
+  - `common/mod.rs` — shared fixtures. Not a test binary (Cargo treats a
+    subdirectory `mod.rs` as a module, not a target).
+- **e2e**, **perf** — not yet built; see "What's not here yet" below.
 
-This top-level `tests/` directory itself is reserved for Cargo's own
-"integration test" convention (a black-box binary per file, linked
-against the crate's public API only) once the integration tier
-(real Postgres/Redis/S3/Keycloak, see `.devcontainer/stack/`) is built —
-that's *why* it's the natural home for what template-fastapi calls
-`tests/integration`, unlike unit tests, which Rust convention keeps
-inside `src/`.
+### Isolation and test-only helpers
+
+Every Postgres test runs in a schema of its own
+(`common::IsolatedDb`, via a `search_path` connection option) with the
+app's real migrations applied into it, so tests that assert on
+whole-table aggregates run in parallel and share nothing with the dev
+database. MQTT tests use a per-run topic/resource name for the same
+reason.
+
+`common::seed_hero_at` writes a Hero row with a caller-chosen
+`created_at`. It is deliberately test-only and not reachable from any
+production path: `HeroSeaOrmRepository::create` always stamps
+`Utc::now()` (FR-0007), which is exactly why `/predict`'s multi-bucket
+happy path had no end-to-end coverage before.
 
 ## Coverage gate
 
-`cargo llvm-cov --fail-under-lines 80` measures `src/`'s line coverage
-across the unit tier (currently the only tier collected) and fails
-below an 80% floor — see `docs/nfrs/NFR-0023-test-coverage-gate.md` for
-why 80%, not template-fastapi's 95%: Rust's type system statically
-rules out a class of bug the Python floor is partly there to catch at
-runtime, so the same number would be cargo-culted, not justified.
+`cargo llvm-cov --fail-under-lines 92` measures `src/`'s line coverage
+across the unit **and** integration tiers and fails below a 92% floor —
+see `docs/nfrs/NFR-0023-test-coverage-gate.md` and
+`docs/adrs/0010-80-percent-line-coverage-floor-via-cargo-llvm-cov.md`
+for why this number rather than template-fastapi's 95%: Rust's type
+system statically rules out a class of bug the Python floor is partly
+there to catch at runtime, so the same number would be cargo-culted, not
+justified. (The floor was 80% while the unit tier was the only one
+collected; that ADR records the raise and what stays deliberately
+uncovered.)
+
+Because the integration tier reaches real services, this command now
+needs the devcontainer stack's Postgres and MQTT running.
 
 ```bash
-cargo llvm-cov --fail-under-lines 80
+cargo llvm-cov --fail-under-lines 92
 ```
 
 Wired into `.pre-commit-config.yaml` as `cargo-llvm-cov`, `pre-push`/
@@ -53,21 +84,20 @@ instrumented test-suite run.
 
 ## What's not here yet
 
-Tier B (integration, against the real devcontainer stack) and Tier C
-(e2e-equivalent + perf) from the phase-3 test-suite plan were not
-reached in this pass — Tier A (unit tests + the coverage gate) was the
-"must complete" tier, and the remaining budget went to making it
-thorough (every FR-0003 validation branch, the full FR-0015 role
-matrix, health-check isolation/concurrency, config fail-fast on every
-production setting) rather than starting Tier B half-finished. Adding
-them later means: a `tests/integration/` Cargo integration-test binary
-(or `#[cfg(feature = "integration")]` block) reaching the real stack
-services per `docs/adrs/0005-mode-driven-fakes-for-infrastructure-free-
-testing.md`'s "when this isn't the right layer" note, then the e2e/perf
-tiers noted above.
+The e2e-equivalent and perf tiers. Tier A (unit) and Tier B
+(integration, this directory) are built; what remains is a
+browser/HTTP-client-driven end-to-end tier against a running server and
+a load-test tier. Nothing here reaches Keycloak or S3/RustFS yet
+either — the integration tier mints its own `Mode::Mock` bearer tokens
+(FR-0017) rather than standing up a Keycloak client, since the tiers
+under test are the repository and the HTTP handlers, not token
+validation (which `oidc` unit-tests directly).
 
 ## Do
 
+- Put a test that needs a real backing service in this directory, as its
+  own `tests/<name>.rs` binary, and give it an isolated schema/topic —
+  never a shared one.
 - Add a new module's unit tests as a `#[cfg(test)] mod tests` block at
   the bottom of that module's own file, matching every existing module
   under `src/`.
@@ -82,6 +112,8 @@ tiers noted above.
 ## Don't
 
 - Reach a real Postgres/Redis/S3/Keycloak from a `src/` unit test — that
-  belongs in the not-yet-built integration tier once it lands.
+  belongs in this directory's integration tier.
+- Start a container from a test. Use the devcontainer stack's own
+  already-running services (see the root `README.md`).
 - Depend on test execution order or leak state between tests (a set env
   var, a mutated static) without a lock guard.
