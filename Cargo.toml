@@ -126,7 +126,7 @@ rumqttc = { version = "=0.25.1", default-features = false }
 # directly rather than uuid/rand -- the id is an opaque string this app
 # never parses, so a UUID's formatting/versioning machinery would buy
 # nothing over 128 hex-encoded random bits.
-getrandom = "=0.3.4"
+getrandom = "=0.4.3"
 
 [dev-dependencies]
 tower = { version = "=0.5.3", features = ["util"] }
