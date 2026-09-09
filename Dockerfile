@@ -9,7 +9,7 @@ ARG DEBIAN_VERSION=trixie
 # three stages compile with an identical compiler -- mirrors template-fastapi's
 # own PYTHON_VERSION pattern.
 # renovate: datasource=docker depName=rust
-ARG RUST_VERSION=1.91.1
+ARG RUST_VERSION=1.98.1
 
 # renovate: datasource=github-releases depName=rust-lang/rustup
 ARG RUSTUP_VERSION=1.28.2

@@ -11,7 +11,7 @@ members = ["."]
 name = "template-axum"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.91"
+rust-version = "1.98"
 publish = false
 
 # Both a library and a binary: src/lib.rs holds every module plus the
