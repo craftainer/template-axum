@@ -71,8 +71,8 @@ impl RateLimiter {
     pub async fn connect(redis_url: &str) -> Result<Self, redis::RedisError> {
         let client = redis::Client::open(redis_url)?;
         let config = ConnectionManagerConfig::new()
-            .set_connection_timeout(REDIS_TIMEOUT)
-            .set_response_timeout(REDIS_TIMEOUT)
+            .set_connection_timeout(Some(REDIS_TIMEOUT))
+            .set_response_timeout(Some(REDIS_TIMEOUT))
             .set_number_of_retries(1);
         let manager = ConnectionManager::new_with_config(client, config).await?;
         Ok(Self {
