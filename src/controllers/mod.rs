@@ -2,12 +2,16 @@
 //! itself (see `src/README.md`'s "Layering" section) -- may import from
 //! every layer below it, nothing may import from here.
 
+pub mod audit;
 pub mod crud_actions;
 pub mod crud_events;
 pub mod crud_query;
 pub mod crud_stats;
 pub mod health;
 pub mod heroes;
+pub mod heroes_v1;
+pub mod heroes_v1_xml;
+pub mod heroes_web;
 pub mod heroes_xml;
 pub mod mock;
 

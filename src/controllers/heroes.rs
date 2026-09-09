@@ -684,6 +684,28 @@ mod tests {
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
+    // -- NFR-0026: current-version (/v2) routes carry none of the
+    // Sunset/Deprecation/Link headers the deprecated v1 compat routers
+    // (`controllers::heroes_v1`/`heroes_v1_xml`) attach to every response.
+
+    #[tokio::test]
+    async fn current_version_responses_carry_no_deprecation_headers() {
+        let response = app()
+            .oneshot(authed(
+                "GET",
+                "/",
+                "alice",
+                &["viewer"],
+                serde_json::Value::Null,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(response.headers().get("deprecation").is_none());
+        assert!(response.headers().get("sunset").is_none());
+        assert!(response.headers().get("link").is_none());
+    }
+
     #[tokio::test]
     async fn write_roles_can_create_but_viewer_and_detective_cannot() {
         for role in ["editor", "maintainer"] {

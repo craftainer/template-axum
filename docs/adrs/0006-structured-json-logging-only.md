@@ -35,7 +35,16 @@ the Python original accepts it, on the reasoning that a structured-only
 default is more valuable long-term than a nicer local dev experience,
 and `RUST_LOG=debug` plus `jq` covers the difference when needed.
 
-No OTLP log export exists in this phase (unlike template-fastapi's
-optional bridge) -- deferred; wiring one is additive (a second
-`tracing_subscriber::Layer`) and doesn't change this decision's shape if
-added later.
+Optional OTLP log export (`FR-0035`) later filled in the deferred gap
+this section originally described: `telemetry::configure_logging`
+attaches a second `tracing_subscriber::Layer`
+(`opentelemetry-appender-tracing`'s `OpenTelemetryTracingBridge`,
+forwarding every `tracing` event to a `SdkLoggerProvider`/
+`BatchLogProcessor` over OTLP/HTTP) whenever `OTEL_EXPORTER_OTLP_ENDPOINT`
+or `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` is set in the environment -- read
+directly, not as a new `Settings` field, since these are OpenTelemetry's
+own standardized env vars, not something this app should re-invent under
+a different name. This is additive, exactly as anticipated below: the
+structured-JSON-stdout output above stays the unconditional default
+either way, and the OTLP layer is simply absent when neither env var is
+set.

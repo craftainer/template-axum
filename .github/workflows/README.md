@@ -18,24 +18,24 @@
 - `release.yml` — manually triggered. Takes a release channel
   (`alpha`/`beta`/`rc`/`full`) and a SemVer 2 bump
   (`major`/`minor`/`patch`/`none`), computes the next tag via
-  `../scripts/compute_next_version.py`, builds the `runner` stage of the
-  root `Dockerfile` natively for both `amd64` and `arm64` (no QEMU —
-  see "Architecture matrix" below), and creates a GitHub release with
-  auto-generated notes and both images attached as arch-suffixed OCI
-  tarballs (`template-fastapi-<version>-amd64.tar` /
-  `-arm64.tar`), one SPDX-JSON SBOM per arch (via
-  `anchore/sbom-action`/Syft), and a single `coverage.xml` report from
-  running the test suite against the released commit. Each built image
-  (both tarballs and, if configured, the registry push) carries
-  standard `org.opencontainers.image.*` labels via
-  `docker/metadata-action`, plus two custom
-  `io.github.<repository_owner>.*` labels pointing at that arch's SBOM
-  and the shared coverage-report release asset, so the image is
-  self-describing. If an OCI registry is configured (see "OCI registry"
-  below), each arch is pushed under its own `<version>-<arch>` tag and
-  then combined into one real multi-arch manifest list at the plain
-  `<version>` tag via `docker buildx imagetools create`, so `docker pull
-  template-fastapi:<version>` resolves to the right arch automatically.
+  `../scripts/compute_next_version.py`, then runs this instance's own
+  Makefile release contract (`docs/TEMPLATE.md`'s "Release: a Makefile
+  contract" — `make build`/`sbom`/`release-assets`/`publish`) and
+  creates a GitHub release with auto-generated notes and whatever
+  `make release-assets` populated `dist/` with. Between `make build` and
+  `make sbom`, a smoke-test gate (`NFR-0024`) starts the real
+  Postgres/Redis/S3/Keycloak backing services (the same
+  `.devcontainer/stack/*/compose.yml` fragments local development and
+  `checks.yml` use, composed standalone here) and runs the just-built
+  `runner` image against them, polling `/health/ready` (5s
+  interval/timeout, 30 retries, ~150s total) before letting the release
+  proceed — a release that can't report healthy is never published.
+- `perf.yml` — manually triggered. Builds the `runner` image, runs it
+  under `MODE=mock` (self-contained, no backing-service stack needed),
+  and drives `tests/perf` (`goose`, `docs/adrs/0018`) against it for a
+  configurable `--users`/`--run-time`, uploading the resulting HTML
+  report as a workflow artifact. Perf tier of `NFR-0024`; see
+  `tests/perf/README.md`.
 - `moderate-bug-triage.yml` / `moderate-bug-fix.yml` /
   `moderate-feature-triage.yml` / `moderate-feature-build.yml` /
   `moderate-cleanup.yml` / `moderate-setup.yml` — see "Issue moderation"

@@ -78,6 +78,71 @@ jobs:
       - name: Build release artifact(s)
         run: make build
 
+      # NFR-0024's release smoke-test gate: before a release counts as
+      # verified, the runner image (never dev/mock -- see tests/perf/
+      # README.md's identical reasoning) must actually boot against real
+      # Postgres/Redis/S3/Keycloak and report healthy. Uses the exact same
+      # devcontainer stack fragments (.devcontainer/stack/*/compose.yml)
+      # local development and checks.yml run against, composed standalone
+      # here (no top-level .devcontainer/compose.yml) so this job needs
+      # nothing beyond docker compose -- MQTT/Selenium aren't included:
+      # they're not among the checks build_health_registry registers (see
+      # src/README.md's "Health checks"), so they can't affect
+      # /health/ready either way.
+      - name: Start Postgres/Redis/S3/Keycloak for the smoke test
+        run: |
+          echo "SMOKE_PROJECT=release-smoke-${{ github.run_id }}-${{ github.run_attempt }}" >> "$GITHUB_ENV"
+          docker compose -p "release-smoke-${{ github.run_id }}-${{ github.run_attempt }}" \
+            -f .devcontainer/stack/postgres/compose.yml \
+            -f .devcontainer/stack/redis/compose.yml \
+            -f .devcontainer/stack/s3/compose.yml \
+            -f .devcontainer/stack/keycloak/compose.yml \
+            up -d --wait
+
+      - name: Smoke-test the release image against real backing services
+        run: |
+          docker run -d --name release-smoke \
+            --network "${SMOKE_PROJECT}_default" \
+            -p 8000:8000 \
+            --env-file .devcontainer/stack/postgres/postgres.env \
+            --env-file .devcontainer/stack/s3/s3.env \
+            --env-file .devcontainer/stack/keycloak/keycloak.env \
+            -e MODE=dev \
+            -e POSTGRES_HOST=postgres \
+            -e POSTGRES_PORT=5432 \
+            -e S3_ENDPOINT_URL=http://s3:9000 \
+            -e REDIS_URL=redis://redis:6379/0 \
+            "template-axum:${RELEASE_VERSION}"
+
+          # 5s interval/timeout, 30 retries -- a 150s start period, matching
+          # this gate's own spec (docs/plans/2026-09-fastapi-parity-gaps.md
+          # item 7).
+          healthy=false
+          for _ in $(seq 1 30); do
+            if curl --fail --silent --max-time 5 http://localhost:8000/health/ready; then
+              healthy=true
+              break
+            fi
+            sleep 5
+          done
+
+          if [ "$healthy" != "true" ]; then
+            echo "::error::template-axum:${RELEASE_VERSION} never reported healthy at /health/ready"
+            docker logs release-smoke || true
+            exit 1
+          fi
+
+      - name: Tear down the smoke-test stack
+        if: always()
+        run: |
+          docker rm -f release-smoke || true
+          docker compose -p "${SMOKE_PROJECT}" \
+            -f .devcontainer/stack/postgres/compose.yml \
+            -f .devcontainer/stack/redis/compose.yml \
+            -f .devcontainer/stack/s3/compose.yml \
+            -f .devcontainer/stack/keycloak/compose.yml \
+            down --volumes --remove-orphans
+
       - name: Generate SBOM(s)
         run: make sbom
 

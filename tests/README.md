@@ -39,7 +39,24 @@ directory tree, so this instance's four tiers live in different places:
     verified at all (`Mode::Mock`'s bus has no broker).
   - `common/mod.rs` — shared fixtures. Not a test binary (Cargo treats a
     subdirectory `mod.rs` as a module, not a target).
-- **e2e**, **perf** — not yet built; see "What's not here yet" below.
+- **e2e-equivalent** — `e2e.rs`, also in this directory (Cargo has no
+  separate convention for this tier; it's still one black-box binary
+  against the public API, just over a real socket instead of `tower::
+  ServiceExt::oneshot`). Spawns the actual compiled `template-axum`
+  binary (`env!("CARGO_BIN_EXE_template-axum")`) under `MODE=dev`, then
+  again under `MODE=mock`, and drives each over real HTTP with
+  `reqwest` — role-journey style, mirroring the reference's per-role
+  `tests/e2e/` split (`viewer`/`editor`/`maintainer`/`detective`/
+  `security` each get exactly the requests `FR-0015`/`FR-0033` grant
+  them). `MODE=dev`'s tokens come from a real Keycloak Resource Owner
+  Password Credentials grant against the devcontainer stack's test
+  users; `MODE=mock`'s come from `POST /mock/token`. Both journeys run
+  sequentially in one test function, in one process, since `main.rs`
+  binds a fixed `0.0.0.0:8000` — see `e2e.rs`'s own module doc for why
+  that rules out running them as two separate, Cargo-parallelizable
+  test binaries.
+- **perf** — `perf/` (not a Cargo target — see that directory's own
+  `README.md`).
 
 ### Isolation and test-only helpers
 
@@ -82,16 +99,18 @@ hooks) — so `prek run --all-files --hook-stage manual` (what CI runs)
 enforces it, but a fast `pre-commit`-stage commit doesn't pay a full
 instrumented test-suite run.
 
-## What's not here yet
+## All four tiers are built
 
-The e2e-equivalent and perf tiers. Tier A (unit) and Tier B
-(integration, this directory) are built; what remains is a
-browser/HTTP-client-driven end-to-end tier against a running server and
-a load-test tier. Nothing here reaches Keycloak or S3/RustFS yet
-either — the integration tier mints its own `Mode::Mock` bearer tokens
-(FR-0017) rather than standing up a Keycloak client, since the tiers
-under test are the repository and the HTTP handlers, not token
-validation (which `oidc` unit-tests directly).
+`NFR-0024`: unit (colocated `mod tests`), integration (this directory's
+`postgres_*.rs`/`mqtt_events.rs`), e2e-equivalent (`e2e.rs`, real
+Keycloak tokens included), and perf (`perf/`, against the built
+`runner`-stage image). The integration tier's own tests still mint
+`Mode::Mock` bearer tokens rather than reaching Keycloak (FR-0017,
+unchanged) — real Keycloak tokens only enter this directory via `e2e.rs`
+now, which is a deliberate split: the integration tier tests the
+repository and HTTP handlers, not token validation (which `oidc`
+unit-tests directly), while the e2e tier's whole point is exercising the
+real auth path end to end.
 
 ## Do
 

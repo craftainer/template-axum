@@ -1,12 +1,12 @@
-//! `/crud/v1/heroes/v2/xml` -- the XML sibling representation of Hero's
-//! CRUD routes, alongside `controllers::heroes`'s JSON router
-//! (`docs/adrs/0005`'s sibling-router-not-content-negotiation decision,
-//! ported here as `docs/adrs/0014`). Shares the exact same `AppState`
-//! (`hero_crud`, `rate_limiter`, `oidc`, `settings`) and the exact same
-//! `crud_query`/`crud_actions` decision logic as the JSON router -- only
-//! the request/response (de)serialization differs, so create/update/
-//! delete/list/filter/sort/bulk behave identically regardless of which
-//! sibling a caller uses.
+//! `/crud/v1/heroes/v1/xml` -- the XML sibling of the Hero v1 compat
+//! router (`controllers::heroes_v1`), extending `docs/adrs/0014`'s
+//! sibling-router pattern to the deprecated model version
+//! (`docs/adrs/0017`, FR-0032). `views::hero_v1`'s flat shape (no nested
+//! fields) is already XML-friendly, same as v2's. Reuses `controllers::
+//! heroes_v1`'s `sunset_at`/`CURRENT_VERSION_LINK`-equivalent mechanism so
+//! both v1 formats sunset together, and `controllers::heroes`'s
+//! `HERO_FIELD_SPECS`/`HERO_WRITE_RATE_SCOPE` the same way every other
+//! sibling router in this app does.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -24,25 +24,26 @@ use crate::controllers::crud_actions::{DeleteOutcome, ListOrGet, UpdateOutcome};
 use crate::controllers::crud_events;
 use crate::controllers::crud_query::{parse_filters, parse_sort};
 use crate::controllers::heroes::{HERO_FIELD_SPECS, HERO_WRITE_RATE_SCOPE};
+use crate::controllers::heroes_v1::sunset_at;
 use crate::controllers::{
     crud_actions, AppState, HERO_DELETE_ROLES, HERO_EVENT_RESOURCE, HERO_READ_ROLES,
     HERO_WRITE_ROLES,
 };
 use crate::crud::DEFAULT_LIMIT;
 use crate::events::EventAction;
+use crate::http_headers::Sunset;
 use crate::oidc::AuthClaims;
 use crate::problem_details::AppError;
-use crate::views::hero::{HeroCreate, HeroListQuery, HeroUpdate};
-use crate::views::hero_xml::HeroReadXml;
+use crate::views::hero::HeroListQuery;
+use crate::views::hero_v1::{HeroCreateV1, HeroUpdateV1};
+use crate::views::hero_v1_xml::HeroReadV1Xml;
 use crate::views::FieldError;
 
-/// Wraps a list response as `<heroes><hero>...</hero>...</heroes>` --
-/// `quick_xml`'s serde support repeats a `Vec` field using the field's own
-/// name (see `views::hero_xml`'s own tests), so this is the same trick
-/// used there, one level up.
+const CURRENT_VERSION_LINK: &str = "/crud/v1/heroes/v2/xml";
+
 #[derive(Serialize)]
-struct HeroListXml {
-    hero: Vec<HeroReadXml>,
+struct HeroListV1Xml {
+    hero: Vec<HeroReadV1Xml>,
 }
 
 fn xml_response(root: &str, value: &impl Serialize) -> Result<Response, AppError> {
@@ -51,16 +52,6 @@ fn xml_response(root: &str, value: &impl Serialize) -> Result<Response, AppError
     Ok(([(header::CONTENT_TYPE, "application/xml")], body).into_response())
 }
 
-/// Parse an XML request body -- `quick_xml`'s `Reader` (unlike the
-/// stdlib `xml.etree.ElementTree` the Python reference's `xml_codec.py`
-/// specifically avoids using directly) never expands a DTD-declared
-/// custom entity: `quick_xml::escape::unescape` only resolves the five
-/// predefined XML entities and numeric character references, with an
-/// explicit nested-entity depth guard
-/// (`EscapeError::TooManyNestedEntities`). The "billion laughs"
-/// entity-expansion vector `defusedxml` exists to patch in the reference
-/// isn't present in `quick_xml`'s design to begin with, so no separate
-/// hardening crate is needed here (`docs/adrs/0014`).
 fn parse_xml_body<T: DeserializeOwned>(body: &Bytes) -> Result<T, AppError> {
     let text = std::str::from_utf8(body).map_err(|_| {
         AppError::UnprocessableEntity(vec![FieldError::new(
@@ -71,6 +62,14 @@ fn parse_xml_body<T: DeserializeOwned>(body: &Bytes) -> Result<T, AppError> {
     quick_xml::de::from_str(text).map_err(|err| {
         AppError::UnprocessableEntity(vec![FieldError::new("body", format!("invalid XML: {err}"))])
     })
+}
+
+fn with_sunset(response: Response) -> Response {
+    (
+        Sunset::new(sunset_at(), Some(CURRENT_VERSION_LINK)),
+        response,
+    )
+        .into_response()
 }
 
 async fn list_or_get(
@@ -87,7 +86,7 @@ async fn list_or_get(
     let skip = query.skip.unwrap_or(0);
     let limit = query.limit.unwrap_or(DEFAULT_LIMIT);
 
-    match crud_actions::resolve_list_or_get(
+    let response = match crud_actions::resolve_list_or_get(
         &state.hero_crud,
         query.id,
         skip,
@@ -98,14 +97,15 @@ async fn list_or_get(
     )
     .await?
     {
-        ListOrGet::One(hero) => xml_response("hero", &HeroReadXml::from(hero)),
+        ListOrGet::One(hero) => xml_response("hero", &HeroReadV1Xml::from(hero))?,
         ListOrGet::Many(heroes) => xml_response(
             "heroes",
-            &HeroListXml {
-                hero: heroes.into_iter().map(HeroReadXml::from).collect(),
+            &HeroListV1Xml {
+                hero: heroes.into_iter().map(HeroReadV1Xml::from).collect(),
             },
-        ),
-    }
+        )?,
+    };
+    Ok(with_sunset(response))
 }
 
 async fn create(
@@ -124,14 +124,10 @@ async fn create(
         )
         .await?;
     claims.require_any_role(&state.settings.oidc_client_id, HERO_WRITE_ROLES)?;
-    let payload: HeroCreate = parse_xml_body(&body)?;
+    let payload: HeroCreateV1 = parse_xml_body(&body)?;
     payload.validate().map_err(AppError::UnprocessableEntity)?;
     let owner_id = claims.subject()?.to_string();
-    let hero = state.hero_crud.create(&owner_id, payload).await?;
-    // Onto the same `crud-events/heroes` topic the JSON sibling
-    // publishes to (docs/adrs/0016): a subscriber watches the *records*,
-    // and which representation a writer happened to use is not something
-    // it should have to care about.
+    let hero = state.hero_crud.create(&owner_id, payload.into()).await?;
     crud_events::publish(
         &state.events,
         HERO_EVENT_RESOURCE,
@@ -139,8 +135,8 @@ async fn create(
         vec![hero.id],
     )
     .await;
-    let response = xml_response("hero", &HeroReadXml::from(hero))?;
-    Ok((StatusCode::CREATED, response).into_response())
+    let response = xml_response("hero", &HeroReadV1Xml::from(hero))?;
+    Ok(with_sunset((StatusCode::CREATED, response).into_response()))
 }
 
 async fn update(
@@ -161,18 +157,18 @@ async fn update(
         )
         .await?;
     claims.require_any_role(&state.settings.oidc_client_id, HERO_WRITE_ROLES)?;
-    let payload: HeroUpdate = parse_xml_body(&body)?;
+    let payload: HeroUpdateV1 = parse_xml_body(&body)?;
     payload.validate().map_err(AppError::UnprocessableEntity)?;
     let filters =
         parse_filters(HERO_FIELD_SPECS, &raw_params).map_err(AppError::UnprocessableEntity)?;
     let owner_id = claims.subject()?.to_string();
 
-    match crud_actions::resolve_update(
+    let response = match crud_actions::resolve_update(
         &state.hero_crud,
         query.id,
         &owner_id,
         filters,
-        payload,
+        payload.into(),
         state.settings.bulk_action_max_matched,
     )
     .await?
@@ -185,7 +181,7 @@ async fn update(
                 vec![hero.id],
             )
             .await;
-            xml_response("hero", &HeroReadXml::from(hero))
+            xml_response("hero", &HeroReadV1Xml::from(hero))?
         }
         UpdateOutcome::Bulk(result) => {
             crud_events::publish(
@@ -195,9 +191,10 @@ async fn update(
                 result.ids.clone(),
             )
             .await;
-            xml_response("bulk_update_result", &result)
+            xml_response("bulk_update_result", &result)?
         }
-    }
+    };
+    Ok(with_sunset(response))
 }
 
 async fn delete_hero(
@@ -221,7 +218,7 @@ async fn delete_hero(
         parse_filters(HERO_FIELD_SPECS, &raw_params).map_err(AppError::UnprocessableEntity)?;
     let owner_id = claims.subject()?.to_string();
 
-    match crud_actions::resolve_delete(
+    let response = match crud_actions::resolve_delete(
         &state.hero_crud,
         query.id,
         &owner_id,
@@ -234,7 +231,7 @@ async fn delete_hero(
             let ids = query.id.into_iter().collect();
             crud_events::publish(&state.events, HERO_EVENT_RESOURCE, EventAction::Delete, ids)
                 .await;
-            Ok(StatusCode::NO_CONTENT.into_response())
+            StatusCode::NO_CONTENT.into_response()
         }
         DeleteOutcome::Bulk(result) => {
             crud_events::publish(
@@ -244,9 +241,10 @@ async fn delete_hero(
                 result.ids.clone(),
             )
             .await;
-            xml_response("bulk_delete_result", &result)
+            xml_response("bulk_delete_result", &result)?
         }
-    }
+    };
+    Ok(with_sunset(response))
 }
 
 pub fn router() -> Router<AppState> {
@@ -351,37 +349,23 @@ mod tests {
         String::from_utf8(bytes.to_vec()).unwrap()
     }
 
-    const VALID_HERO_XML: &str =
-        "<hero><name>Spectra</name><powers>flight</powers><power_level>5</power_level></hero>";
-
-    // NFR-0026: this current-version (/v2) XML router carries none of the
-    // deprecation headers `controllers::heroes_v1_xml` attaches.
-    #[tokio::test]
-    async fn current_version_responses_carry_no_deprecation_headers() {
-        let response = app()
-            .oneshot(authed("GET", "/", "alice", &["viewer"], ""))
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        assert!(response.headers().get("deprecation").is_none());
-        assert!(response.headers().get("sunset").is_none());
-        assert!(response.headers().get("link").is_none());
-    }
+    const VALID_HERO_V1_XML: &str =
+        "<hero><name>Spectra</name><superpower>flight</superpower><power_level>5</power_level></hero>";
 
     #[tokio::test]
-    async fn create_returns_201_with_an_xml_body() {
+    async fn create_returns_201_with_an_xml_body_and_sunset_headers() {
         let response = app()
-            .oneshot(authed("POST", "/", "alice", &["editor"], VALID_HERO_XML))
+            .oneshot(authed("POST", "/", "alice", &["editor"], VALID_HERO_V1_XML))
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::CREATED);
+        assert_eq!(response.headers().get("deprecation").unwrap(), "true");
         assert_eq!(
-            response.headers().get(header::CONTENT_TYPE).unwrap(),
-            "application/xml"
+            response.headers().get("link").unwrap(),
+            "</crud/v1/heroes/v2/xml>; rel=\"sunset\""
         );
         let body = body_text(response).await;
-        assert!(body.contains("<name>Spectra</name>"));
-        assert!(body.contains("<owner_id>alice</owner_id>"));
+        assert!(body.contains("<superpower>flight</superpower>"));
     }
 
     #[tokio::test]
@@ -394,26 +378,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_rejects_an_invalid_payload_with_422() {
-        let response = app()
-            .oneshot(authed(
-                "POST",
-                "/",
-                "alice",
-                &["editor"],
-                "<hero><name></name></hero>",
-            ))
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
-    }
-
-    #[tokio::test]
-    async fn get_by_id_and_list_round_trip_through_xml() {
+    async fn get_by_id_round_trips_through_xml() {
         let shared_app = app();
         let create = shared_app
             .clone()
-            .oneshot(authed("POST", "/", "alice", &["editor"], VALID_HERO_XML))
+            .oneshot(authed("POST", "/", "alice", &["editor"], VALID_HERO_V1_XML))
             .await
             .unwrap();
         let created = body_text(create).await;
@@ -428,7 +397,6 @@ mod tests {
             .unwrap();
 
         let get = shared_app
-            .clone()
             .oneshot(authed(
                 "GET",
                 &format!("/?id={id}"),
@@ -440,142 +408,13 @@ mod tests {
             .unwrap();
         assert_eq!(get.status(), StatusCode::OK);
         let body = body_text(get).await;
-        assert!(body.starts_with("<hero>"));
-
-        let list = shared_app
-            .oneshot(authed("GET", "/", "alice", &["viewer"], ""))
-            .await
-            .unwrap();
-        assert_eq!(list.status(), StatusCode::OK);
-        let body = body_text(list).await;
-        assert!(body.starts_with("<heroes>"));
-        assert_eq!(body.matches("<hero>").count(), 1);
-    }
-
-    #[tokio::test]
-    async fn get_missing_id_returns_404() {
-        let response = app()
-            .oneshot(authed("GET", "/?id=999999", "alice", &["viewer"], ""))
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    }
-
-    #[tokio::test]
-    async fn update_by_id_returns_the_updated_record() {
-        let shared_app = app();
-        let create = shared_app
-            .clone()
-            .oneshot(authed("POST", "/", "alice", &["editor"], VALID_HERO_XML))
-            .await
-            .unwrap();
-        let created = body_text(create).await;
-        let id: i32 = created
-            .split("<id>")
-            .nth(1)
-            .unwrap()
-            .split("</id>")
-            .next()
-            .unwrap()
-            .parse()
-            .unwrap();
-
-        let response = shared_app
-            .oneshot(authed(
-                "PATCH",
-                &format!("/?id={id}"),
-                "alice",
-                &["editor"],
-                "<hero><name>Renamed</name></hero>",
-            ))
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = body_text(response).await;
-        assert!(body.contains("<name>Renamed</name>"));
-    }
-
-    #[tokio::test]
-    async fn bulk_update_and_delete_over_filters_return_a_bulk_result() {
-        let shared_app = app();
-        shared_app
-            .clone()
-            .oneshot(authed("POST", "/", "alice", &["editor"], VALID_HERO_XML))
-            .await
-            .unwrap();
-
-        let bulk_update = shared_app
-            .clone()
-            .oneshot(authed(
-                "PATCH",
-                "/?power_level=5",
-                "alice",
-                &["editor"],
-                "<hero><power_level>9</power_level></hero>",
-            ))
-            .await
-            .unwrap();
-        assert_eq!(bulk_update.status(), StatusCode::OK);
-        let body = body_text(bulk_update).await;
-        assert!(body.contains("<matched>1</matched>"));
-
-        let bulk_delete = shared_app
-            .oneshot(authed(
-                "DELETE",
-                "/?power_level=9",
-                "alice",
-                &["maintainer"],
-                "",
-            ))
-            .await
-            .unwrap();
-        assert_eq!(bulk_delete.status(), StatusCode::OK);
-        let body = body_text(bulk_delete).await;
-        assert!(body.contains("<matched>1</matched>"));
-    }
-
-    #[tokio::test]
-    async fn delete_by_id_returns_204() {
-        let shared_app = app();
-        let create = shared_app
-            .clone()
-            .oneshot(authed(
-                "POST",
-                "/",
-                "alice",
-                &["maintainer"],
-                VALID_HERO_XML,
-            ))
-            .await
-            .unwrap();
-        let created = body_text(create).await;
-        let id: i32 = created
-            .split("<id>")
-            .nth(1)
-            .unwrap()
-            .split("</id>")
-            .next()
-            .unwrap()
-            .parse()
-            .unwrap();
-
-        let response = shared_app
-            .oneshot(authed(
-                "DELETE",
-                &format!("/?id={id}"),
-                "alice",
-                &["maintainer"],
-                "",
-            ))
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert!(body.contains("<superpower>flight</superpower>"));
     }
 
     #[tokio::test]
     async fn a_role_with_no_write_grant_is_forbidden_from_creating() {
         let response = app()
-            .oneshot(authed("POST", "/", "alice", &["viewer"], VALID_HERO_XML))
+            .oneshot(authed("POST", "/", "alice", &["viewer"], VALID_HERO_V1_XML))
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::FORBIDDEN);

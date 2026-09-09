@@ -1,0 +1,86 @@
+# Perf tier (NFR-0024, docs/adrs/0018, tests/perf/README.md): builds the
+# runner-stage image, runs it under MODE=mock (self-contained -- no
+# backing-service stack needed), and drives tests/perf against it.
+# Manually triggered only -- a load test is neither fast nor free enough
+# to run on every push/PR the way checks.yml's own suite does.
+name: Perf
+
+on:
+  workflow_dispatch:
+    inputs:
+      users:
+        description: Concurrent simulated users
+        type: string
+        default: "20"
+      run_time:
+        description: How long to sustain load (goose --run-time, e.g. 60s, 5m)
+        type: string
+        default: 60s
+
+permissions:
+  contents: read
+
+jobs:
+  perf:
+    # renovate: datasource=github-runners depName=ubuntu
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-24.04' }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7.0.1
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4.3.0
+
+      - name: Build the runner image
+        run: docker build --target runner -t template-axum:perf .
+
+      - name: Start the target container (MODE=mock, self-contained)
+        run: |
+          docker run -d --name template-axum-perf-target \
+            -p 8000:8000 \
+            -e MODE=mock -e ALLOW_MOCK_MODE=1 \
+            template-axum:perf
+
+          for _ in $(seq 1 30); do
+            if curl --fail --silent --max-time 5 http://localhost:8000/health/live; then
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::target container never became healthy"
+          docker logs template-axum-perf-target || true
+          exit 1
+
+      # Runs tests/perf inside the exact pinned Rust toolchain image the
+      # Dockerfile's own `builder` stage uses (its RUST_VERSION/
+      # DEBIAN_VERSION ARG defaults, read here rather than re-pinned a
+      # second time -- docs/TEMPLATE.md's "Versions and config"),
+      # avoiding both a second version pin and this runner's own
+      # (unpinned) default Rust install. --network host so the
+      # containerized cargo process reaches the target container's
+      # published :8000 via localhost.
+      - name: Run the load test
+        run: |
+          rust_version=$(grep -m1 '^ARG RUST_VERSION=' Dockerfile | cut -d= -f2)
+          debian_version=$(grep -m1 '^ARG DEBIAN_VERSION=' Dockerfile | cut -d= -f2)
+          docker run --rm --network host \
+            -v "$PWD:/workspace" -w /workspace \
+            -v cargo-registry-cache:/usr/local/cargo/registry \
+            "rust:${rust_version}-slim-${debian_version}" \
+            cargo run -p template-axum-perf --release -- \
+              --host http://localhost:8000 \
+              --users "${{ inputs.users }}" \
+              --run-time "${{ inputs.run_time }}" \
+              --report-file goose-report.html
+
+      - name: Upload the goose report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: goose-report
+          path: goose-report.html
+          if-no-files-found: ignore
+
+      - name: Stop the target container
+        if: always()
+        run: docker rm -f template-axum-perf-target || true

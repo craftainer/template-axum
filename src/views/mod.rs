@@ -5,6 +5,9 @@
 
 pub mod bulk;
 pub mod hero;
+pub mod hero_form;
+pub mod hero_v1;
+pub mod hero_v1_xml;
 pub mod hero_xml;
 pub mod stats;
 

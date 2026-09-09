@@ -1,18 +1,11 @@
 //! RFC 8594 `Sunset`/`Deprecation` response headers -- port of the
 //! `sunset()` half of `app/http_headers.py` (the security-headers
 //! middleware half of that module is out of scope for this item; see
-//! `docs/nfrs/NFR-0002-deprecation-sunset-headers.md`'s port below and
-//! `docs/plans/2026-09-tier-b-c-app-features.md`).
+//! `docs/nfrs/NFR-0002-deprecation-sunset-headers.md`'s port below).
 //!
-//! Built now with no deprecated route to apply it to yet -- the Hero v1
-//! compat routes that would use it are Tier C item 7, explicitly out of
-//! scope for this plan (see the plan's own item 7 and `docs/adrs/0002`/
-//! `0009`'s note that this app hasn't established an API-versioning
-//! pattern yet). `Sunset` is exercised directly by this module's own tests
-//! in the meantime -- `#![allow(dead_code)]` below is temporary, not a
-//! permanent exemption, until item 7 (or an ADR revising this plan) gives
-//! it a real call site.
-#![allow(dead_code)]
+//! Applied by every route in `controllers::heroes_v1`/`heroes_v1_xml`
+//! (NFR-0026, `docs/adrs/0012`, `docs/adrs/0017`) -- the deprecated Hero
+//! v1 compat routers this mechanism was built ahead of.
 
 use axum::http::header::{HeaderValue, LINK};
 use axum::http::HeaderName;

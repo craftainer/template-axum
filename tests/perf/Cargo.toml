@@ -1,0 +1,22 @@
+# Load-test client for the perf tier (NFR-0024, docs/adrs/0018) -- a
+# separate workspace member, not a `[dev-dependencies]` addition to the
+# app's own Cargo.toml: goose pulls in its own reqwest/tokio-tls stack,
+# entirely unrelated to the app's runtime dependency graph, and this
+# crate is never linked into `template-axum` itself -- it only ever talks
+# to a running server over the network. See this directory's own
+# README.md for how to run it and Cargo.lock's own comment on version
+# pinning discipline (docs/TEMPLATE.md's "Versions and config").
+[package]
+name = "template-axum-perf"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "template-axum-perf"
+path = "src/main.rs"
+
+[dependencies]
+goose = { version = "=0.18.1", default-features = false, features = ["rustls-tls"] }
+serde_json = "=1.0.151"
+tokio = { version = "=1.53.1", features = ["rt-multi-thread", "macros"] }

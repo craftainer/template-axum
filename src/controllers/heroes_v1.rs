@@ -1,24 +1,27 @@
-//! `/crud/v1/heroes/v2/xml` -- the XML sibling representation of Hero's
-//! CRUD routes, alongside `controllers::heroes`'s JSON router
-//! (`docs/adrs/0005`'s sibling-router-not-content-negotiation decision,
-//! ported here as `docs/adrs/0014`). Shares the exact same `AppState`
-//! (`hero_crud`, `rate_limiter`, `oidc`, `settings`) and the exact same
-//! `crud_query`/`crud_actions` decision logic as the JSON router -- only
-//! the request/response (de)serialization differs, so create/update/
-//! delete/list/filter/sort/bulk behave identically regardless of which
-//! sibling a caller uses.
+//! `/crud/v1/heroes/v1/json` -- the deprecated Hero v1 compat router
+//! (`docs/adrs/0017`, FR-0031/FR-0032, ported from the reference's
+//! `crud_1/heroes/heroes_v1.py`). Backed by the exact same `HeroSeaOrmRepository`/
+//! `HeroMemoryRepository` v2 data `controllers::heroes` serves -- there is
+//! no separate v1 table or repository, only a lossy DTO conversion at the
+//! boundary (`views::hero_v1`) and this router reusing `controllers::
+//! heroes`'s own `HERO_FIELD_SPECS`/`HERO_WRITE_RATE_SCOPE`/role sets and
+//! `crud_actions`'s decision logic, the same way `controllers::heroes_xml`
+//! does for its own sibling relationship (`docs/adrs/0014`).
+//!
+//! Every route here attaches RFC 8594 `Sunset`/`Deprecation`/`Link`
+//! headers via `http_headers::Sunset` (`docs/adrs/0012`'s mechanism,
+//! applied for the first time -- NFR-0026), pointing at the current-
+//! version JSON equivalent.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
 
-use axum::body::Bytes;
 use axum::extract::{ConnectInfo, Query, State};
-use axum::http::{header, StatusCode};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use axum::Router;
-use serde::de::DeserializeOwned;
-use serde::Serialize;
+use axum::{Json, Router};
+use chrono::{DateTime, TimeZone, Utc};
 
 use crate::controllers::crud_actions::{DeleteOutcome, ListOrGet, UpdateOutcome};
 use crate::controllers::crud_events;
@@ -30,47 +33,29 @@ use crate::controllers::{
 };
 use crate::crud::DEFAULT_LIMIT;
 use crate::events::EventAction;
+use crate::http_headers::Sunset;
 use crate::oidc::AuthClaims;
 use crate::problem_details::AppError;
-use crate::views::hero::{HeroCreate, HeroListQuery, HeroUpdate};
-use crate::views::hero_xml::HeroReadXml;
-use crate::views::FieldError;
+use crate::views::hero::HeroListQuery;
+use crate::views::hero_v1::{HeroCreateV1, HeroReadV1, HeroUpdateV1};
 
-/// Wraps a list response as `<heroes><hero>...</hero>...</heroes>` --
-/// `quick_xml`'s serde support repeats a `Vec` field using the field's own
-/// name (see `views::hero_xml`'s own tests), so this is the same trick
-/// used there, one level up.
-#[derive(Serialize)]
-struct HeroListXml {
-    hero: Vec<HeroReadXml>,
+/// The current-version equivalent every v1 response's `Link: ...;
+/// rel="sunset"` header points at (NFR-0026).
+const CURRENT_VERSION_LINK: &str = "/crud/v1/heroes/v2/json";
+
+/// When the v1 compat router stops being served. Shared with `controllers::
+/// heroes_v1_xml`, both formats sunset together. Matches the date `src/
+/// http_headers.rs`'s own tests were written against.
+pub(crate) fn sunset_at() -> DateTime<Utc> {
+    Utc.with_ymd_and_hms(2027, 1, 1, 0, 0, 0).unwrap()
 }
 
-fn xml_response(root: &str, value: &impl Serialize) -> Result<Response, AppError> {
-    let body = quick_xml::se::to_string_with_root(root, value)
-        .map_err(|err| AppError::Internal(format!("xml encode: {err}")))?;
-    Ok(([(header::CONTENT_TYPE, "application/xml")], body).into_response())
+fn with_sunset(link: &'static str, response: impl IntoResponse) -> Response {
+    (Sunset::new(sunset_at(), Some(link)), response).into_response()
 }
 
-/// Parse an XML request body -- `quick_xml`'s `Reader` (unlike the
-/// stdlib `xml.etree.ElementTree` the Python reference's `xml_codec.py`
-/// specifically avoids using directly) never expands a DTD-declared
-/// custom entity: `quick_xml::escape::unescape` only resolves the five
-/// predefined XML entities and numeric character references, with an
-/// explicit nested-entity depth guard
-/// (`EscapeError::TooManyNestedEntities`). The "billion laughs"
-/// entity-expansion vector `defusedxml` exists to patch in the reference
-/// isn't present in `quick_xml`'s design to begin with, so no separate
-/// hardening crate is needed here (`docs/adrs/0014`).
-fn parse_xml_body<T: DeserializeOwned>(body: &Bytes) -> Result<T, AppError> {
-    let text = std::str::from_utf8(body).map_err(|_| {
-        AppError::UnprocessableEntity(vec![FieldError::new(
-            "body",
-            "request body is not valid UTF-8",
-        )])
-    })?;
-    quick_xml::de::from_str(text).map_err(|err| {
-        AppError::UnprocessableEntity(vec![FieldError::new("body", format!("invalid XML: {err}"))])
-    })
+fn hero_read_v1_json(hero: crate::models::hero::Model) -> serde_json::Value {
+    serde_json::to_value(HeroReadV1::from(hero)).expect("HeroReadV1 always serializes")
 }
 
 async fn list_or_get(
@@ -87,7 +72,7 @@ async fn list_or_get(
     let skip = query.skip.unwrap_or(0);
     let limit = query.limit.unwrap_or(DEFAULT_LIMIT);
 
-    match crud_actions::resolve_list_or_get(
+    let body = match crud_actions::resolve_list_or_get(
         &state.hero_crud,
         query.id,
         skip,
@@ -98,21 +83,20 @@ async fn list_or_get(
     )
     .await?
     {
-        ListOrGet::One(hero) => xml_response("hero", &HeroReadXml::from(hero)),
-        ListOrGet::Many(heroes) => xml_response(
-            "heroes",
-            &HeroListXml {
-                hero: heroes.into_iter().map(HeroReadXml::from).collect(),
-            },
-        ),
-    }
+        ListOrGet::One(hero) => Json(hero_read_v1_json(hero)),
+        ListOrGet::Many(heroes) => {
+            let heroes: Vec<HeroReadV1> = heroes.into_iter().map(HeroReadV1::from).collect();
+            Json(serde_json::to_value(heroes).expect("Vec<HeroReadV1> always serializes"))
+        }
+    };
+    Ok(with_sunset(CURRENT_VERSION_LINK, body))
 }
 
 async fn create(
     State(state): State<AppState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     AuthClaims(claims): AuthClaims,
-    body: Bytes,
+    Json(payload): Json<HeroCreateV1>,
 ) -> Result<Response, AppError> {
     state
         .rate_limiter
@@ -124,14 +108,9 @@ async fn create(
         )
         .await?;
     claims.require_any_role(&state.settings.oidc_client_id, HERO_WRITE_ROLES)?;
-    let payload: HeroCreate = parse_xml_body(&body)?;
     payload.validate().map_err(AppError::UnprocessableEntity)?;
     let owner_id = claims.subject()?.to_string();
-    let hero = state.hero_crud.create(&owner_id, payload).await?;
-    // Onto the same `crud-events/heroes` topic the JSON sibling
-    // publishes to (docs/adrs/0016): a subscriber watches the *records*,
-    // and which representation a writer happened to use is not something
-    // it should have to care about.
+    let hero = state.hero_crud.create(&owner_id, payload.into()).await?;
     crud_events::publish(
         &state.events,
         HERO_EVENT_RESOURCE,
@@ -139,8 +118,10 @@ async fn create(
         vec![hero.id],
     )
     .await;
-    let response = xml_response("hero", &HeroReadXml::from(hero))?;
-    Ok((StatusCode::CREATED, response).into_response())
+    Ok(with_sunset(
+        CURRENT_VERSION_LINK,
+        (StatusCode::CREATED, Json(HeroReadV1::from(hero))),
+    ))
 }
 
 async fn update(
@@ -149,7 +130,7 @@ async fn update(
     AuthClaims(claims): AuthClaims,
     Query(query): Query<HeroListQuery>,
     Query(raw_params): Query<HashMap<String, String>>,
-    body: Bytes,
+    Json(payload): Json<HeroUpdateV1>,
 ) -> Result<Response, AppError> {
     state
         .rate_limiter
@@ -161,18 +142,17 @@ async fn update(
         )
         .await?;
     claims.require_any_role(&state.settings.oidc_client_id, HERO_WRITE_ROLES)?;
-    let payload: HeroUpdate = parse_xml_body(&body)?;
     payload.validate().map_err(AppError::UnprocessableEntity)?;
     let filters =
         parse_filters(HERO_FIELD_SPECS, &raw_params).map_err(AppError::UnprocessableEntity)?;
     let owner_id = claims.subject()?.to_string();
 
-    match crud_actions::resolve_update(
+    let body = match crud_actions::resolve_update(
         &state.hero_crud,
         query.id,
         &owner_id,
         filters,
-        payload,
+        payload.into(),
         state.settings.bulk_action_max_matched,
     )
     .await?
@@ -185,7 +165,7 @@ async fn update(
                 vec![hero.id],
             )
             .await;
-            xml_response("hero", &HeroReadXml::from(hero))
+            Json(hero_read_v1_json(hero))
         }
         UpdateOutcome::Bulk(result) => {
             crud_events::publish(
@@ -195,9 +175,10 @@ async fn update(
                 result.ids.clone(),
             )
             .await;
-            xml_response("bulk_update_result", &result)
+            Json(serde_json::to_value(result).expect("BulkUpdateResult always serializes"))
         }
-    }
+    };
+    Ok(with_sunset(CURRENT_VERSION_LINK, body))
 }
 
 async fn delete_hero(
@@ -221,7 +202,7 @@ async fn delete_hero(
         parse_filters(HERO_FIELD_SPECS, &raw_params).map_err(AppError::UnprocessableEntity)?;
     let owner_id = claims.subject()?.to_string();
 
-    match crud_actions::resolve_delete(
+    let body = match crud_actions::resolve_delete(
         &state.hero_crud,
         query.id,
         &owner_id,
@@ -234,7 +215,7 @@ async fn delete_hero(
             let ids = query.id.into_iter().collect();
             crud_events::publish(&state.events, HERO_EVENT_RESOURCE, EventAction::Delete, ids)
                 .await;
-            Ok(StatusCode::NO_CONTENT.into_response())
+            StatusCode::NO_CONTENT.into_response()
         }
         DeleteOutcome::Bulk(result) => {
             crud_events::publish(
@@ -244,9 +225,10 @@ async fn delete_hero(
                 result.ids.clone(),
             )
             .await;
-            xml_response("bulk_delete_result", &result)
+            Json(result).into_response()
         }
-    }
+    };
+    Ok(with_sunset(CURRENT_VERSION_LINK, body))
 }
 
 pub fn router() -> Router<AppState> {
@@ -266,7 +248,6 @@ mod tests {
     use crate::controllers::DynHeroRepository;
     use crate::health::HealthRegistry;
     use crate::oidc::OidcVerifier;
-    use crate::rate_limit::RateLimiter;
     use crate::repositories::hero_memory::HeroMemoryRepository;
     use axum::body::{to_bytes, Body};
     use axum::http::Request;
@@ -309,7 +290,7 @@ mod tests {
             hero_crud: Arc::new(crate::crud::CrudService::new(DynHeroRepository(Box::new(
                 HeroMemoryRepository::new(),
             )))),
-            rate_limiter: Arc::new(RateLimiter::mock()),
+            rate_limiter: Arc::new(crate::rate_limit::RateLimiter::mock()),
             events: Arc::new(crate::events::EventBus::mock()),
         };
         router().with_state(state)
@@ -327,8 +308,14 @@ mod tests {
         .unwrap()
     }
 
-    fn authed(method: &str, uri: &str, sub: &str, roles: &[&str], body: &str) -> Request<Body> {
-        let body = if body.is_empty() {
+    fn authed(
+        method: &str,
+        uri: &str,
+        sub: &str,
+        roles: &[&str],
+        body: serde_json::Value,
+    ) -> Request<Body> {
+        let body = if body.is_null() {
             Body::empty()
         } else {
             Body::from(body.to_string())
@@ -337,245 +324,153 @@ mod tests {
             .method(method)
             .uri(uri)
             .header("Authorization", format!("Bearer {}", token(sub, roles)))
-            .header("Content-Type", "application/xml")
+            .header("Content-Type", "application/json")
             .body(body)
             .unwrap();
         request
             .extensions_mut()
-            .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 12345))));
+            .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+                [127, 0, 0, 1],
+                12345,
+            ))));
         request
     }
 
-    async fn body_text(response: Response) -> String {
+    async fn json_body(response: axum::response::Response) -> serde_json::Value {
         let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        String::from_utf8(bytes.to_vec()).unwrap()
+        serde_json::from_slice(&bytes).unwrap()
     }
 
-    const VALID_HERO_XML: &str =
-        "<hero><name>Spectra</name><powers>flight</powers><power_level>5</power_level></hero>";
-
-    // NFR-0026: this current-version (/v2) XML router carries none of the
-    // deprecation headers `controllers::heroes_v1_xml` attaches.
-    #[tokio::test]
-    async fn current_version_responses_carry_no_deprecation_headers() {
-        let response = app()
-            .oneshot(authed("GET", "/", "alice", &["viewer"], ""))
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        assert!(response.headers().get("deprecation").is_none());
-        assert!(response.headers().get("sunset").is_none());
-        assert!(response.headers().get("link").is_none());
-    }
+    const VALID_HERO_V1: &str = r#"{"name":"Spectra","superpower":"flight","power_level":5}"#;
 
     #[tokio::test]
-    async fn create_returns_201_with_an_xml_body() {
-        let response = app()
-            .oneshot(authed("POST", "/", "alice", &["editor"], VALID_HERO_XML))
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::CREATED);
-        assert_eq!(
-            response.headers().get(header::CONTENT_TYPE).unwrap(),
-            "application/xml"
-        );
-        let body = body_text(response).await;
-        assert!(body.contains("<name>Spectra</name>"));
-        assert!(body.contains("<owner_id>alice</owner_id>"));
-    }
-
-    #[tokio::test]
-    async fn create_rejects_malformed_xml_with_422() {
-        let response = app()
-            .oneshot(authed("POST", "/", "alice", &["editor"], "<hero><name>"))
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
-    }
-
-    #[tokio::test]
-    async fn create_rejects_an_invalid_payload_with_422() {
+    async fn create_wraps_superpower_into_powers_and_returns_201() {
         let response = app()
             .oneshot(authed(
                 "POST",
                 "/",
                 "alice",
                 &["editor"],
-                "<hero><name></name></hero>",
+                serde_json::from_str(VALID_HERO_V1).unwrap(),
             ))
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = json_body(response).await;
+        assert_eq!(body["superpower"], "flight");
+        assert!(body.get("powers").is_none());
     }
 
     #[tokio::test]
-    async fn get_by_id_and_list_round_trip_through_xml() {
-        let shared_app = app();
-        let create = shared_app
-            .clone()
-            .oneshot(authed("POST", "/", "alice", &["editor"], VALID_HERO_XML))
-            .await
-            .unwrap();
-        let created = body_text(create).await;
-        let id: i32 = created
-            .split("<id>")
-            .nth(1)
-            .unwrap()
-            .split("</id>")
-            .next()
-            .unwrap()
-            .parse()
-            .unwrap();
-
-        let get = shared_app
-            .clone()
+    async fn every_response_carries_sunset_deprecation_and_link_headers() {
+        let response = app()
             .oneshot(authed(
                 "GET",
-                &format!("/?id={id}"),
+                "/",
                 "alice",
                 &["viewer"],
-                "",
+                serde_json::Value::Null,
             ))
             .await
             .unwrap();
-        assert_eq!(get.status(), StatusCode::OK);
-        let body = body_text(get).await;
-        assert!(body.starts_with("<hero>"));
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers().get("deprecation").unwrap(), "true");
+        assert!(response.headers().get("sunset").is_some());
+        assert_eq!(
+            response.headers().get("link").unwrap(),
+            "</crud/v1/heroes/v2/json>; rel=\"sunset\""
+        );
+    }
 
-        let list = shared_app
-            .oneshot(authed("GET", "/", "alice", &["viewer"], ""))
+    #[tokio::test]
+    async fn update_maps_superpower_without_clobbering_when_omitted() {
+        let shared_app = app();
+        let create = shared_app
+            .clone()
+            .oneshot(authed(
+                "POST",
+                "/",
+                "alice",
+                &["editor"],
+                serde_json::from_str(VALID_HERO_V1).unwrap(),
+            ))
             .await
             .unwrap();
-        assert_eq!(list.status(), StatusCode::OK);
-        let body = body_text(list).await;
-        assert!(body.starts_with("<heroes>"));
-        assert_eq!(body.matches("<hero>").count(), 1);
+        let created = json_body(create).await;
+        let id = created["id"].as_i64().unwrap();
+
+        let response = shared_app
+            .oneshot(authed(
+                "PATCH",
+                &format!("/?id={id}"),
+                "alice",
+                &["editor"],
+                serde_json::json!({"name": "Renamed"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["name"], "Renamed");
+        assert_eq!(
+            body["superpower"], "flight",
+            "an omitted superpower must not clobber the existing power"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_role_with_no_write_grant_is_forbidden_from_creating() {
+        let response = app()
+            .oneshot(authed(
+                "POST",
+                "/",
+                "alice",
+                &["viewer"],
+                serde_json::from_str(VALID_HERO_V1).unwrap(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]
     async fn get_missing_id_returns_404() {
         let response = app()
-            .oneshot(authed("GET", "/?id=999999", "alice", &["viewer"], ""))
+            .oneshot(authed(
+                "GET",
+                "/?id=999999",
+                "alice",
+                &["viewer"],
+                serde_json::Value::Null,
+            ))
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
-    async fn update_by_id_returns_the_updated_record() {
-        let shared_app = app();
-        let create = shared_app
-            .clone()
-            .oneshot(authed("POST", "/", "alice", &["editor"], VALID_HERO_XML))
-            .await
-            .unwrap();
-        let created = body_text(create).await;
-        let id: i32 = created
-            .split("<id>")
-            .nth(1)
-            .unwrap()
-            .split("</id>")
-            .next()
-            .unwrap()
-            .parse()
-            .unwrap();
-
-        let response = shared_app
-            .oneshot(authed(
-                "PATCH",
-                &format!("/?id={id}"),
-                "alice",
-                &["editor"],
-                "<hero><name>Renamed</name></hero>",
-            ))
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = body_text(response).await;
-        assert!(body.contains("<name>Renamed</name>"));
-    }
-
-    #[tokio::test]
-    async fn bulk_update_and_delete_over_filters_return_a_bulk_result() {
-        let shared_app = app();
-        shared_app
-            .clone()
-            .oneshot(authed("POST", "/", "alice", &["editor"], VALID_HERO_XML))
-            .await
-            .unwrap();
-
-        let bulk_update = shared_app
-            .clone()
-            .oneshot(authed(
-                "PATCH",
-                "/?power_level=5",
-                "alice",
-                &["editor"],
-                "<hero><power_level>9</power_level></hero>",
-            ))
-            .await
-            .unwrap();
-        assert_eq!(bulk_update.status(), StatusCode::OK);
-        let body = body_text(bulk_update).await;
-        assert!(body.contains("<matched>1</matched>"));
-
-        let bulk_delete = shared_app
-            .oneshot(authed(
-                "DELETE",
-                "/?power_level=9",
-                "alice",
-                &["maintainer"],
-                "",
-            ))
-            .await
-            .unwrap();
-        assert_eq!(bulk_delete.status(), StatusCode::OK);
-        let body = body_text(bulk_delete).await;
-        assert!(body.contains("<matched>1</matched>"));
-    }
-
-    #[tokio::test]
-    async fn delete_by_id_returns_204() {
-        let shared_app = app();
-        let create = shared_app
-            .clone()
+    async fn only_maintainer_can_delete() {
+        let create = app()
             .oneshot(authed(
                 "POST",
                 "/",
                 "alice",
                 &["maintainer"],
-                VALID_HERO_XML,
+                serde_json::from_str(VALID_HERO_V1).unwrap(),
             ))
             .await
             .unwrap();
-        let created = body_text(create).await;
-        let id: i32 = created
-            .split("<id>")
-            .nth(1)
-            .unwrap()
-            .split("</id>")
-            .next()
-            .unwrap()
-            .parse()
-            .unwrap();
+        let created = json_body(create).await;
+        let id = created["id"].as_i64().unwrap();
 
-        let response = shared_app
+        let response = app()
             .oneshot(authed(
                 "DELETE",
                 &format!("/?id={id}"),
                 "alice",
-                &["maintainer"],
-                "",
+                &["editor"],
+                serde_json::Value::Null,
             ))
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::NO_CONTENT);
-    }
-
-    #[tokio::test]
-    async fn a_role_with_no_write_grant_is_forbidden_from_creating() {
-        let response = app()
-            .oneshot(authed("POST", "/", "alice", &["viewer"], VALID_HERO_XML))
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::FORBIDDEN);

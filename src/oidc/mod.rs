@@ -57,8 +57,10 @@ impl Claims {
     }
 
     /// `resource_access.<client>.roles` -- Keycloak's client-role claim
-    /// shape (FR-0014).
-    fn granted_roles(&self, client_id: &str) -> Vec<String> {
+    /// shape (FR-0014). `pub`: `controllers::audit` (FR-0033) reports the
+    /// caller's own granted roles back to them, rather than only using
+    /// them for an allow/deny decision.
+    pub fn granted_roles(&self, client_id: &str) -> Vec<String> {
         self.0
             .get("resource_access")
             .and_then(|ra| ra.get(client_id))

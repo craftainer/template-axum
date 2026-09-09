@@ -1,6 +1,15 @@
 [workspace]
 resolver = "2"
-members = ["."]
+# tests/perf is a separate perf-tier client crate (NFR-0024, docs/adrs/0018)
+# -- a workspace member so it gets its own [[bin]] and dependency
+# resolution, but never linked into "." itself; see its own Cargo.toml.
+members = [".", "tests/perf"]
+# Plain `cargo build`/`test`/`llvm-cov` (no `-p`/`--workspace`) still
+# operate on "." alone -- tests/perf is explicitly opt-in
+# (`cargo run -p template-axum-perf`, see its own README.md), never part
+# of the coverage-gated unit/integration run `.pre-commit-config.yaml`'s
+# `cargo-llvm-cov` hook drives.
+default-members = ["."]
 
 # Rust/axum counterpart to template-fastapi's pyproject.toml -- see
 # docs/TEMPLATE.md's "Versions and config" section: every dependency here is
@@ -82,8 +91,11 @@ jsonwebtoken = { version = "=11.0.0", features = ["aws_lc_rs"] }
 # HTTP client for OIDC discovery + JWKS fetch, and the OIDC health check --
 # default-features off, "rustls" only (0.13 renamed the feature from
 # "rustls-tls"), for the same single-rustls-copy reasoning as aws-sdk-s3
-# above.
-reqwest = { version = "=0.13.5", default-features = false, features = ["json", "rustls"] }
+# above. "form" is unused by application code but needed by tests/e2e.rs's
+# Keycloak Resource Owner Password Credentials grant (application/
+# x-www-form-urlencoded), which reuses this same reqwest rather than
+# pulling in a second HTTP client crate for one test file.
+reqwest = { version = "=0.13.5", default-features = false, features = ["json", "rustls", "form"] }
 
 # Object-safe async trait methods for the health-check registry (see
 # src/health/mod.rs) -- native async-fn-in-traits (stable since Rust 1.75)
@@ -132,6 +144,21 @@ rumqttc = { version = "=0.25.1", default-features = false }
 # never parses, so a UUID's formatting/versioning machinery would buy
 # nothing over 128 hex-encoded random bits.
 getrandom = "=0.4.3"
+
+# Optional OTLP log export (src/telemetry.rs, docs/adrs/0006) -- a second
+# tracing_subscriber::Layer, added only when OTEL_EXPORTER_OTLP_ENDPOINT
+# is set; ADR 0006's structured-JSON-stdout logging stays the
+# unconditional default either way. "logs" only on every crate below (no
+# "trace"/"metrics") -- this app emits no spans or metrics, only logs.
+# opentelemetry-otlp's "http-proto"/"reqwest-client" (rather than its
+# default gRPC/tonic exporter) reuses the `reqwest`+`rustls` stack already
+# in this graph instead of pulling in a second HTTP/TLS implementation
+# (same reasoning as aws-sdk-s3/reqwest/rumqttc's own feature choices
+# above).
+opentelemetry = { version = "=0.32.0", default-features = false, features = ["logs"] }
+opentelemetry_sdk = { version = "=0.32.1", default-features = false, features = ["logs", "rt-tokio"] }
+opentelemetry-otlp = { version = "=0.32.0", default-features = false, features = ["logs", "http-proto", "reqwest-client"] }
+opentelemetry-appender-tracing = { version = "=0.32.0", default-features = false }
 
 [dev-dependencies]
 tower = { version = "=0.5.3", features = ["util"] }

@@ -153,8 +153,15 @@ pub async fn build_state(settings: Arc<Settings>) -> AppState {
 pub fn build_router(state: AppState) -> Router {
     let mut app = Router::new()
         .nest("/health", controllers::health::router())
+        .nest("/audit", controllers::audit::router())
         .nest("/crud/v1/heroes/v2/json", controllers::heroes::router())
-        .nest("/crud/v1/heroes/v2/xml", controllers::heroes_xml::router());
+        .nest("/crud/v1/heroes/v2/xml", controllers::heroes_xml::router())
+        .nest("/crud/v1/heroes/v1/json", controllers::heroes_v1::router())
+        .nest(
+            "/crud/v1/heroes/v1/xml",
+            controllers::heroes_v1_xml::router(),
+        )
+        .nest("/heroes", controllers::heroes_web::router());
 
     if state.settings.mode == Mode::Mock {
         app = app.nest("/mock", controllers::mock::router());
@@ -239,6 +246,11 @@ mod tests {
             "/health/live",
             "/crud/v1/heroes/v2/json",
             "/crud/v1/heroes/v2/xml",
+            "/crud/v1/heroes/v1/json",
+            "/crud/v1/heroes/v1/xml",
+            "/audit",
+            "/heroes/form",
+            "/heroes/components.js",
         ] {
             let response = app
                 .clone()

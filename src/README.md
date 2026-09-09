@@ -44,8 +44,8 @@ beyond what it's explicitly passed or reads from `config::Settings`.
   `docs/adrs/0016`.
 - `http_headers.rs` — `Sunset`, an `IntoResponseParts` type a handler
   combines into its return value to attach RFC 8594 `Sunset`/
-  `Deprecation`/`Link` headers; not yet used by any route (see
-  `docs/adrs/0012`).
+  `Deprecation`/`Link` headers (`docs/adrs/0012`), applied by every
+  route in `controllers::heroes_v1`/`heroes_v1_xml` (`NFR-0026`).
 
 ## Library and binary
 
@@ -138,7 +138,10 @@ parameter; a handler with no such parameter stays public.
 shape specifically, not something assumed present on every provider's
 token (see `oidc/mod.rs`'s module doc). Gate a route by calling it at
 the top of the handler body: `claims.require_any_role(&state.settings.
-oidc_client_id, SOME_ROLE_SET)?`.
+oidc_client_id, SOME_ROLE_SET)?`. `controllers::audit` (`GET /audit`,
+FR-0033) is the `security`/`detective` roles' first real consumer —
+it reports the caller's own subject and granted roles back to them,
+via the now-`pub` `Claims::granted_roles`.
 
 ## MODE (dev / mock / production)
 
@@ -163,8 +166,10 @@ once in `main()`.
 attaches a JSON-formatting `tracing_subscriber` to every `tracing` call
 — every log line, including `tower_http::trace::TraceLayer`'s own HTTP
 request logs, is one JSON object per line. Level is controlled by
-`RUST_LOG`, defaulting to `info`. No OTLP export in this phase (see ADR
-0006).
+`RUST_LOG`, defaulting to `info`. When `OTEL_EXPORTER_OTLP_ENDPOINT` (or
+`OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`) is set, a second layer additionally
+forwards every event to an OTLP log collector over HTTP — no new app
+setting, these are OpenTelemetry's own env vars (`FR-0035`, ADR 0006).
 
 ## RFC 9457 error responses
 
@@ -186,7 +191,15 @@ generic CRUD layer (`crud::CrudService`), wired up as
 filtering/sorting on list and a bulk update/delete form — `docs/adrs/
 0013`) and its XML sibling, `controllers::heroes_xml` at
 `/crud/v1/heroes/v2/xml` (`docs/adrs/0014`), sharing the same
-`CrudService`/repository dependency. Adding another resource follows
+`CrudService`/repository dependency. `controllers::heroes_v1`/
+`heroes_v1_xml` (`/crud/v1/heroes/v1/{json,xml}`) are a deprecated,
+`superpower: String`-shaped compat sibling of the same resource —
+lossy DTO conversion in `views::hero_v1`/`hero_v1_xml`, no separate
+storage (`docs/adrs/0017`, `FR-0031`/`FR-0032`). `controllers::
+heroes_web` (`/heroes/form`, `/heroes/components.js`) is a third
+representation of the same resource — a progressively-enhanced HTML
+form, working with no JavaScript, calling the same `crud_actions` path
+as every other sibling (`FR-0034`). Adding another resource follows
 the same shape: a SeaORM entity
 in `models/` (implementing `HasId`), DTOs in `views/`, one `Repository`
 `impl` per backend in `repositories/` (or `crate::dyn_repository!` plus
