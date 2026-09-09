@@ -29,15 +29,15 @@ path = "src/main.rs"
 
 [dependencies]
 # HTTP framework and async runtime -- phase 1's /health/live route.
-axum = { version = "=0.8.7", features = ["json"] }
-tokio = { version = "=1.48.0", features = ["rt-multi-thread", "macros", "signal", "time"] }
-tower = "=0.5.2"
-tower-http = { version = "=0.6.7", features = ["trace"] }
+axum = { version = "=0.8.9", features = ["json"] }
+tokio = { version = "=1.53.1", features = ["rt-multi-thread", "macros", "signal", "time"] }
+tower = "=0.5.3"
+tower-http = { version = "=0.6.11", features = ["trace"] }
 
 # Structured JSON logging -- see docs/adrs/0007-structured-json-logging-only.md
 # in template-fastapi, ported to this instance's own docs in phase 3.
-tracing = "=0.1.41"
-tracing-subscriber = { version = "=0.3.20", features = ["json", "env-filter"] }
+tracing = "=0.1.44"
+tracing-subscriber = { version = "=0.3.23", features = ["json", "env-filter"] }
 
 # Below this line: not wired up yet (no routes/config use them), but pinned
 # now so Cargo.lock already reflects phase 2's real dependency graph -- see
@@ -78,24 +78,24 @@ jsonwebtoken = "=9.3.1"
 # HTTP client for OIDC discovery + JWKS fetch, and the OIDC health check --
 # default-features off, "rustls-tls" only, for the same
 # single-rustls-copy reasoning as aws-sdk-s3 above.
-reqwest = { version = "=0.12.24", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "=0.12.28", default-features = false, features = ["json", "rustls-tls"] }
 
 # Object-safe async trait methods for the health-check registry (see
 # src/health/mod.rs) -- native async-fn-in-traits (stable since Rust 1.75)
 # isn't dyn-compatible, and HealthRegistry holds a heterogeneous
 # Vec<Box<dyn HealthCheck>>.
-async-trait = "=0.1.83"
+async-trait = "=0.1.92"
 
 # Concurrent execution of every registered health check (see
 # src/health/mod.rs's HealthRegistry::run_all) -- the standard
 # join-a-heterogeneous-set-of-futures primitive; tokio itself only offers
 # join!/select! for a statically-known, fixed set of futures.
-futures = "=0.3.31"
+futures = "=0.3.34"
 
-serde = { version = "=1.0.228", features = ["derive"] }
-serde_json = "=1.0.145"
-thiserror = "=2.0.17"
-chrono = { version = "=0.4.42", features = ["serde"] }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+thiserror = "=2.0.20"
+chrono = { version = "=0.4.45", features = ["serde"] }
 
 # XML sibling representation for Hero -- docs/adrs/0014, Tier C item 4.
 # "serialize" pulls in the serde-based (de)serializer/deserializer
@@ -129,7 +129,7 @@ rumqttc = { version = "=0.25.1", default-features = false }
 getrandom = "=0.3.4"
 
 [dev-dependencies]
-tower = { version = "=0.5.2", features = ["util"] }
+tower = { version = "=0.5.3", features = ["util"] }
 
 [profile.release]
 # Smaller, faster runner-stage binary at the cost of build time -- worth it
