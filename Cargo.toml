@@ -80,9 +80,10 @@ oauth2 = "=5.0.0"
 jsonwebtoken = { version = "=11.0.0", features = ["aws_lc_rs"] }
 
 # HTTP client for OIDC discovery + JWKS fetch, and the OIDC health check --
-# default-features off, "rustls-tls" only, for the same
-# single-rustls-copy reasoning as aws-sdk-s3 above.
-reqwest = { version = "=0.12.28", default-features = false, features = ["json", "rustls-tls"] }
+# default-features off, "rustls" only (0.13 renamed the feature from
+# "rustls-tls"), for the same single-rustls-copy reasoning as aws-sdk-s3
+# above.
+reqwest = { version = "=0.13.5", default-features = false, features = ["json", "rustls"] }
 
 # Object-safe async trait methods for the health-check registry (see
 # src/health/mod.rs) -- native async-fn-in-traits (stable since Rust 1.75)
