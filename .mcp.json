@@ -3,6 +3,10 @@
     "clear-thought": {
       "command": "npx",
       "args": ["-y", "@waldzellai/clear-thought-onepointfive@0.2.1"]
+    },
+    "playwright": {
+      "command": "uv",
+      "args": ["run", "--no-project", ".claude/mcp/playwright_selenium_bridge.py"]
     }
   }
 }
