@@ -35,6 +35,30 @@ async fn main() {
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
     )
+    .with_graceful_shutdown(shutdown_signal())
     .await
     .expect("server error");
+}
+
+/// Resolves on Ctrl-C or `SIGTERM`, whichever comes first -- letting
+/// `axum::serve` drain in-flight requests and `main` return normally
+/// (rather than being killed) is also what flushes the LLVM coverage
+/// profile when this binary is exercised from `tests/e2e.rs`.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to install the Ctrl-C signal handler");
+    };
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to install the SIGTERM signal handler")
+            .recv()
+            .await;
+    };
+    tokio::select! {
+        () = ctrl_c => {}
+        () = terminate => {}
+    }
+    tracing::info!("shutdown signal received, draining in-flight requests");
 }

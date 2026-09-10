@@ -33,7 +33,14 @@ const LAST_EVENT_ID: &str = "last-event-id";
 
 /// How often a comment frame is sent on an idle stream, to keep proxies and
 /// load balancers from reaping a connection that has simply had no events.
+#[cfg(not(test))]
 const KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(15);
+// A few milliseconds under test, so a dedicated test can wait for a
+// keep-alive comment to arrive before the first real event without
+// waiting 15 real seconds -- same idea as `REDIS_TIMEOUT`'s existing
+// test-friendliness, just via cfg instead of a parameter.
+#[cfg(test)]
+const KEEP_ALIVE_INTERVAL: Duration = Duration::from_millis(20);
 
 /// The event stream's response type. A plain `Response` rather than
 /// `Sse<S>`: `Sse::keep_alive` wraps the stream in an axum-private
@@ -80,14 +87,22 @@ fn event_frame(subscriber_id: &str, event: &CrudEvent) -> SseEvent {
         .id(subscriber_id);
     match frame.json_data(event) {
         Ok(frame) => frame,
-        Err(err) => {
-            // CrudEvent is a plain struct of owned scalars, so this is
-            // unreachable in practice; degrade to a typed error frame
-            // rather than panicking inside a live connection.
-            tracing::error!("failed to encode CRUD event frame: {err}");
-            SseEvent::default().event("error").data("encode failed")
-        }
+        // CrudEvent is a plain struct of owned scalars, so this is
+        // unreachable in practice; degrade to a typed error frame rather
+        // than panicking inside a live connection.
+        Err(err) => error_frame(err),
     }
+}
+
+/// Logs an SSE frame's JSON-encode failure and returns a typed error
+/// frame instead of the real payload -- see `event_frame`'s own doc
+/// comment for why this branch is structurally unreachable but still
+/// tested directly (accepts anything `Display`, so a cheap
+/// `serde_json::Error` stands in for the real `axum_core::Error` in
+/// tests).
+fn error_frame(err: impl std::fmt::Display) -> SseEvent {
+    tracing::error!("failed to encode CRUD event frame: {err}");
+    SseEvent::default().event("error").data("encode failed")
 }
 
 /// Build the SSE response for `resource`'s event stream.
@@ -233,6 +248,32 @@ mod tests {
         let body = first_frames(response, 2).await;
         assert!(body.contains("event: subscriber"), "{body}");
         assert!(!body.contains("event: create"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn keep_alive_comments_are_skipped_before_the_first_real_event() {
+        let bus = EventBus::mock();
+        let response = event_stream(&bus, "heroes", Some("sub-4"), &HeaderMap::new())
+            .await
+            .unwrap();
+        let publish_after_a_few_keep_alives = async {
+            tokio::time::sleep(KEEP_ALIVE_INTERVAL * 5).await;
+            publish(&bus, "heroes", EventAction::Create, vec![7]).await;
+        };
+        // The subscriber frame, then at least one keep-alive comment (which
+        // `first_frames` must skip via its `starts_with(':')` branch) before
+        // the real `create` frame that ends the count.
+        let (_, body) = tokio::join!(publish_after_a_few_keep_alives, first_frames(response, 2));
+        assert!(body.contains("event: subscriber"), "{body}");
+        assert!(body.contains("event: create"), "{body}");
+    }
+
+    #[test]
+    fn error_frame_logs_and_returns_a_typed_error_frame() {
+        let err = serde_json::from_str::<i32>("bad").unwrap_err();
+        // Doesn't panic; the frame is a real `SseEvent`, exercised end to
+        // end via `event_frame`'s own callers in the tests above.
+        let _frame = error_frame(err);
     }
 
     /// Read up to `count` SSE frames out of a response body. Keep-alive

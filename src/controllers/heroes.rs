@@ -369,25 +369,11 @@ async fn get_stats(
     // (HERO_FIELD_SPECS has no FieldSpec::boolean entries) is always
     // empty here -- kept generic rather than hardcoded so a future
     // resource with one gets a value distribution for free.
-    let categorical: Vec<CategoricalValueCount> = crud_stats::categorical_fields(HERO_FIELD_SPECS)
-        .into_iter()
-        .flat_map(|field| {
-            let mut counts: std::collections::HashMap<String, u64> =
-                std::collections::HashMap::new();
-            for record in &records {
-                if let Some(value) = boolean_value(record, field) {
-                    *counts.entry(value.to_string()).or_insert(0) += 1;
-                }
-            }
-            counts
-                .into_iter()
-                .map(move |(value, count)| CategoricalValueCount {
-                    field,
-                    value,
-                    count,
-                })
-        })
-        .collect();
+    let categorical: Vec<CategoricalValueCount> = crud_stats::categorical_counts(
+        &records,
+        &crud_stats::categorical_fields(HERO_FIELD_SPECS),
+        boolean_value,
+    );
 
     Ok(Json(ResourceStats {
         total,
@@ -1448,6 +1434,43 @@ mod tests {
         assert!(body.contains("event: create"), "{body}");
         assert!(body.contains(r#""resource":"heroes""#), "{body}");
         assert!(body.contains("id: watcher"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn keep_alive_comments_before_the_first_real_event_are_skipped() {
+        // `crud_events::KEEP_ALIVE_INTERVAL` is a few milliseconds under
+        // test (its own `#[cfg(test)]` override) -- delaying the create
+        // past it means at least one keep-alive comment frame arrives
+        // before the real `create` event, exercising `sse_frames`' own
+        // `starts_with(':')` skip branch.
+        let shared_app = app();
+        let stream = shared_app
+            .clone()
+            .oneshot(authed(
+                "GET",
+                "/events?subscriber_id=watcher-keepalive",
+                "alice",
+                &["viewer"],
+                serde_json::Value::Null,
+            ))
+            .await
+            .unwrap();
+
+        let create_after_a_few_keep_alives = async {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            shared_app
+                .oneshot(authed(
+                    "POST",
+                    "/",
+                    "alice",
+                    &["editor"],
+                    serde_json::from_str(VALID_HERO).unwrap(),
+                ))
+                .await
+                .unwrap();
+        };
+        let (_, body) = tokio::join!(create_after_a_few_keep_alives, sse_frames(stream, 2));
+        assert!(body.contains("event: create"), "{body}");
     }
 
     #[tokio::test]

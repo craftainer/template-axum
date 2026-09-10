@@ -77,6 +77,37 @@ pub fn categorical_fields(specs: &[FieldSpec]) -> Vec<&'static str> {
         .collect()
 }
 
+/// Count each boolean/enum `field`'s value distribution over `records`,
+/// resource-agnostic the same way `numeric_fields`/`categorical_fields`
+/// are: `value_of` is the one place a caller's per-field access becomes
+/// concrete (mirrors that resource's own `numeric_value`/`boolean_value`
+/// helpers).
+pub fn categorical_counts<T>(
+    records: &[T],
+    fields: &[&'static str],
+    value_of: impl Fn(&T, &str) -> Option<bool>,
+) -> Vec<crate::views::stats::CategoricalValueCount> {
+    fields
+        .iter()
+        .flat_map(|&field| {
+            let mut counts: std::collections::HashMap<String, u64> =
+                std::collections::HashMap::new();
+            for record in records {
+                if let Some(value) = value_of(record, field) {
+                    *counts.entry(value.to_string()).or_insert(0) += 1;
+                }
+            }
+            counts.into_iter().map(move |(value, count)| {
+                crate::views::stats::CategoricalValueCount {
+                    field,
+                    value,
+                    count,
+                }
+            })
+        })
+        .collect()
+}
+
 pub fn parse_bucket(raw: Option<&String>) -> Result<Option<TimeBucket>, AppError> {
     match raw {
         None => Ok(None),
@@ -194,19 +225,7 @@ pub fn forecast(
     let n = series.len();
     let xs: Vec<f64> = (0..n).map(|i| i as f64).collect();
     let ys: Vec<f64> = series.iter().map(|point| point.value).collect();
-    let mean_x = xs.iter().sum::<f64>() / n as f64;
-    let mean_y = ys.iter().sum::<f64>() / n as f64;
-    let denominator: f64 = xs.iter().map(|x| (x - mean_x).powi(2)).sum();
-    let slope = if denominator == 0.0 {
-        0.0
-    } else {
-        xs.iter()
-            .zip(&ys)
-            .map(|(x, y)| (x - mean_x) * (y - mean_y))
-            .sum::<f64>()
-            / denominator
-    };
-    let intercept = mean_y - slope * mean_x;
+    let (slope, intercept) = slope_intercept(&xs, &ys);
     let last_start = series[n - 1].bucket_start;
     let mut predictions = Vec::with_capacity(periods as usize);
     for step in 1..=periods {
@@ -218,6 +237,30 @@ pub fn forecast(
         });
     }
     Ok(predictions)
+}
+
+/// Ordinary-least-squares slope and intercept for `xs`/`ys` (same length,
+/// non-empty). Guards the zero-variance case (every `x` equal) by
+/// returning a flat `0.0` slope instead of dividing by zero -- `forecast`
+/// itself never produces an all-equal `xs` (it's always `0..n` for
+/// `n >= 2`, whose variance is never zero), but the guard still has to be
+/// correct for any other caller.
+fn slope_intercept(xs: &[f64], ys: &[f64]) -> (f64, f64) {
+    let n = xs.len() as f64;
+    let mean_x = xs.iter().sum::<f64>() / n;
+    let mean_y = ys.iter().sum::<f64>() / n;
+    let denominator: f64 = xs.iter().map(|x| (x - mean_x).powi(2)).sum();
+    let slope = if denominator == 0.0 {
+        0.0
+    } else {
+        xs.iter()
+            .zip(ys)
+            .map(|(x, y)| (x - mean_x) * (y - mean_y))
+            .sum::<f64>()
+            / denominator
+    };
+    let intercept = mean_y - slope * mean_x;
+    (slope, intercept)
 }
 
 #[cfg(test)]
@@ -311,6 +354,16 @@ mod tests {
     }
 
     #[test]
+    fn slope_intercept_returns_a_flat_zero_slope_for_all_equal_xs() {
+        // Degenerate input `forecast` itself never produces (its `xs` is
+        // always `0..n`, whose variance is never zero) -- the guard still
+        // has to return `0.0` rather than `NaN` for any other caller.
+        let (slope, intercept) = slope_intercept(&[5.0, 5.0, 5.0], &[1.0, 2.0, 3.0]);
+        assert_eq!(slope, 0.0);
+        assert!((intercept - 2.0).abs() < 1e-9);
+    }
+
+    #[test]
     fn numeric_and_categorical_fields_classify_from_field_specs() {
         let specs = &[
             FieldSpec::number("id"),
@@ -320,6 +373,28 @@ mod tests {
         ];
         assert_eq!(numeric_fields(specs), vec!["id"]);
         assert_eq!(categorical_fields(specs), vec!["is_locked"]);
+    }
+
+    #[test]
+    fn categorical_counts_tallies_each_fields_value_distribution() {
+        struct Record {
+            is_locked: bool,
+        }
+        let records = vec![
+            Record { is_locked: true },
+            Record { is_locked: true },
+            Record { is_locked: false },
+        ];
+        let mut counts = categorical_counts(&records, &["is_locked"], |record, _field| {
+            Some(record.is_locked)
+        });
+        counts.sort_by(|a, b| a.value.cmp(&b.value));
+        assert_eq!(counts.len(), 2);
+        assert_eq!(counts[0].field, "is_locked");
+        assert_eq!(counts[0].value, "false");
+        assert_eq!(counts[0].count, 1);
+        assert_eq!(counts[1].value, "true");
+        assert_eq!(counts[1].count, 2);
     }
 
     #[test]

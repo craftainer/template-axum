@@ -86,18 +86,22 @@ repos:
         stages: [pre-push, manual]
 
       - id: cargo-llvm-cov
-        name: cargo llvm-cov (97% line-coverage floor)
+        name: cargo llvm-cov (99% line-coverage floor)
         # See docs/adrs/0010-80-percent-line-coverage-floor-via-cargo-llvm-cov.md
         # for why this number rather than template-fastapi's 95%, and
         # docs/nfrs/NFR-0023-test-coverage-gate.md for the requirement
         # this enforces. Raised from 80 to 92 when the integration tier
-        # (tests/) landed, and from 92 to 97 once that tier was extended
-        # to close every gap that didn't have a documented reason to stay
+        # (tests/) landed, from 92 to 97 once that tier was extended to
+        # close every gap that didn't have a documented reason to stay
         # open (Keycloak/Redis/a real Postgres health check/MQTT's
-        # `build_event_bus` branch) -- this hook now needs the
-        # devcontainer stack's Postgres, Redis, MQTT and Keycloak
-        # services running.
-        entry: cargo llvm-cov --fail-under-lines 97
+        # `build_event_bus` branch), and from 97 to 99 once the
+        # near-100% coverage pass closed almost every remaining item on
+        # that list, including Mode::Dev's own S3/Redis/Oidc health
+        # checks and the MQTT poll-error branches (dependency injection
+        # via `events::MqttPoll`) -- this hook now also needs the
+        # devcontainer stack's S3/RustFS running, alongside Postgres,
+        # Redis, MQTT and Keycloak.
+        entry: cargo llvm-cov --fail-under-lines 99
         language: system
         pass_filenames: false
         always_run: true

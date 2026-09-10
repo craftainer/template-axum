@@ -23,6 +23,7 @@ pub enum ListOrGet<M> {
 
 /// A resolved update: one record (an `?id=` request) or the result of a
 /// bulk update over the given filters.
+#[derive(Debug)]
 pub enum UpdateOutcome<M> {
     One(M),
     Bulk(BulkUpdateResult),
@@ -30,6 +31,7 @@ pub enum UpdateOutcome<M> {
 
 /// A resolved delete: one record deleted (an `?id=` request, -> 204) or
 /// the result of a bulk delete over the given filters.
+#[derive(Debug)]
 pub enum DeleteOutcome {
     One,
     Bulk(BulkDeleteResult),
@@ -96,8 +98,7 @@ where
     R::Model: HasId,
 {
     if let Some(id) = id {
-        let updated = crud.update(id, owner_id, data).await?;
-        let updated = updated.ok_or_else(|| not_found(id))?;
+        let updated = resolve_update_by_id(crud, id, owner_id, data).await?;
         return Ok(UpdateOutcome::One(updated));
     }
     if filters.is_empty() {
@@ -113,6 +114,23 @@ where
         matched: updated.len(),
         ids,
     }))
+}
+
+/// Update one record by id -- the id-only half of `resolve_update`,
+/// factored out for callers (`heroes_web.rs`) that only ever update by
+/// id and would otherwise have to handle an `UpdateOutcome::Bulk` arm
+/// their own logic can never produce.
+pub async fn resolve_update_by_id<R>(
+    crud: &CrudService<R>,
+    id: i32,
+    owner_id: &str,
+    data: R::Update,
+) -> Result<R::Model, AppError>
+where
+    R: Repository,
+{
+    let updated = crud.update(id, owner_id, data).await?;
+    updated.ok_or_else(|| not_found(id))
 }
 
 /// Delete one record by id, or bulk-delete every record matching the
@@ -189,10 +207,7 @@ mod tests {
     async fn resolve_delete_by_id_returns_not_found_when_missing() {
         let crud = service();
         let result = resolve_delete(&crud, Some(999), "alice", vec![], 1000).await;
-        let err = match result {
-            Ok(_) => panic!("deleting a nonexistent id must 404"),
-            Err(err) => err,
-        };
+        let err = result.expect_err("deleting a nonexistent id must 404");
         assert!(matches!(err, AppError::NotFound(_)));
     }
 
@@ -212,10 +227,7 @@ mod tests {
             2,
         )
         .await;
-        let err = match result {
-            Ok(_) => panic!("matching more records than max_matched must be rejected"),
-            Err(err) => err,
-        };
+        let err = result.expect_err("matching more records than max_matched must be rejected");
         assert!(matches!(err, AppError::UnprocessableEntity(_)));
     }
 
@@ -224,10 +236,7 @@ mod tests {
         let crud = service();
         seed(&crud, 3).await;
         let result = resolve_delete(&crud, None, "alice", filter(), 2).await;
-        let err = match result {
-            Ok(_) => panic!("matching more records than max_matched must be rejected"),
-            Err(err) => err,
-        };
+        let err = result.expect_err("matching more records than max_matched must be rejected");
         assert!(matches!(err, AppError::UnprocessableEntity(_)));
     }
 }

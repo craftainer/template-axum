@@ -168,6 +168,78 @@ pub fn state_for(db: DatabaseConnection, events: EventBus) -> AppState {
     }
 }
 
+pub fn oidc_issuer_url() -> String {
+    std::env::var("OIDC_ISSUER_URL")
+        .unwrap_or_else(|_| "http://keycloak:8080/realms/template-axum".to_string())
+}
+
+pub fn oidc_token_url() -> String {
+    std::env::var("OIDC_TOKEN_URL")
+        .unwrap_or_else(|_| format!("{}/protocol/openid-connect/token", oidc_issuer_url()))
+}
+
+/// Settings for the integration tier's `Mode::Dev` path: real Postgres/
+/// Redis/S3/MQTT/Keycloak coordinates, so a test can exercise a real
+/// backend's happy path instead of `Mode::Mock`'s fakes.
+pub fn dev_settings(oidc_audience: Option<String>) -> Arc<Settings> {
+    Arc::new(Settings {
+        app_name: "template-axum".to_string(),
+        mode: Mode::Dev,
+        allow_mock_mode: false,
+        postgres_user: std::env::var("POSTGRES_USER").unwrap_or_else(|_| "app".into()),
+        postgres_password: std::env::var("POSTGRES_PASSWORD").unwrap_or_else(|_| "app".into()),
+        postgres_db: std::env::var("POSTGRES_DB").unwrap_or_else(|_| "app".into()),
+        postgres_host: std::env::var("POSTGRES_HOST").unwrap_or_else(|_| "localhost".into()),
+        postgres_port: std::env::var("POSTGRES_PORT")
+            .ok()
+            .and_then(|port| port.parse().ok())
+            .unwrap_or(5432),
+        s3_endpoint_url: std::env::var("S3_ENDPOINT_URL")
+            .unwrap_or_else(|_| "http://localhost:9000".into()),
+        s3_access_key: std::env::var("S3_ACCESS_KEY").unwrap_or_else(|_| "rustfsadmin".into()),
+        s3_secret_key: std::env::var("S3_SECRET_KEY").unwrap_or_else(|_| "rustfsadmin".into()),
+        redis_url: std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://localhost:6379/0".into()),
+        mqtt_host: std::env::var("MQTT_HOST").unwrap_or_else(|_| "localhost".into()),
+        mqtt_port: std::env::var("MQTT_PORT")
+            .ok()
+            .and_then(|port| port.parse().ok())
+            .unwrap_or(1883),
+        rate_limit_mock_token_per_minute: 10_000,
+        rate_limit_hero_write_per_minute: 10_000,
+        bulk_action_max_matched: 1000,
+        oidc_issuer_url: oidc_issuer_url(),
+        oidc_authorization_url: format!("{}/protocol/openid-connect/auth", oidc_issuer_url()),
+        oidc_token_url: oidc_token_url(),
+        oidc_client_id: "api".to_string(),
+        oidc_audience,
+    })
+}
+
+/// Real Keycloak Resource Owner Password Credentials grant -- the `api`
+/// client is public with `directAccessGrantsEnabled` (`realm-export.json`),
+/// and every test user's password equals its username
+/// (`.devcontainer/stack/keycloak/README.md`).
+pub async fn keycloak_token(client: &reqwest::Client, username: &str) -> String {
+    let response = client
+        .post(oidc_token_url())
+        .form(&[
+            ("grant_type", "password"),
+            ("client_id", "api"),
+            ("username", username),
+            ("password", username),
+        ])
+        .send()
+        .await
+        .expect("Keycloak token request failed -- is the devcontainer stack running?");
+    assert_eq!(
+        response.status(),
+        200,
+        "Keycloak should issue a token for test user {username}"
+    );
+    let body: serde_json::Value = response.json().await.unwrap();
+    body["access_token"].as_str().unwrap().to_string()
+}
+
 /// A `Mode::Mock` bearer token (`docs/adrs/0005`) with the given roles.
 pub fn token(sub: &str, roles: &[&str]) -> String {
     jsonwebtoken::encode(

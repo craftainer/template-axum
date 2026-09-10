@@ -6,6 +6,8 @@
 
 use std::net::IpAddr;
 
+use template_axum::health::checks::RedisHealthCheck;
+use template_axum::health::HealthCheck;
 use template_axum::problem_details::AppError;
 use template_axum::rate_limit::RateLimiter;
 
@@ -38,4 +40,13 @@ async fn redis_backend_allows_up_to_the_limit_then_rejects() {
     }
     let err = limiter.check(&scope, ip(), 3, 60).await.unwrap_err();
     assert!(matches!(err, AppError::TooManyRequests(_)));
+}
+
+#[tokio::test]
+async fn redis_health_check_reports_healthy_against_a_real_redis() {
+    let check = RedisHealthCheck::new(redis_url());
+    assert_eq!(check.name(), "redis");
+    let result = check.check().await;
+    assert!(result.healthy, "{:?}", result.detail);
+    assert!(result.detail.is_none());
 }

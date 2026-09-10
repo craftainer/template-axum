@@ -50,6 +50,26 @@ impl AppProcess {
 
 impl Drop for AppProcess {
     fn drop(&mut self) {
+        // A real SIGTERM lets `main.rs`'s `shutdown_signal` drain and the
+        // process exit normally -- which is what flushes its LLVM
+        // coverage profile, unlike `.kill()` (SIGKILL, no cleanup ever
+        // runs). Falls back to `.kill()` if the process doesn't exit
+        // within ~2s, so a stuck shutdown can never hang the suite.
+        // SAFETY: `self.0.id()` is this child's own pid, valid until
+        // reaped below.
+        let killed_cleanly = unsafe { libc::kill(self.0.id() as libc::pid_t, libc::SIGTERM) } == 0;
+        if killed_cleanly {
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            loop {
+                match self.0.try_wait() {
+                    Ok(Some(_)) => return,
+                    Ok(None) if std::time::Instant::now() < deadline => {
+                        std::thread::sleep(Duration::from_millis(50));
+                    }
+                    _ => break,
+                }
+            }
+        }
         let _ = self.0.kill();
         let _ = self.0.wait();
     }

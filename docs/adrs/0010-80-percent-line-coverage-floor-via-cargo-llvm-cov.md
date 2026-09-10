@@ -77,57 +77,110 @@ hero_memory`'s filter/sort functions. The suite measured 98.06% of
 pinning the gate to the exact measurement, so an unrelated refactor that
 shifts a few lines doesn't fail the build for no reason.
 
-What is deliberately left uncovered, and why chasing literal 100% is not
-worth it:
+**It is now 99%** (`cargo llvm-cov --fail-under-lines 99`), raised again
+after `docs/plans/2026-09-real-100-percent-coverage.md` re-examined every
+item on the list below against what this devcontainer stack actually
+provides (Postgres, Redis, MQTT, Keycloak *and* S3/RustFS are all live,
+not just the four the gate previously depended on) and closed all but a
+small, individually-justified remainder. The suite measured 99.37% of
+`src/` at the time of this change; 99 leaves a small margin rather than
+pinning the gate to the exact measurement, the same reasoning as every
+earlier raise. Notably:
 
-- `main.rs` -- a `#[tokio::main]` entry point that binds a socket and
-  serves forever. It is thin *by design* (`docs/adrs/0016`): everything
-  worth testing was moved into `lib.rs`, which is covered. Exercising
-  what remains would mean starting the real process. (`tests/e2e.rs`
-  does start it, but kills the child process rather than shutting it
-  down, so its coverage profile never flushes -- see that file's own
-  `AppProcess::drop`.)
-- `telemetry.rs::configure_logging` -- installs a global
-  `tracing_subscriber`, which can only be done once per process, so a
-  test asserting on it would break every other test's logging. The
-  OTLP-exporter-build failure path it also covers is unit-tested
-  directly (`otlp_log_layer`, without calling `configure_logging`
-  itself).
-- The `Mode::Dev`/`Mode::Production` halves of `lib.rs`'s
-  `build_state`/`build_health_registry`, and `health::checks`'
-  `S3`/`Redis`/`Oidc` checks' own happy paths: these connect to real
-  backing services from a path that also calls `std::process::exit`-
-  adjacent `expect`s on failure. `DatabaseHealthCheck`'s happy path
-  *is* covered (`tests/postgres_health_check.rs`) since Postgres is
-  already this tier's own dependency and constructing one doesn't touch
-  that `expect`-guarded wiring; `lib::build_event_bus`'s real-broker
-  branch is similarly covered directly (`tests/mqtt_events.rs`) since
-  the ADR's concern -- an `expect` on connection failure -- doesn't
-  apply to it.
-- `events.rs`' and `controllers::crud_events`' JSON-encode-failure
-  branches: `CrudEvent` is a plain struct of owned scalars, so neither
-  is reachable without a type that can't actually fail to serialize.
-- `events.rs`' MQTT poll-error backoff/reconnect-limit branches: only
-  reachable by actually breaking the broker connection mid-test, which
-  the integration tier's other tests already avoid needing (they use
-  the real broker's success path throughout).
-- `controllers::heroes`'s categorical-stats branch: dead code for Hero
-  specifically, which has no boolean/categorical field (see
-  `boolean_value`'s own doc comment) -- the mechanism exists for a
-  future resource that has one.
-- `controllers::crud_stats::forecast`'s zero-denominator branch:
-  structurally unreachable given `forecast`'s own bucket-index scheme
-  (`0..n` for `n >= 2`), which can never produce equal x-values.
+- `telemetry::configure_logging` -- moved out of "untestable" into its
+  own integration-tier file (`tests/telemetry_configure_logging.rs`),
+  since Cargo builds every `tests/` file as its own process, so calling
+  it there once never collides with any other test's global
+  `tracing_subscriber`.
+- The `Mode::Dev` halves of `lib.rs`'s `build_state`/
+  `build_health_registry`, and `health::checks`'s `S3`/`Redis`/`Oidc`
+  checks' own happy paths: now exercised directly against the
+  devcontainer stack's real services (`tests/dev_mode_wiring.rs`,
+  `tests/s3_health_check.rs`, and additions to
+  `tests/redis_rate_limiter.rs`/`tests/keycloak_oidc.rs`) -- the
+  `expect()`s these paths also carry only fire on a *misconfigured*
+  connection, which running against the live stack never exercises.
+- `events.rs`' MQTT poll-error backoff/reconnect-limit branches: rather
+  than risk the shared broker connection mid-suite (which would flake
+  every other MQTT test running concurrently), `rumqttc`'s `EventLoop`
+  is now wrapped behind a small `events::MqttPoll` trait
+  (`poll(&mut self) -> Result<Event, ConnectionError>`), and a
+  test-only fake returns a scripted sequence of errors -- both the
+  subscriber-side (`EventStream::next_event`) and publisher-side
+  (`drive_publisher_eventloop`) poll loops are covered this way. This is
+  the one production type whose shape changed purely for testability
+  (flagged as a separate go/no-go in the plan before it was done).
+- `main.rs` -- no longer thin-by-design-and-therefore-unreachable:
+  `axum::serve(..).with_graceful_shutdown(shutdown_signal)` was added
+  (a real operational improvement on its own -- the process previously
+  had no clean shutdown at all), and `tests/e2e.rs`'s `AppProcess::drop`
+  now sends a real `SIGTERM` (falling back to `.kill()` only if the
+  child doesn't exit within ~2s) instead of killing the child outright,
+  so the process's normal-return path -- which is what flushes an LLVM
+  coverage profile -- actually gets attributed. `tests/
+  main_failure_modes.rs` separately covers `Settings::from_env`'s error
+  branch (`MODE=bogus`) and `TcpListener::bind`'s `.expect()` (port
+  already in use), letting the child exit **on its own** in both cases
+  (a panic/`exit()` both run libc's `atexit` handlers) rather than being
+  killed by `AppProcess`, plus the `shutdown_signal`'s `SIGINT` arm.
+- `controllers::heroes`'s categorical-stats branch: the counting loop
+  moved into `crud_stats::categorical_counts`, generic over any record
+  type the same way `numeric_stat`/`numeric_fields` already are, and is
+  unit-tested directly there with a local struct that *does* have a
+  boolean field -- `heroes.rs`'s own call site (still zero iterations
+  for Hero, which has none) is unaffected.
+- `controllers::crud_stats::forecast`'s zero-denominator branch: the
+  slope/intercept computation moved into its own pure `slope_intercept`
+  function, unit-tested directly with a degenerate all-equal-`x` input
+  `forecast` itself can never produce.
 - `controllers::heroes_web`'s two error branches (`hero_crud.list`/
-  `create` failing) and its one `unreachable!()` match arm: the
-  in-memory repository these unit tests use cannot fail those calls at
-  all, and the `unreachable!()` is exactly that.
+  `create` failing) and its one `unreachable!()` match arm: a
+  fault-injecting `Repository` fake now covers the two error branches
+  directly (`FaultyRepository` in `heroes_web.rs`'s own test module),
+  and the `unreachable!()` is gone entirely -- `update` now calls a new
+  `crud_actions::resolve_update_by_id`, the id-only half of
+  `resolve_update` factored out, so its `match` no longer has a `Bulk`
+  arm to be unreachable.
 - A handful of `Ok(_) => panic!(...)` arms inside this tier's own test
-  helpers, and one keep-alive-comment-skip branch in an SSE test helper
-  (`controllers::crud_events::tests::first_frames`) that would need a
-  real ~15s wait for axum's keep-alive interval to fire -- present for
-  the case where a test's own assumption breaks, not something the
-  suite is meant to exercise.
+  helpers became a plain `.expect_err(...)`, and the keep-alive-comment-
+  skip branches in two SSE test helpers (`controllers::crud_events`'s
+  and `controllers::heroes`'s) are now covered directly: the keep-alive
+  interval those helpers wait on has a `#[cfg(test)]` override of a few
+  milliseconds (the same pattern `REDIS_TIMEOUT` already used), so a
+  dedicated test can wait past it before publishing the real event it
+  asserts on.
+
+What is still deliberately left uncovered, and why chasing the exact
+remainder is not worth it:
+
+- `events.rs`' and `controllers::crud_events`' JSON-encode-failure
+  *dispatch* arms (the `Err(err) => ...` line itself, as opposed to the
+  handler function it now calls, which *is* unit-tested): `CrudEvent` is
+  a plain struct of owned scalars, so neither is reachable without a
+  type that can't actually fail to serialize.
+- `events.rs`' live-broker publish-failure `warn!` (`EventBus::publish`'s
+  `Mqtt` arm): unlike the poll loops above, `AsyncClient::publish`
+  itself isn't behind an injectable trait -- wrapping it too would mean
+  changing a second production type's shape purely for testability,
+  which the plan's own go/no-go scoped to the `EventLoop` abstraction
+  only.
+- A `let-else { panic!(...) }`/`{ break; }` arm apiece inside two of this
+  tier's own test helpers (`crud_query.rs`'s filter-parsing test, and
+  the two colocated `sse_frames`/`first_frames` SSE helpers' stream-
+  ended-early fallback) -- present for the case where a test's own
+  assumption breaks, not something the suite is meant to exercise.
+- `controllers::heroes_web`'s `FaultyRepository` test fake: every method
+  besides `list`/`create` (the two these tests actually exercise) is an
+  `unimplemented!()` stub, by design (the plan's own words: "these two
+  tests never call anything else") -- those stub bodies are counted as
+  uncovered lines but are not lines any real behavior runs through.
+- A small number of individually pre-existing, narrow branches
+  elsewhere (`config.rs`, `oidc/mod.rs`, `rate_limit.rs`,
+  `repositories/hero_sea_orm.rs`, `heroes_v1.rs`, `heroes_v1_xml.rs`,
+  `heroes_xml.rs`, `controllers::mock`) that predate this pass and
+  remain within the floor's margin -- each is a single defensive
+  arm/branch of the same already-covered shape as its siblings, not a
+  distinct untested code path.
 
 Wired as a `pre-push`/`manual`-stage hook in `.pre-commit-config.yaml`
 (`cargo-llvm-cov`), alongside the existing `cargo-check`/`cargo-audit`
@@ -142,13 +195,14 @@ Easier: a real, CI-enforced signal exists that a change didn't add an
 entirely untested code path, at a floor that reflects what Rust's own
 type system already verifies rather than double-charging for it.
 Contributors get one clear command (`cargo llvm-cov --fail-under-lines
-97`) with the same local/CI behavior as template-fastapi's `pytest
+99`) with the same local/CI behavior as template-fastapi's `pytest
 --cov`.
 
-Harder: raising the floor to 92, and then 97, means the integration
-tier is now load-bearing for the gate: `cargo llvm-cov` no longer passes
-without the devcontainer stack's Postgres, Redis, MQTT and Keycloak
-services running, where the 80% Tier-A-only floor did.
+Harder: raising the floor to 92, then 97, and then 99, means the
+integration tier is now load-bearing for the gate: `cargo llvm-cov` no
+longer passes without the devcontainer stack's Postgres, Redis,
+S3/RustFS, MQTT and Keycloak services running, where the 80%
+Tier-A-only floor did.
 
 `cargo-llvm-cov` also requires
 the `llvm-tools-preview` rustup component (already available via the

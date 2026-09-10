@@ -267,17 +267,8 @@ async fn update(
         Ok(subject) => subject.to_string(),
         Err(err) => return err.into_response(),
     };
-    match crud_actions::resolve_update(
-        &state.hero_crud,
-        Some(id),
-        &owner_id,
-        vec![],
-        update,
-        state.settings.bulk_action_max_matched,
-    )
-    .await
-    {
-        Ok(crud_actions::UpdateOutcome::One(hero)) => {
+    match crud_actions::resolve_update_by_id(&state.hero_crud, id, &owner_id, update).await {
+        Ok(hero) => {
             crud_events::publish(
                 &state.events,
                 HERO_EVENT_RESOURCE,
@@ -286,9 +277,6 @@ async fn update(
             )
             .await;
             Redirect::to(&format!("/heroes/form?token={token}")).into_response()
-        }
-        Ok(crud_actions::UpdateOutcome::Bulk(_)) => {
-            unreachable!("an `?id=` update never takes the bulk path")
         }
         Err(err) => err.into_response(),
     }
@@ -441,6 +429,128 @@ mod tests {
     async fn body_text(response: Response) -> String {
         let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         String::from_utf8(bytes.to_vec()).unwrap()
+    }
+
+    /// Always fails `list`/`create` -- the in-memory repository these
+    /// tests otherwise use never returns `Err`, so `form_page`/`create`'s
+    /// own error-mapping branches are otherwise unreachable. Every other
+    /// method is unused by the two tests that exercise this fake.
+    #[derive(Default)]
+    struct FaultyRepository;
+
+    #[async_trait::async_trait]
+    impl crate::repositories::Repository for FaultyRepository {
+        type Model = hero::Model;
+        type Create = crate::views::hero::HeroCreate;
+        type Update = crate::views::hero::HeroUpdate;
+
+        async fn list(
+            &self,
+            _opts: crate::repositories::ListOptions,
+        ) -> Result<Vec<Self::Model>, crate::repositories::RepoError> {
+            Err(crate::repositories::RepoError::Backend("boom".to_string()))
+        }
+
+        async fn count(
+            &self,
+            _filters: &[crate::repositories::filtering::FilterClause],
+            _include_archived: bool,
+        ) -> Result<u64, crate::repositories::RepoError> {
+            unimplemented!()
+        }
+
+        async fn get(
+            &self,
+            _id: i32,
+            _include_archived: bool,
+        ) -> Result<Option<Self::Model>, crate::repositories::RepoError> {
+            unimplemented!()
+        }
+
+        async fn create(
+            &self,
+            _owner_id: &str,
+            _data: Self::Create,
+        ) -> Result<Self::Model, crate::repositories::RepoError> {
+            Err(crate::repositories::RepoError::Backend("boom".to_string()))
+        }
+
+        async fn update(
+            &self,
+            _id: i32,
+            _owner_id: &str,
+            _data: Self::Update,
+        ) -> Result<Option<Self::Model>, crate::repositories::RepoError> {
+            unimplemented!()
+        }
+
+        async fn update_many(
+            &self,
+            _filters: &[crate::repositories::filtering::FilterClause],
+            _data: Self::Update,
+        ) -> Result<Vec<Self::Model>, crate::repositories::RepoError> {
+            unimplemented!()
+        }
+
+        async fn delete(
+            &self,
+            _id: i32,
+            _owner_id: &str,
+        ) -> Result<bool, crate::repositories::RepoError> {
+            unimplemented!()
+        }
+
+        async fn delete_many(
+            &self,
+            _filters: &[crate::repositories::filtering::FilterClause],
+        ) -> Result<Vec<Self::Model>, crate::repositories::RepoError> {
+            unimplemented!()
+        }
+    }
+
+    fn app_with_faulty_repository() -> Router {
+        let settings = Arc::new(mock_settings());
+        let state = AppState {
+            oidc: Arc::new(OidcVerifier::new(settings.clone())),
+            settings,
+            health_registry: Arc::new(HealthRegistry::new()),
+            hero_crud: Arc::new(crate::crud::CrudService::new(DynHeroRepository(Box::new(
+                FaultyRepository,
+            )))),
+            rate_limiter: Arc::new(crate::rate_limit::RateLimiter::mock()),
+            events: Arc::new(crate::events::EventBus::mock()),
+        };
+        router().with_state(state)
+    }
+
+    #[tokio::test]
+    async fn form_page_maps_a_repository_failure_to_an_app_error_response() {
+        let response = app_with_faulty_repository()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/form?token={}", token("alice", &["viewer"])))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn create_maps_a_repository_failure_to_an_app_error_response() {
+        let response = app_with_faulty_repository()
+            .oneshot(with_addr(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/form?token={}", token("alice", &["editor"])))
+                    .header("Content-Type", "application/x-www-form-urlencoded")
+                    .body(Body::from("name=Spectra&powers=flight&power_level=5"))
+                    .unwrap(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 
     #[tokio::test]

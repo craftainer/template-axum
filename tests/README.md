@@ -102,23 +102,25 @@ happy path had no end-to-end coverage before.
 
 ## Coverage gate
 
-`cargo llvm-cov --fail-under-lines 97` measures `src/`'s line coverage
-across the unit **and** integration tiers and fails below a 97% floor —
+`cargo llvm-cov --fail-under-lines 99` measures `src/`'s line coverage
+across the unit **and** integration tiers and fails below a 99% floor —
 see `docs/nfrs/NFR-0023-test-coverage-gate.md` and
 `docs/adrs/0010-80-percent-line-coverage-floor-via-cargo-llvm-cov.md`
 for why this number rather than template-fastapi's 95%: Rust's type
 system statically rules out a class of bug the Python floor is partly
 there to catch at runtime, so the same number would be cargo-culted, not
 justified. (The floor was 80% while the unit tier was the only one
-collected, then 92% once the integration tier landed; that ADR records
-both raises and what stays deliberately uncovered at 97%.)
+collected, then 92% once the integration tier landed, then 97% once
+that tier closed the Keycloak/Redis/Postgres/MQTT gaps; that ADR records
+every raise and the small, individually-justified list of what stays
+deliberately uncovered at 99%.)
 
 Because the integration tier reaches real services, this command now
-needs the devcontainer stack's Postgres, Redis, MQTT and Keycloak
-running.
+needs the devcontainer stack's Postgres, Redis, S3/RustFS, MQTT and
+Keycloak running.
 
 ```bash
-cargo llvm-cov --fail-under-lines 97
+cargo llvm-cov --fail-under-lines 99
 ```
 
 Wired into `.pre-commit-config.yaml` as `cargo-llvm-cov`, `pre-push`/

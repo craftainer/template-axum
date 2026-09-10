@@ -9,71 +9,13 @@
 
 use std::sync::Arc;
 
-use template_axum::config::{Mode, Settings};
+use template_axum::health::checks::OidcHealthCheck;
+use template_axum::health::HealthCheck;
 use template_axum::oidc::OidcVerifier;
 use template_axum::problem_details::AppError;
 
-fn oidc_issuer_url() -> String {
-    std::env::var("OIDC_ISSUER_URL")
-        .unwrap_or_else(|_| "http://keycloak:8080/realms/template-axum".to_string())
-}
-
-fn oidc_token_url() -> String {
-    std::env::var("OIDC_TOKEN_URL")
-        .unwrap_or_else(|_| format!("{}/protocol/openid-connect/token", oidc_issuer_url()))
-}
-
-fn dev_settings(oidc_audience: Option<String>) -> Arc<Settings> {
-    Arc::new(Settings {
-        app_name: "template-axum".to_string(),
-        mode: Mode::Dev,
-        allow_mock_mode: false,
-        postgres_user: "app".to_string(),
-        postgres_password: "app".to_string(),
-        postgres_db: "app".to_string(),
-        postgres_host: "localhost".to_string(),
-        postgres_port: 5432,
-        s3_endpoint_url: "http://localhost:9000".to_string(),
-        s3_access_key: "rustfsadmin".to_string(),
-        s3_secret_key: "rustfsadmin".to_string(),
-        redis_url: "redis://localhost:6379/0".to_string(),
-        mqtt_host: "localhost".to_string(),
-        mqtt_port: 1883,
-        rate_limit_mock_token_per_minute: 10_000,
-        rate_limit_hero_write_per_minute: 10_000,
-        bulk_action_max_matched: 1000,
-        oidc_issuer_url: oidc_issuer_url(),
-        oidc_authorization_url: format!("{}/protocol/openid-connect/auth", oidc_issuer_url()),
-        oidc_token_url: oidc_token_url(),
-        oidc_client_id: "api".to_string(),
-        oidc_audience,
-    })
-}
-
-/// Real Keycloak Resource Owner Password Credentials grant -- the `api`
-/// client is public with `directAccessGrantsEnabled` (`realm-export.json`),
-/// and every test user's password equals its username
-/// (`.devcontainer/stack/keycloak/README.md`).
-async fn keycloak_token(client: &reqwest::Client, username: &str) -> String {
-    let response = client
-        .post(oidc_token_url())
-        .form(&[
-            ("grant_type", "password"),
-            ("client_id", "api"),
-            ("username", username),
-            ("password", username),
-        ])
-        .send()
-        .await
-        .expect("Keycloak token request failed -- is the devcontainer stack running?");
-    assert_eq!(
-        response.status(),
-        200,
-        "Keycloak should issue a token for test user {username}"
-    );
-    let body: serde_json::Value = response.json().await.unwrap();
-    body["access_token"].as_str().unwrap().to_string()
-}
+mod common;
+use common::{dev_settings, keycloak_token, oidc_issuer_url};
 
 #[tokio::test]
 async fn decodes_and_caches_a_real_keycloak_token() {
@@ -195,4 +137,13 @@ async fn the_auth_claims_extractor_rejects_a_bad_bearer_token_over_http() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn oidc_health_check_reports_healthy_against_a_real_keycloak() {
+    let check = OidcHealthCheck::new(oidc_issuer_url());
+    assert_eq!(check.name(), "oidc");
+    let result = check.check().await;
+    assert!(result.healthy, "{:?}", result.detail);
+    assert!(result.detail.is_none());
 }

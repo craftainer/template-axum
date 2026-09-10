@@ -5070,6 +5070,7 @@ dependencies = [
  "futures",
  "getrandom 0.4.3",
  "jsonwebtoken",
+ "libc",
  "oauth2",
  "openidconnect",
  "opentelemetry",

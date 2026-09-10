@@ -162,6 +162,11 @@ opentelemetry-appender-tracing = { version = "=0.32.0", default-features = false
 
 [dev-dependencies]
 tower = { version = "=0.5.3", features = ["util"] }
+# tests/e2e.rs's `AppProcess::drop` only: `std::process::Child` has no
+# signal-other-than-kill API, so sending a real SIGTERM (for a clean
+# `main.rs` shutdown, which is what flushes the LLVM coverage profile)
+# needs the raw libc call.
+libc = "=0.2.189"
 
 [profile.release]
 # Smaller, faster runner-stage binary at the cost of build time -- worth it
