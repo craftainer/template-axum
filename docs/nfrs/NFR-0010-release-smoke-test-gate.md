@@ -18,8 +18,8 @@ shall not proceed to SBOM generation or publishing.
 
 ## Source
 
-Operators/SRE; release engineering. Implemented in the root `compose.yml`
-(the backing-service stack), invoked from
+[Release engineering](../stakeholders.md). Implemented in the root
+`compose.yml` (the backing-service stack), invoked from
 `.github/workflows/release.yml`.
 
 ## Verification
