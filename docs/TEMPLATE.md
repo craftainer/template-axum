@@ -5,40 +5,42 @@ identical across every instance of this template — as opposed to the root
 `README.md`'s short, instance-owned preface. See `../CLAUDE.md`'s "Keeping
 this file current" for where a new convention belongs.
 
-`template-base` ships the generic "devcontainer + CI + AI-assisted
-workflow" scaffold only — no application runtime, no backing services, no
-language assumed. It carries no `src/`/`tests/` of its own. An instance
-(a Python/Node.js/Rust/Go library, an infra-only repo, or a full
-application) adds its own language runtime, backing services, and release
-artifact on top of the shape described here.
-
 ## Contents
 
-- `.devcontainer/` — the devcontainer setup; see its `README.md`. An
-  instance that needs backing services adds a `stack/` directory here,
-  following the "Devcontainer stack pattern" convention this template's
-  own instances (e.g. `template-fastapi`) already establish.
+- `.devcontainer/` — the devcontainer setup; see its `README.md`. Its
+  `stack/` directory holds one subdirectory per backing service
+  (Postgres, Redis, S3/RustFS, Keycloak, MQTT, Selenium); see
+  `stack/README.md`'s "Devcontainer stack pattern".
 - `.github/` — CI and release workflows; see its `CONTENTS.md`.
 - `.vscode/` — editor settings, tasks; see its `README.md`.
 - `.claude/` — Claude Code CLI project config; see its `README.md`.
 - `.mcp.json` — project-scope MCP servers not covered by a
   `.claude/settings.json` plugin; see `.claude/README.md`.
-- `docs/` — knowledge about what the instance does; this file is the one
+- `src/` — the application source (a `[lib]` + `[[bin]]` crate,
+  `template_axum`); see its `README.md` for the module layering.
+- `tests/` — integration/e2e-equivalent/perf tests that link against
+  `src/`'s library target; unit tests stay colocated in `src/` as
+  `#[cfg(test)] mod tests` blocks. See `tests/README.md`.
+- `migration/` (under `src/`) — SeaORM migrations, applied automatically
+  at startup; see `src/README.md`'s "Migrations".
+- `scripts/` — the Dockerfile's per-stage setup scripts (`develop.sh`,
+  `runner-setup.sh`); see `scripts/README.md`.
+- `docs/` — knowledge about what the app does; this file is the one
   exception, documenting the template itself rather than product/domain
-  knowledge. `adrs/`, `frs/`, `nfrs/`, `plans/` ship only their own
-  `README.md` + `template.md` scaffolding — no numbered content, which is
-  entirely instance-owned.
+  knowledge.
 - `.secrets/` — local secret files, never committed; see its `README.md`.
-- `Dockerfile` — a single `develop` stage (the devcontainer image). An
-  instance adds its own `builder`/`runner` (or equivalent) stages on top
-  for its own release artifact.
-- `scripts/develop.sh` — the `develop` stage's setup script; see
-  `scripts/README.md`.
+- `Dockerfile` — three build stages: `develop` (devcontainer), `builder`,
+  `runner` (the release artifact).
+- `compose.yml` — the release smoke-test stack (`NFR-0010`), distinct
+  from `.devcontainer/compose.yml`; see `.github/workflows/README.md`'s
+  "Issue moderation"-adjacent release notes and `compose.yml`'s own
+  header comment for which backing services it includes and why.
+- `Cargo.toml` / `Cargo.lock` — dependencies, pinned to exact versions;
+  Renovate bumps them one at a time.
 - `Makefile` — the release contract `release.yml` drives
-  (`build`/`sbom`/`release-assets`/`publish`), each a documented no-op
-  here — see "Release: a Makefile contract" below.
-- `.pre-commit-config.yaml` — git hooks, run by `prek` or `pre-commit`;
-  language-agnostic hooks only.
+  (`build`/`sbom`/`release-assets`/`publish`); see "Release: a Makefile
+  contract" below.
+- `.pre-commit-config.yaml` — git hooks, run by `prek` or `pre-commit`.
 - `CLAUDE.md` — the AI-assisted coding workflow Claude Code follows in
   this repository; general conventions live in this file and each
   directory's own `README.md` instead.
@@ -47,24 +49,51 @@ artifact on top of the shape described here.
 
 1. Open this folder in a devcontainer (VS Code: "Reopen in Container" —
    `.vscode/extensions.json` recommends the extension that offers this —
-   or any tool that reads `.devcontainer/devcontainer.json`). This builds
-   the `develop` stage and installs the git hooks via `postCreateCommand`.
-2. There's nothing to run yet — `template-base` ships no application. An
-   instance documents its own "run the app" / "run the CLI" step here.
+   or any tool that reads `.devcontainer/devcontainer.json`). This starts
+   the app alongside Postgres, Redis, S3 (RustFS), Keycloak (OIDC), MQTT,
+   and a Selenium container Playwright can drive remotely; builds the
+   `develop` stage; and installs the git hooks, all via
+   `postCreateCommand`.
+2. Run the app: `cargo run` (binary name `template-axum`), or attach a
+   debugger to the same command. Startup applies any pending SeaORM
+   migrations automatically, before the server starts accepting requests
+   — see `src/README.md`'s "Migrations".
+3. Health check: `curl localhost:8000/health/live` (liveness) or
+   `curl localhost:8000/health/ready` (readiness — checks Postgres,
+   Redis, S3, and the OIDC provider).
+   `curl localhost:8000/crud/v1/heroes/v2/json` is the worked example
+   CRUD resource (see `src/README.md`'s "Example CRUD resource: Hero").
+   Writes need a bearer token from Keycloak — see
+   `.devcontainer/stack/keycloak/README.md` — or, under
+   `MODE=mock`/`ALLOW_MOCK_MODE=1`, `POST /mock/token` mints one without
+   Keycloak at all (see `src/README.md`'s "MODE" section).
 
-Without a devcontainer: install [`prek`](https://prek.j178.dev/) and run
-`prek install` once to enable the git hooks; install whatever else your
-instance's own toolchain needs.
+Without a devcontainer: install the pinned Rust toolchain (`Dockerfile`'s
+`RUST_VERSION` ARG) via [`rustup`](https://rustup.rs/), export the
+`POSTGRES_*` / `S3_ENDPOINT_URL` / `RUSTFS_ACCESS_KEY` /
+`RUSTFS_SECRET_KEY` / `REDIS_URL` / `OIDC_ISSUER_URL` /
+`OIDC_AUTHORIZATION_URL` / `OIDC_TOKEN_URL` / `OIDC_CLIENT_ID` /
+`OIDC_AUDIENCE` variables `src/config.rs` reads (or run under
+`MODE=mock`, `ALLOW_MOCK_MODE=1` for zero infrastructure), then
+`cargo run` the same way. Install [`prek`](https://prek.j178.dev/) and
+run `prek install` once to enable the git hooks.
 
 ## Checks
 
 `.pre-commit-config.yaml` defines whitespace/EOF fixers, YAML/TOML/JSON
 checks, `conventional-pre-commit` (Conventional Commits, enforced at the
-`commit-msg` stage), and the `template-sync-manifest` completeness check.
-An instance layers its own language-specific hooks on top (lint,
-format, type check, test suite, dependency-vulnerability scan, ...),
-matching the shape `template-fastapi`'s own `.pre-commit-config.yaml`
-already establishes for `ruff`/`mypy`/`pytest`/`pip-audit`.
+`commit-msg` stage), the `template-sync-manifest` completeness check, and
+this instance's own Rust hooks: `cargo fmt --check` and `cargo clippy
+--all-targets -- -D warnings` (both on every commit); `cargo check
+--all-targets`, `cargo test` (unit tier colocated in `src/`, plus the
+integration/e2e-equivalent tiers in `tests/` — see `tests/README.md`),
+`cargo llvm-cov` (a 97% line-coverage floor — see
+`docs/adrs/0010-80-percent-line-coverage-floor-via-cargo-llvm-cov.md` and
+`docs/nfrs/NFR-0023-test-coverage-gate.md`), and `cargo audit`
+(dependency vulnerabilities) on push only, since they need the
+devcontainer stack's real backing services and take longer to run.
+`.github/renovate.json` opens a weekly update PR for Rust dependencies,
+GitHub Actions, and every Dockerfile/compose image tag.
 
 Run everything at once with:
 
@@ -77,46 +106,50 @@ so the command above runs everything else regardless of which git hook
 would normally trigger it. Commit messages can only be checked by
 actually committing (see the comment in `.pre-commit-config.yaml`).
 
+If a lint rule produces a false positive, silence that one line with a
+justified `#[allow(clippy::<lint>)]` (with a comment explaining why)
+rather than loosening the project-wide `clippy` configuration or
+disabling the lint entirely.
+
 CI (`.github/workflows/checks.yml`) runs the same `--hook-stage manual`
 command, inside the devcontainer itself, on every push and pull request
-— as an `amd64`/`arm64` matrix, both legs native (no QEMU).
+— as an `amd64`/`arm64` matrix, both legs native (no QEMU; see
+`.github/workflows/README.md`'s "Architecture matrix"). `perf.yml` runs
+the `tests/perf` `goose` load test against the built `runner` image on
+`workflow_dispatch` (not per-PR — see
+`docs/adrs/0018-goose-for-load-testing-not-locust.md`).
 `.github/workflows/release.yml` is triggered manually to cut an
-alpha/beta/rc/full release — see "Release: a Makefile contract" below and
-`.github/workflows/README.md`.
+alpha/beta/rc/full release — see "Release: a Makefile contract" below
+and `.github/workflows/README.md`.
 
 ## Release: a Makefile contract
 
 `release.yml` computes the next SemVer tag (`compute_next_version.py`,
-unchanged across every instance), then runs, in order:
+unchanged across every instance), runs `make build`, then the release
+smoke-test gate (`NFR-0010`: boots the built `runner` image against
+`compose.yml`'s real Postgres/Redis/S3/Keycloak stack and polls
+`/health/ready`), then:
 
-- `make build` — produce whatever the release artifact(s) are (build an
-  image, `cargo build --release`, `npm pack`, `helm package`,
-  `python -m build`, a Terraform plan bundle, ...).
-- `make sbom` — write an SBOM for what `build` produced, in whatever way
-  fits (Syft against an image, `cyclonedx-py`/`npm sbom`/`cargo cyclonedx`
-  against a package, or a no-op target for a repo with nothing to scan).
-- `make release-assets` — populate `dist/` (gitignored) with every file
-  that should be attached to the GitHub release; `release.yml` just globs
-  that directory, so it never needs to know whether it's attaching a
-  `.tar`, `.whl`, `.tgz`, or a chart archive.
-- `make publish` — push to whatever registry applies (OCI registry, PyPI,
-  npm, a Helm repo), skipping cleanly when the relevant registry
-  variable/secret isn't set, or a no-op target when there's nothing to
-  push.
+- `make build` — `docker build --target runner`, producing the OCI
+  `runner` image.
+- `make sbom` — an SPDX SBOM for that image via Syft, run against the
+  local Docker daemon.
+- `make release-assets` — populates `dist/` (gitignored) with the saved
+  image tarball and its SBOM; `release.yml` just globs that directory,
+  so it never needs to know the exact filenames.
+- `make publish` — tags and pushes the image to `OCI_REGISTRY` if that
+  repository/organization variable is set, skipping cleanly otherwise
+  (see `.github/workflows/README.md`'s "OCI registry" section).
 
 `release.yml` then runs `gh release create` with everything found in
 `dist/`. Two environment variables are available to every target:
 `RELEASE_VERSION` (e.g. `1.2.3` or `1.2.3-alpha.1`) and `RELEASE_TAG`
-(the same, `v`-prefixed) — use them where the artifact itself needs to
-embed or tag with the version (e.g. an image tag).
+(the same, `v`-prefixed) — the `Makefile` uses `RELEASE_VERSION` to tag
+the image and name `dist/`'s files.
 
-This repo's own `Makefile` implements every target as a documented
-no-op, since `template-base` ships no artifact — it's both a working
-example of the contract's shape and what `release.yml` needs to run
-cleanly if this repo itself is ever released. An instance's `Makefile` is
-not template-owned (it's the whole point that it differs per artifact
-type), so it's tracked like any other instance-owned file — untouched by
-this template's own sync manifest.
+This instance's `Makefile` is not template-owned (it's the whole point
+that it differs per artifact type), so it's tracked like any other
+instance-owned file — untouched by this template's own sync manifest.
 
 ## Template sync
 
@@ -134,41 +167,53 @@ resolve. An instance that predates this workflow bootstraps its
 `initial_sync_tag`/`template_repo` inputs first.
 
 A repo can itself be both an instance of `template-base` *and* its own
-template for further instances (e.g. `template-fastapi`): its own
+template for further instances (e.g. `template-fastapi`, the Python
+counterpart this repo mirrors): its own
 `.github/template-sync-manifest.yml` classifies its *own* tracked files
 for *its* downstream instances, entirely separate from this template's
-manifest — see that repo's own docs for the two-hop chain this produces.
+manifest.
 
 ## Versions and config
 
 Every version and config value is defined in exactly one place; nothing
-duplicates or re-pins it elsewhere. Everything pinned here (base image,
-Actions, hook revisions, `prek`/Claude Code CLI/`snip`/`uv`/Python/
-Node.js versions) is pinned once, at its single point of use, to an exact
-patch version — never a floating range or `latest` — so Renovate can
-bump them one at a time and the diff shows exactly what changed. An
-instance's own language runtime/package versions follow the same rule in
-its own Dockerfile/manifest.
+duplicates or re-pins it elsewhere:
 
-`python3` and Node.js, both installed by `scripts/develop.sh` and pinned
-via the Dockerfile's `PYTHON_VERSION`/`NODE_VERSION` ARGs, are
-infrastructure tooling only — not an application runtime this template
-assumes. `python3` exists because `prek` needs an interpreter to build
-the venv for any `language: python` hook (`.pre-commit-config.yaml`'s
-`pre-commit-hooks` repo) and because `.github/scripts/*.py` need one
-directly; `uv` (its own `UV_VERSION` ARG) is only the mechanism used to
-install that exact, checksum-verified CPython build rather than an
-unpinned apt package, and stays on `PATH` afterward. Node.js exists
-because `npx` (the `clear-thought` MCP server in `.mcp.json`) needs it.
-An instance that adds Python or Node.js as its own application runtime
-can reuse these directly rather than installing a second copy.
+- Rust toolchain version: the `RUST_VERSION` `ARG` default at the top of
+  the `Dockerfile`. `builder`/`runner` pull it directly as the official
+  `rust`/`debian` image tags; `develop` (based on the generic
+  `mcr.microsoft.com/devcontainers/base` image, which carries no Rust of
+  its own) has `scripts/develop.sh` install that same version via
+  `rustup` (pinned itself via `RUSTUP_VERSION`), so all three stages
+  compile with an identical compiler.
+- Rust crate versions: `Cargo.toml` / `Cargo.lock`, pinned to exact
+  versions — use `cargo add <crate>` / `cargo update` rather than editing
+  the dependency lists by hand.
+- Everything else pinned (base images, Actions, hook revisions, `prek`/
+  Claude Code CLI/`snip`/`uv`/Python/Node.js/`cargo-audit`/
+  `cargo-cyclonedx`/`cargo-llvm-cov` versions): pinned once, at its
+  single point of use, to an exact patch version — never a floating
+  range or `latest` — so Renovate can bump them one at a time and the
+  diff shows exactly what changed. `uv`/`python3`/Node.js are
+  infrastructure tooling only, not this app's runtime — see
+  `Dockerfile`'s own comment: `uv` installs the pinned CPython build
+  `prek` needs for any `language: python` hook and `.github/scripts/
+  *.py`; Node.js's `npx` is only for the `clear-thought`/`playwright`
+  MCP servers in `.mcp.json`.
+
+`cargo-llvm-cov`'s coverage data and `target/` both live outside the
+bind-mounted workspace (`CARGO_TARGET_DIR`, set in the devcontainer) —
+same reasoning as not bind-mounting a Python venv would be: a build
+directory inside the bind-mounted `/workspace` gets scanned file-by-file
+by host antivirus/malware tools on Windows and is painfully slow to
+write to. A new tool with its own on-disk cache follows the same
+pattern.
 
 ## Code style
 
 Every file gets a brief header stating what the file *is for* — one
-line, sometimes two: a leading comment for most formats, a module
-docstring where the language has one. Never describe the file's contents
-in the header; that's what reading the file is for. Markdown files' own
+line, sometimes two: a leading comment for most formats, a module `//!`
+doc comment for Rust modules. Never describe the file's contents in the
+header; that's what reading the file is for. Markdown files' own
 title/opening line already serves this purpose. A format with no comment
 syntax (`.json`) documents itself via the directory's `README.md`
 instead.
@@ -192,6 +237,9 @@ repository follows this rule; keep new ones held to the same bar.
 - Commit a `.env` file, or read one from application code — configuration
   lives in the compose files; secrets live in `.secrets/`.
 - Add a `ports:` mapping or a `networks:` block to any file under
-  `.devcontainer/`.
+  `.devcontainer/` — see `.devcontainer/stack/README.md`'s "Devcontainer
+  stack pattern" section for how host access and inter-service
+  networking are handled instead.
 - Assume a language runtime, backing service, or release artifact exists
-  in this template — every one of those is instance-owned.
+  beyond what this instance itself defines — a fresh instance of
+  `template-base` carries none of them.
