@@ -85,6 +85,15 @@ directory tree, so this instance's four tiers live in different places:
 - **perf** — `perf/` (not a Cargo target — see that directory's own
   `README.md`).
 
+One file here doesn't belong to any of the four tiers above, because it
+isn't testing the application at all: `check_layering.rs` exercises
+`.github/scripts/check_layering.py` (the `check-layering` prek hook
+enforcing `src/`'s module layering, `docs/adrs/0009`) against small
+synthetic trees under the OS temp directory, never a real service and
+never `src/` itself except for one regression-guard case. Follows
+`.github/scripts/README.md`'s "Do: add a test in `../../tests/` for any
+new logic here that isn't trivial."
+
 ### Isolation and test-only helpers
 
 Every Postgres test runs in a schema of its own

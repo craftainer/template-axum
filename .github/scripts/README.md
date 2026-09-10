@@ -34,6 +34,13 @@
   `../workflows/moderate-feature-build-apply.yml`) and does the actual
   push/PR/relabel. Shared between both resource kinds via its
   branch-prefix/label arguments.
+- `check_layering.py` — enforces `../../src/`'s module layering
+  (`../../docs/adrs/0009`, `../../docs/nfrs/NFR-0018`): no
+  `src/generic/` file may reference `src/hero/` (or any future sibling
+  resource package) at all, and every module category may only import
+  from the categories a fixed allow-list says it can. Backs the
+  `check-layering` prek hook; tested against synthetic trees in
+  `../../tests/check_layering.rs`.
 - `prompts/` — the Claude prompt for each moderation stage
   (`bug-triage.md`, `bug-fix.md`, `feature-triage.md`,
   `feature-build.md`), read by `run_claude.sh`.

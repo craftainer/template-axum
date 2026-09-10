@@ -16,10 +16,12 @@ mod common;
 
 use chrono::{Duration, Utc};
 use common::{seed_hero_at, IsolatedDb};
-use template_axum::repositories::filtering::{FilterClause, FilterOp, FilterValue, SortClause};
-use template_axum::repositories::hero_sea_orm::HeroSeaOrmRepository;
-use template_axum::repositories::{ListOptions, Repository};
-use template_axum::views::hero::{HeroCreate, HeroUpdate};
+use template_axum::generic::repositories::filtering::{
+    FilterClause, FilterOp, FilterValue, SortClause,
+};
+use template_axum::generic::repositories::{ListOptions, Repository};
+use template_axum::hero::repositories::hero_sea_orm::HeroSeaOrmRepository;
+use template_axum::hero::views::hero::{HeroCreate, HeroUpdate};
 
 fn eq(field: &str, value: FilterValue) -> FilterClause {
     FilterClause {

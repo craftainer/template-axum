@@ -3,16 +3,19 @@
 The axum application, laid out as an MVC-ish split across submodules,
 each with its own `README.md`:
 
-- `models/` — the Model layer: SeaORM entities, plus `HasId` (a model
-  with a stable integer identity, used by `controllers::crud_actions`).
-- `views/` — the View layer: request/response DTOs, plus `bulk` (the
-  resource-agnostic `BulkUpdateResult`/`BulkDeleteResult` shapes).
-- `controllers/` — the Controller layer: axum routers, shared
-  `AppState`, RBAC role constants.
-- `repositories/` — storage-agnostic CRUD access, backing `crud/`.
-- `crud/` — the generic CRUD service built from a `Repository`.
+- `generic/` — the resource-agnostic half of the Model/View/Repository/
+  Controller layers, split into `generic/models/`, `generic/views/`,
+  `generic/repositories/`, `generic/controllers/`. See "Generic vs.
+  Hero-specific split" below.
+- `hero/` — this template's worked CRUD example, built on `generic/`:
+  `hero/models/`, `hero/views/`, `hero/repositories/`,
+  `hero/controllers/` (including the concrete `AppState` every router is
+  instantiated with). See "Generic vs. Hero-specific split" below.
+- `crud/` — the generic CRUD service built from a `Repository`. Not to
+  be confused with `generic/` above (a pre-existing, unrelated module —
+  see that package's own `README.md`).
 - `health/` — the health-check trait and registry backing
-  `controllers::health`.
+  `generic::controllers::health`.
 - `oidc/` — provider-agnostic OIDC bearer-token validation plus
   Keycloak client-role RBAC.
 - `migration/` — SeaORM migrations, applied automatically at startup.
@@ -45,7 +48,7 @@ beyond what it's explicitly passed or reads from `config::Settings`.
 - `http_headers.rs` — `Sunset`, an `IntoResponseParts` type a handler
   combines into its return value to attach RFC 8594 `Sunset`/
   `Deprecation`/`Link` headers (`docs/adrs/0012`), applied by every
-  route in `controllers::heroes_v1`/`heroes_v1_xml` (`NFR-0026`).
+  route in `hero::controllers::heroes_v1`/`heroes_v1_xml` (`NFR-0026`).
 
 ## Library and binary
 
@@ -63,9 +66,9 @@ from `lib.rs`, and `main.rs` refers to it as `template_axum::...`, not
 ## CRUD event stream
 
 `GET /crud/v1/heroes/v2/json/events` is a Server-Sent Events stream of
-Hero create/update/delete activity (FR-0030). `controllers::crud_events`
-holds the resource-agnostic half (subscriber-id resolution, frame shape,
-the publish helper); `events.rs` holds the transport.
+Hero create/update/delete activity (FR-0030). `generic::controllers::
+crud_events` holds the resource-agnostic half (subscriber-id resolution,
+frame shape, the publish helper); `events.rs` holds the transport.
 
 The delivery guarantee is narrow and deliberate: a subscriber that
 reconnects with the same `subscriber_id` gets everything published while
@@ -80,25 +83,70 @@ publish`) the way it checks its own rate limit — `crud::CrudService`
 stays free of infrastructure concerns (NFR-0004). Publishing never fails
 the request that triggered it.
 
+## Generic vs. Hero-specific split
+
+Each of the Model/View/Repository/Controller layers is physically split
+into a resource-agnostic half and a Hero-specific half, mirroring
+template-fastapi's own `src/crud/` vs. `src/app/` two-package structure:
+
+- `generic::models`/`generic::views`/`generic::repositories`/
+  `generic::controllers` — contain zero resource-specific code
+  (`NFR-0004`). Named `generic`, not `crud`, since this crate's own
+  `crud::CrudService` module already owns that name (a separate,
+  pre-existing abstraction — the generic CRUD *service* built from a
+  `Repository` — unrelated to this layering split; see `src/crud/
+  README.md`). A `generic::controllers` router that needs some piece of
+  shared state declares its own narrow accessor trait (`HasSettings`/
+  `HasHealthRegistry`/`HasRateLimiter`, mirroring `oidc::
+  HasOidcVerifier`'s existing pattern) rather than depending on the
+  concrete, Hero-bearing `AppState` — see `generic/controllers/
+  README.md`.
+- `hero::models`/`hero::views`/`hero::repositories`/`hero::controllers`
+  — this template's worked CRUD example, built on top of `generic::*`.
+  `hero::controllers::AppState` is the one concrete state every router
+  (Hero's own and `generic::controllers`' generic ones) is instantiated
+  with — see that package's own module doc for why this app's one
+  resource-specific dependency (`hero_crud`) lives there rather than
+  somewhere purely generic.
+
+`generic::*` never imports `hero::*` — enforced automatically by
+`.github/scripts/check_layering.py` (the `check-layering` prek hook,
+`docs/adrs/0009`'s "2026-09 update"), not just by convention. A new
+resource adds its own sibling packages (`crate::<resource>::models` etc,
+mirroring `hero::*`), building on `generic::*` the same way Hero does —
+`generic::*` itself never changes.
+
 ## Layering
 
 Import order between all of the above is strict and one-directional —
 lower layers never import from higher ones: `config` → `oidc` →
-`models` → `views` → `repositories` → `crud` → `health` →
-`controllers` → `lib`/`main`. See `docs/adrs/0009-strict-module-layering-by-
-convention-and-visibility.md` for how this is enforced (by convention
-plus each module's own doc comment, not an automated lint — a
-documented gap against the stricter enforcement template-fastapi's
-`import-linter` provides).
+`generic::models`/`hero::models` → `generic::views`/`hero::views` →
+`generic::repositories`/`hero::repositories` → `crud` → `health` →
+`generic::controllers`/`hero::controllers` → `lib`/`main`, with `hero::*`
+additionally always sitting above its `generic::*` counterpart at the
+same layer (never the reverse). `.github/scripts/check_layering.py`
+(backing the `check-layering` prek hook) checks this automatically on
+every commit — see `docs/adrs/0009-strict-module-layering-by-
+convention-and-visibility.md`'s "2026-09 update" for why a small custom
+script rather than `cargo-modules` or a per-layer crate split. Each
+module's own doc comment remains the reference for *why* its position
+in the order is what it is.
 
 ```mermaid
 graph LR
-    config --> oidc --> models --> views --> repositories --> crud
-    crud --> health --> controllers --> lib --> main
+    config --> oidc --> gm[generic::models] --> gv[generic::views]
+    gv --> gr[generic::repositories] --> crud --> health
+    health --> gc[generic::controllers] --> lib --> main
+    oidc --> hm[hero::models] --> hv[hero::views]
+    gm --> hm
+    hv --> hr[hero::repositories] --> hc[hero::controllers] --> lib
+    gv --> hv
+    gr --> hr
+    gc --> hc
 ```
 
 An arrow means "may import from" — each module may depend on anything
-to its left, never anything to its right.
+upstream of it in this graph, never anything downstream.
 
 ## Configuration
 
@@ -117,7 +165,7 @@ default, a connection scheme is plaintext, or `OIDC_AUDIENCE` is unset
 Pending SeaORM migrations apply automatically: `main()` calls
 `migration::Migrator::up` once, before `axum::serve` starts, off any
 per-request path — but only when `Mode != Mock` (there is no database to
-migrate under `Mode::Mock`; see `repositories::hero_memory`). This
+migrate under `Mode::Mock`; see `hero::repositories::hero_memory`). This
 happens unconditionally on every real process start (there is no
 separate "apply migrations" step to remember) — verified against a real
 ephemeral Postgres instance in phase 2's own smoke test.
@@ -138,7 +186,7 @@ parameter; a handler with no such parameter stays public.
 shape specifically, not something assumed present on every provider's
 token (see `oidc/mod.rs`'s module doc). Gate a route by calling it at
 the top of the handler body: `claims.require_any_role(&state.settings.
-oidc_client_id, SOME_ROLE_SET)?`. `controllers::audit` (`GET /audit`,
+oidc_client_id, SOME_ROLE_SET)?`. `generic::controllers::audit` (`GET /audit`,
 FR-0033) is the `security`/`detective` roles' first real consumer —
 it reports the caller's own subject and granted roles back to them,
 via the now-`pub` `Claims::granted_roles`.
@@ -154,7 +202,7 @@ once in `main()`.
   in-memory event bus, and unverified bearer-token trust — so the app
   needs zero containers to boot. Requires `ALLOW_MOCK_MODE=1` (`Settings::allow_mock_mode`), so
   this mode can never be reached by `MODE`'s own default/typo alone.
-  `POST /mock/token` (`controllers::mock`, mounted only in this mode)
+  `POST /mock/token` (`generic::controllers::mock`, mounted only in this mode)
   mints a Keycloak-shaped token so RBAC is exercisable without
   Keycloak.
 - `production`: the same real backends as `dev`, plus `Settings::
@@ -184,37 +232,41 @@ first.
 
 ## Example CRUD resource: Hero
 
-`models::hero` / `views::hero` / `repositories::{hero_sea_orm,
-hero_memory}` / `controllers::heroes` are the worked example of the
-generic CRUD layer (`crud::CrudService`), wired up as
-`/crud/v1/heroes/v2/json` (list/get/create/update/delete, plus
+`hero::models::hero` / `hero::views::hero` / `hero::repositories::
+{hero_sea_orm, hero_memory}` / `hero::controllers::heroes` are the
+worked example of the generic CRUD layer (`crud::CrudService`), wired up
+as `/crud/v1/heroes/v2/json` (list/get/create/update/delete, plus
 filtering/sorting on list and a bulk update/delete form — `docs/adrs/
-0013`) and its XML sibling, `controllers::heroes_xml` at
+0013`) and its XML sibling, `hero::controllers::heroes_xml` at
 `/crud/v1/heroes/v2/xml` (`docs/adrs/0014`), sharing the same
-`CrudService`/repository dependency. `controllers::heroes_v1`/
+`CrudService`/repository dependency. `hero::controllers::heroes_v1`/
 `heroes_v1_xml` (`/crud/v1/heroes/v1/{json,xml}`) are a deprecated,
 `superpower: String`-shaped compat sibling of the same resource —
-lossy DTO conversion in `views::hero_v1`/`hero_v1_xml`, no separate
-storage (`docs/adrs/0017`, `FR-0031`/`FR-0032`). `controllers::
-heroes_web` (`/heroes/form`, `/heroes/components.js`) is a third
-representation of the same resource — a progressively-enhanced HTML
-form, working with no JavaScript, calling the same `crud_actions` path
-as every other sibling (`FR-0034`). Adding another resource follows
-the same shape: a SeaORM entity
-in `models/` (implementing `HasId`), DTOs in `views/`, one `Repository`
-`impl` per backend in `repositories/` (or `crate::dyn_repository!` plus
-two small `impl`s, if `MODE=mock` needs a fake — each mapping
-`repositories::filtering::FilterClause`/`SortClause` onto its own
-storage), a `FIELD_SPECS` table for `controllers::crud_query`, and a
-router in `controllers/` built from `crud::CrudService::new(repository)`
-plus `controllers::crud_actions`'s shared resolve functions.
+lossy DTO conversion in `hero::views::hero_v1`/`hero_v1_xml`, no
+separate storage (`docs/adrs/0017`, `FR-0031`/`FR-0032`). `hero::
+controllers::heroes_web` (`/heroes/form`, `/heroes/components.js`) is a
+third representation of the same resource — a progressively-enhanced
+HTML form, working with no JavaScript, calling the same
+`generic::controllers::crud_actions` path as every other sibling
+(`FR-0034`). Adding another resource follows the same shape: its own
+sibling packages (`crate::<resource>::models`/`views`/`repositories`/
+`controllers`, mirroring `hero::*`) — a SeaORM entity in `models/`
+(implementing `generic::models::HasId`), DTOs in `views/`, one
+`Repository` `impl` per backend in `repositories/` (or
+`crate::dyn_repository!` plus two small `impl`s, if `MODE=mock` needs a
+fake — each mapping `generic::repositories::filtering::FilterClause`/
+`SortClause` onto its own storage), a `FIELD_SPECS` table for
+`generic::controllers::crud_query`, and a router in `controllers/` built
+from `crud::CrudService::new(repository)` plus `generic::controllers::
+crud_actions`'s shared resolve functions — never a file added to
+`generic::*` itself.
 
 ```mermaid
 sequenceDiagram
     participant Client
-    participant Controller as controllers::heroes
+    participant Controller as hero::controllers::heroes
     participant CRUD as crud::CrudService
-    participant Repo as repositories::hero_sea_orm
+    participant Repo as hero::repositories::hero_sea_orm
     participant DB as Postgres
 
     Client->>Controller: GET /crud/v1/heroes/v2/json?id={id}
@@ -228,8 +280,8 @@ sequenceDiagram
 ```
 
 Under `MODE=mock`, `Repo`/`DB` are replaced by
-`repositories::hero_memory::HeroMemoryRepository`, with no other layer
-changing.
+`hero::repositories::hero_memory::HeroMemoryRepository`, with no other
+layer changing.
 
 Hero also demonstrates `interfaces`-equivalent owner scoping
 (`docs/adrs/0007`: reads open to every authenticated caller, writes
@@ -244,7 +296,8 @@ restricted to the caller's own `sub`) and soft delete via an
 - Register a new external service's health check with
   `HealthRegistry::register` in `lib.rs::build_health_registry`.
 - Give a new resource an event stream by adding one `/events` route and
-  one resource-name constant — `controllers::crud_events` is generic.
+  one resource-name constant — `generic::controllers::crud_events` is
+  generic.
 
 ## Don't
 

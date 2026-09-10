@@ -21,9 +21,11 @@ See ADR 0009.
 
 ## Verification
 
-Manual/code review, per ADR 0009's documented gap: each module's own doc
-comment states its allowed imports; `src/README.md`'s layer diagram is
-the canonical reference. A `scripts/check-layering.sh` CI gate (grepping
-`use crate::` against the allowed order) is a documented follow-up, not
-yet built -- this NFR is currently verified by convention/review, not by
-an automated gate, unlike template-fastapi's `import-linter` contract.
+CI: `.github/scripts/check_layering.py`, backing the `check-layering`
+prek hook, checks every `src/` file's `crate::`-qualified references
+against a fixed allow-list on every commit -- see ADR 0009's "2026-09
+update". Each module's own doc comment and `src/README.md`'s layer
+diagram remain the canonical reference for *why* the order is what it
+is; the automated gate is what actually fails a commit that violates it,
+closing the gap ADR 0009 originally documented against template-
+fastapi's `import-linter` contract.

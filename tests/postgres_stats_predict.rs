@@ -23,7 +23,7 @@ use template_axum::events::EventBus;
 use tower::ServiceExt;
 
 fn app(db: sea_orm::DatabaseConnection) -> axum::Router {
-    template_axum::controllers::heroes::router().with_state(state_for(db, EventBus::mock()))
+    template_axum::hero::controllers::heroes::router().with_state(state_for(db, EventBus::mock()))
 }
 
 #[tokio::test]
