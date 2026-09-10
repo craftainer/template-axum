@@ -78,25 +78,17 @@ jobs:
       - name: Build release artifact(s)
         run: make build
 
-      # NFR-0024's release smoke-test gate: before a release counts as
+      # NFR-0010's release smoke-test gate: before a release counts as
       # verified, the runner image (never dev/mock -- see tests/perf/
       # README.md's identical reasoning) must actually boot against real
-      # Postgres/Redis/S3/Keycloak and report healthy. Uses the exact same
-      # devcontainer stack fragments (.devcontainer/stack/*/compose.yml)
-      # local development and checks.yml run against, composed standalone
-      # here (no top-level .devcontainer/compose.yml) so this job needs
-      # nothing beyond docker compose -- MQTT/Selenium aren't included:
-      # they're not among the checks build_health_registry registers (see
-      # src/README.md's "Health checks"), so they can't affect
-      # /health/ready either way.
+      # Postgres/Redis/S3/Keycloak and report healthy. Uses the root
+      # compose.yml (see its own header comment for why MQTT/Selenium
+      # aren't part of it).
       - name: Start Postgres/Redis/S3/Keycloak for the smoke test
         run: |
           echo "SMOKE_PROJECT=release-smoke-${{ github.run_id }}-${{ github.run_attempt }}" >> "$GITHUB_ENV"
           docker compose -p "release-smoke-${{ github.run_id }}-${{ github.run_attempt }}" \
-            -f .devcontainer/stack/postgres/compose.yml \
-            -f .devcontainer/stack/redis/compose.yml \
-            -f .devcontainer/stack/s3/compose.yml \
-            -f .devcontainer/stack/keycloak/compose.yml \
+            -f compose.yml \
             up -d --wait
 
       - name: Smoke-test the release image against real backing services
@@ -115,8 +107,7 @@ jobs:
             "template-axum:${RELEASE_VERSION}"
 
           # 5s interval/timeout, 30 retries -- a 150s start period, matching
-          # this gate's own spec (docs/plans/2026-09-fastapi-parity-gaps.md
-          # item 7).
+          # this gate's own spec (docs/nfrs/NFR-0010-release-smoke-test-gate.md).
           healthy=false
           for _ in $(seq 1 30); do
             if curl --fail --silent --max-time 5 http://localhost:8000/health/ready; then
@@ -137,10 +128,7 @@ jobs:
         run: |
           docker rm -f release-smoke || true
           docker compose -p "${SMOKE_PROJECT}" \
-            -f .devcontainer/stack/postgres/compose.yml \
-            -f .devcontainer/stack/redis/compose.yml \
-            -f .devcontainer/stack/s3/compose.yml \
-            -f .devcontainer/stack/keycloak/compose.yml \
+            -f compose.yml \
             down --volumes --remove-orphans
 
       - name: Generate SBOM(s)

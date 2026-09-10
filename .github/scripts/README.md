@@ -24,6 +24,16 @@
   `bug`/`enhancement` label and reconciles any leftover branch/PR, on
   issue reopen; used by `../workflows/moderate-bug-triage.yml` and
   `../workflows/moderate-feature-triage.yml`.
+- `moderate_package_result.sh` — packages a Claude worker job's outcome
+  (a git patch plus `meta.json`, never anything executed) as a workflow
+  artifact; used by the read-only halves of the fix/build pipelines
+  (`../workflows/moderate-bug-fix.yml`, `../workflows/moderate-
+  feature-build.yml`). See "Issue moderation" in `../workflows/README.md`.
+- `moderate_apply_result.sh` — consumes that artifact in the privileged
+  `-apply.yml` half (`../workflows/moderate-bug-fix-apply.yml`,
+  `../workflows/moderate-feature-build-apply.yml`) and does the actual
+  push/PR/relabel. Shared between both resource kinds via its
+  branch-prefix/label arguments.
 - `prompts/` — the Claude prompt for each moderation stage
   (`bug-triage.md`, `bug-fix.md`, `feature-triage.md`,
   `feature-build.md`), read by `run_claude.sh`.
