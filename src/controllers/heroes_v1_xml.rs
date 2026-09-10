@@ -419,4 +419,173 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
+
+    #[tokio::test]
+    async fn create_rejects_a_non_utf8_body_with_422() {
+        let mut request = Request::builder()
+            .method("POST")
+            .uri("/")
+            .header(
+                "Authorization",
+                format!("Bearer {}", token("alice", &["editor"])),
+            )
+            .header("Content-Type", "application/xml")
+            .body(Body::from(vec![0xff, 0xfe, 0xfd]))
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 12345))));
+        let response = app().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn list_returns_every_hero_wrapped_in_a_heroes_root() {
+        let shared_app = app();
+        shared_app
+            .clone()
+            .oneshot(authed("POST", "/", "alice", &["editor"], VALID_HERO_V1_XML))
+            .await
+            .unwrap();
+        shared_app
+            .clone()
+            .oneshot(authed("POST", "/", "alice", &["editor"], VALID_HERO_V1_XML))
+            .await
+            .unwrap();
+
+        let response = shared_app
+            .oneshot(authed("GET", "/", "alice", &["viewer"], ""))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = body_text(response).await;
+        assert!(body.starts_with("<heroes>"), "{body}");
+        assert_eq!(body.matches("<hero>").count(), 2, "{body}");
+    }
+
+    #[tokio::test]
+    async fn update_by_id_returns_the_updated_record() {
+        let shared_app = app();
+        let create = shared_app
+            .clone()
+            .oneshot(authed("POST", "/", "alice", &["editor"], VALID_HERO_V1_XML))
+            .await
+            .unwrap();
+        let created = body_text(create).await;
+        let id: i32 = created
+            .split("<id>")
+            .nth(1)
+            .unwrap()
+            .split("</id>")
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
+
+        let response = shared_app
+            .oneshot(authed(
+                "PATCH",
+                &format!("/?id={id}"),
+                "alice",
+                &["editor"],
+                "<hero><superpower>stealth</superpower></hero>",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = body_text(response).await;
+        assert!(body.contains("<superpower>stealth</superpower>"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn bulk_update_over_filters_returns_a_bulk_result() {
+        let shared_app = app();
+        shared_app
+            .clone()
+            .oneshot(authed("POST", "/", "alice", &["editor"], VALID_HERO_V1_XML))
+            .await
+            .unwrap();
+        shared_app
+            .clone()
+            .oneshot(authed("POST", "/", "alice", &["editor"], VALID_HERO_V1_XML))
+            .await
+            .unwrap();
+
+        let response = shared_app
+            .oneshot(authed(
+                "PATCH",
+                "/?power_level=5",
+                "alice",
+                &["editor"],
+                "<hero><superpower>stealth</superpower></hero>",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = body_text(response).await;
+        assert!(body.contains("<bulk_update_result>"), "{body}");
+        assert!(body.contains("<matched>2</matched>"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn delete_by_id_returns_204() {
+        let shared_app = app();
+        let create = shared_app
+            .clone()
+            .oneshot(authed("POST", "/", "alice", &["editor"], VALID_HERO_V1_XML))
+            .await
+            .unwrap();
+        let created = body_text(create).await;
+        let id: i32 = created
+            .split("<id>")
+            .nth(1)
+            .unwrap()
+            .split("</id>")
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
+
+        let response = shared_app
+            .oneshot(authed(
+                "DELETE",
+                &format!("/?id={id}"),
+                "alice",
+                &["maintainer"],
+                "",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn bulk_delete_over_filters_returns_a_bulk_result() {
+        let shared_app = app();
+        shared_app
+            .clone()
+            .oneshot(authed("POST", "/", "alice", &["editor"], VALID_HERO_V1_XML))
+            .await
+            .unwrap();
+        shared_app
+            .clone()
+            .oneshot(authed("POST", "/", "alice", &["editor"], VALID_HERO_V1_XML))
+            .await
+            .unwrap();
+
+        let response = shared_app
+            .oneshot(authed(
+                "DELETE",
+                "/?power_level=5",
+                "alice",
+                &["maintainer"],
+                "",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = body_text(response).await;
+        assert!(body.contains("<bulk_delete_result>"), "{body}");
+        assert!(body.contains("<matched>2</matched>"), "{body}");
+    }
 }

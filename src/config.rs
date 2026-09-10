@@ -299,6 +299,31 @@ mod tests {
     }
 
     #[test]
+    fn rejects_an_unrecognized_mode() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_all();
+        unsafe { env::set_var("MODE", "bogus") };
+        let err = Settings::from_env().expect_err("an unrecognized MODE must be rejected");
+        assert!(err.contains("bogus"));
+        clear_all();
+    }
+
+    #[test]
+    fn rejects_a_non_numeric_rate_limit() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_all();
+        unsafe { env::set_var("RATE_LIMIT_MOCK_TOKEN_PER_MINUTE", "not-a-number") };
+        let err = Settings::from_env().expect_err("a non-numeric rate limit must be rejected");
+        assert!(err.contains("RATE_LIMIT_MOCK_TOKEN_PER_MINUTE"));
+        clear_all();
+
+        unsafe { env::set_var("RATE_LIMIT_HERO_WRITE_PER_MINUTE", "not-a-number") };
+        let err = Settings::from_env().expect_err("a non-numeric rate limit must be rejected");
+        assert!(err.contains("RATE_LIMIT_HERO_WRITE_PER_MINUTE"));
+        clear_all();
+    }
+
+    #[test]
     fn mock_mode_requires_allow_mock_mode() {
         let _guard = ENV_LOCK.lock().unwrap();
         clear_all();
@@ -320,6 +345,24 @@ mod tests {
         unsafe { env::set_var("OIDC_AUDIENCE", "api") };
         let err = Settings::from_env().expect_err("default credentials must be rejected");
         assert!(err.contains("POSTGRES_PASSWORD"));
+        clear_all();
+    }
+
+    #[test]
+    fn production_rejects_insecure_urls_despite_hardened_credentials() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_all();
+        unsafe { env::set_var("MODE", "production") };
+        unsafe { env::set_var("OIDC_AUDIENCE", "api") };
+        unsafe { env::set_var("POSTGRES_PASSWORD", "a-real-secret") };
+        unsafe { env::set_var("RUSTFS_ACCESS_KEY", "a-real-key") };
+        unsafe { env::set_var("RUSTFS_SECRET_KEY", "a-real-secret-key") };
+        // S3_ENDPOINT_URL/REDIS_URL/OIDC_ISSUER_URL left at their plaintext
+        // defaults -- all three must be flagged.
+        let err = Settings::from_env().expect_err("plaintext URLs must be rejected");
+        assert!(err.contains("S3_ENDPOINT_URL"));
+        assert!(err.contains("REDIS_URL"));
+        assert!(err.contains("OIDC_ISSUER_URL"));
         clear_all();
     }
 

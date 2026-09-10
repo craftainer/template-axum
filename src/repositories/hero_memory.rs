@@ -373,6 +373,422 @@ mod tests {
         assert!(repo.get(created.id, true).await.unwrap().is_some());
     }
 
+    fn list_opts(filters: Vec<FilterClause>, sort: Vec<SortClause>) -> ListOptions {
+        ListOptions {
+            skip: 0,
+            limit: 100,
+            include_archived: false,
+            filters,
+            sort,
+        }
+    }
+
+    async fn seeded_repo() -> (HeroMemoryRepository, hero::Model, hero::Model) {
+        let repo = HeroMemoryRepository::new();
+        let alpha = repo
+            .create(
+                "alice",
+                HeroCreate {
+                    name: "Alpha".into(),
+                    powers: vec!["flight".into()],
+                    power_level: Some(3),
+                },
+            )
+            .await
+            .unwrap();
+        let beta = repo
+            .create(
+                "bob",
+                HeroCreate {
+                    name: "Beta".into(),
+                    powers: vec!["strength".into()],
+                    power_level: Some(7),
+                },
+            )
+            .await
+            .unwrap();
+        (repo, alpha, beta)
+    }
+
+    #[test]
+    fn default_builds_an_empty_repository() {
+        let repo = HeroMemoryRepository::default();
+        assert!(repo.records.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn matches_one_filters_by_created_at_and_updated_at_and_archived_at() {
+        let (repo, alpha, _beta) = seeded_repo().await;
+
+        let by_created = repo
+            .list(list_opts(
+                vec![FilterClause {
+                    field: "created_at".to_string(),
+                    op: FilterOp::Eq,
+                    value: FilterValue::DateTime(alpha.created_at),
+                }],
+                vec![],
+            ))
+            .await
+            .unwrap();
+        assert!(by_created.iter().any(|h| h.id == alpha.id));
+
+        let updated = repo
+            .update(
+                alpha.id,
+                "alice",
+                HeroUpdate {
+                    name: Some("Alpha Prime".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let by_updated = repo
+            .list(list_opts(
+                vec![FilterClause {
+                    field: "updated_at".to_string(),
+                    op: FilterOp::Eq,
+                    value: FilterValue::DateTime(updated.updated_at),
+                }],
+                vec![],
+            ))
+            .await
+            .unwrap();
+        assert!(by_updated.iter().any(|h| h.id == alpha.id));
+
+        repo.delete(alpha.id, "alice").await.unwrap();
+        let archived = repo.get(alpha.id, true).await.unwrap().unwrap();
+        let by_archived = repo
+            .count(
+                &[FilterClause {
+                    field: "archived_at".to_string(),
+                    op: FilterOp::Eq,
+                    value: FilterValue::DateTime(archived.archived_at.unwrap()),
+                }],
+                true,
+            )
+            .await
+            .unwrap();
+        assert_eq!(by_archived, 1);
+    }
+
+    #[tokio::test]
+    async fn matches_one_rejects_an_unrecognized_field() {
+        let (repo, _alpha, _beta) = seeded_repo().await;
+        let matched = repo
+            .list(list_opts(
+                vec![FilterClause {
+                    field: "nonexistent".to_string(),
+                    op: FilterOp::Eq,
+                    value: FilterValue::Str("anything".to_string()),
+                }],
+                vec![],
+            ))
+            .await
+            .unwrap();
+        assert!(matched.is_empty());
+    }
+
+    #[tokio::test]
+    async fn matches_int_supports_in_and_ignores_a_non_int_value() {
+        let (repo, alpha, beta) = seeded_repo().await;
+        let by_in = repo
+            .list(list_opts(
+                vec![FilterClause {
+                    field: "id".to_string(),
+                    op: FilterOp::In,
+                    value: FilterValue::List(vec![FilterValue::Int(alpha.id as i64)]),
+                }],
+                vec![],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(by_in.len(), 1);
+        assert_eq!(by_in[0].id, alpha.id);
+
+        let by_wrong_type = repo
+            .list(list_opts(
+                vec![FilterClause {
+                    field: "id".to_string(),
+                    op: FilterOp::Eq,
+                    value: FilterValue::Str("nope".to_string()),
+                }],
+                vec![],
+            ))
+            .await
+            .unwrap();
+        assert!(by_wrong_type.is_empty());
+        let _ = beta;
+    }
+
+    #[tokio::test]
+    async fn matches_datetime_supports_in_and_ignores_a_non_datetime_value() {
+        let (repo, alpha, _beta) = seeded_repo().await;
+        let by_in = repo
+            .list(list_opts(
+                vec![FilterClause {
+                    field: "created_at".to_string(),
+                    op: FilterOp::In,
+                    value: FilterValue::List(vec![FilterValue::DateTime(alpha.created_at)]),
+                }],
+                vec![],
+            ))
+            .await
+            .unwrap();
+        assert!(by_in.iter().any(|h| h.id == alpha.id));
+
+        let by_wrong_type = repo
+            .list(list_opts(
+                vec![FilterClause {
+                    field: "created_at".to_string(),
+                    op: FilterOp::Eq,
+                    value: FilterValue::Str("nope".to_string()),
+                }],
+                vec![],
+            ))
+            .await
+            .unwrap();
+        assert!(by_wrong_type.is_empty());
+    }
+
+    #[tokio::test]
+    async fn matches_str_supports_in_contains_icontains_and_ne() {
+        let (repo, alpha, beta) = seeded_repo().await;
+
+        let by_in = repo
+            .list(list_opts(
+                vec![FilterClause {
+                    field: "name".to_string(),
+                    op: FilterOp::In,
+                    value: FilterValue::List(vec![FilterValue::Str("Alpha".to_string())]),
+                }],
+                vec![],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(by_in.len(), 1);
+
+        let by_contains = repo
+            .list(list_opts(
+                vec![FilterClause {
+                    field: "name".to_string(),
+                    op: FilterOp::Contains,
+                    value: FilterValue::Str("lph".to_string()),
+                }],
+                vec![],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(by_contains.len(), 1);
+
+        let by_icontains = repo
+            .list(list_opts(
+                vec![FilterClause {
+                    field: "name".to_string(),
+                    op: FilterOp::Icontains,
+                    value: FilterValue::Str("ALPH".to_string()),
+                }],
+                vec![],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(by_icontains.len(), 1);
+
+        let by_ne = repo
+            .list(list_opts(
+                vec![FilterClause {
+                    field: "name".to_string(),
+                    op: FilterOp::Ne,
+                    value: FilterValue::Str("Alpha".to_string()),
+                }],
+                vec![],
+            ))
+            .await
+            .unwrap();
+        assert!(by_ne.iter().any(|h| h.id == beta.id));
+        assert!(!by_ne.iter().any(|h| h.id == alpha.id));
+    }
+
+    #[tokio::test]
+    async fn matches_str_never_matches_ordering_operators() {
+        let (repo, _alpha, _beta) = seeded_repo().await;
+        let matched = repo
+            .list(list_opts(
+                vec![FilterClause {
+                    field: "name".to_string(),
+                    op: FilterOp::Lt,
+                    value: FilterValue::Str("Zzz".to_string()),
+                }],
+                vec![],
+            ))
+            .await
+            .unwrap();
+        assert!(matched.is_empty());
+    }
+
+    #[tokio::test]
+    async fn matches_str_ignores_a_wrong_typed_value_for_eq_or_ne() {
+        let (repo, _alpha, _beta) = seeded_repo().await;
+        let matched = repo
+            .list(list_opts(
+                vec![FilterClause {
+                    field: "name".to_string(),
+                    op: FilterOp::Eq,
+                    value: FilterValue::Int(3),
+                }],
+                vec![],
+            ))
+            .await
+            .unwrap();
+        assert!(matched.is_empty());
+    }
+
+    #[tokio::test]
+    async fn compare_never_matches_contains_or_icontains_on_a_numeric_field() {
+        let (repo, _alpha, _beta) = seeded_repo().await;
+        let matched = repo
+            .list(list_opts(
+                vec![FilterClause {
+                    field: "power_level".to_string(),
+                    op: FilterOp::Contains,
+                    value: FilterValue::Int(3),
+                }],
+                vec![],
+            ))
+            .await
+            .unwrap();
+        assert!(matched.is_empty());
+    }
+
+    #[tokio::test]
+    async fn compare_supports_every_numeric_operator() {
+        let (repo, alpha, beta) = seeded_repo().await;
+        // Every clause compares against power_level=3 (alpha's own value);
+        // beta's is 7.
+        for (op, expect_alpha, expect_beta) in [
+            (FilterOp::Ne, false, true),
+            (FilterOp::Lt, false, false),
+            (FilterOp::Lte, true, false),
+            (FilterOp::Gt, false, true),
+            (FilterOp::Gte, true, true),
+        ] {
+            let matched = repo
+                .list(list_opts(
+                    vec![FilterClause {
+                        field: "power_level".to_string(),
+                        op,
+                        value: FilterValue::Int(3),
+                    }],
+                    vec![],
+                ))
+                .await
+                .unwrap();
+            assert_eq!(
+                matched.iter().any(|h| h.id == alpha.id),
+                expect_alpha,
+                "op {op:?} against alpha (power_level=3)"
+            );
+            assert_eq!(
+                matched.iter().any(|h| h.id == beta.id),
+                expect_beta,
+                "op {op:?} against beta (power_level=7)"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn field_cmp_and_apply_sort_order_by_every_field_ascending_and_descending() {
+        let (repo, alpha, beta) = seeded_repo().await;
+        for field in [
+            "power_level",
+            "name",
+            "owner_id",
+            "created_at",
+            "updated_at",
+        ] {
+            let ascending = repo
+                .list(list_opts(
+                    vec![],
+                    vec![SortClause {
+                        field: field.to_string(),
+                        descending: false,
+                    }],
+                ))
+                .await
+                .unwrap();
+            assert_eq!(ascending[0].id, alpha.id, "ascending sort by {field}");
+
+            let descending = repo
+                .list(list_opts(
+                    vec![],
+                    vec![SortClause {
+                        field: field.to_string(),
+                        descending: true,
+                    }],
+                ))
+                .await
+                .unwrap();
+            assert_eq!(descending[0].id, beta.id, "descending sort by {field}");
+        }
+    }
+
+    #[tokio::test]
+    async fn field_cmp_and_apply_sort_order_by_archived_at() {
+        let (repo, alpha, beta) = seeded_repo().await;
+        repo.delete(alpha.id, "alice").await.unwrap();
+        repo.delete(beta.id, "bob").await.unwrap();
+
+        let ascending = repo
+            .list(ListOptions {
+                include_archived: true,
+                ..list_opts(
+                    vec![],
+                    vec![SortClause {
+                        field: "archived_at".to_string(),
+                        descending: false,
+                    }],
+                )
+            })
+            .await
+            .unwrap();
+        assert_eq!(ascending[0].id, alpha.id);
+
+        let descending = repo
+            .list(ListOptions {
+                include_archived: true,
+                ..list_opts(
+                    vec![],
+                    vec![SortClause {
+                        field: "archived_at".to_string(),
+                        descending: true,
+                    }],
+                )
+            })
+            .await
+            .unwrap();
+        assert_eq!(descending[0].id, beta.id);
+    }
+
+    #[tokio::test]
+    async fn field_cmp_treats_an_unrecognized_sort_field_as_equal() {
+        let (repo, alpha, beta) = seeded_repo().await;
+        let items = repo
+            .list(list_opts(
+                vec![],
+                vec![SortClause {
+                    field: "nonexistent".to_string(),
+                    descending: false,
+                }],
+            ))
+            .await
+            .unwrap();
+        let mut ids: Vec<i32> = items.iter().map(|h| h.id).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, vec![alpha.id.min(beta.id), alpha.id.max(beta.id)]);
+    }
+
     #[tokio::test]
     async fn write_ops_are_owner_scoped() {
         let repo = HeroMemoryRepository::new();

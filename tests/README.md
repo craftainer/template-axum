@@ -34,9 +34,36 @@ directory tree, so this instance's four tiers live in different places:
   - `postgres_stats_predict.rs` — `/stats` and `/predict` over HTTP
     against live Postgres, including the multi-bucket `/predict` happy
     path that needs backdated `created_at` values.
+  - `postgres_health_check.rs` — `health::checks::DatabaseHealthCheck`'s
+    `SELECT 1` happy path against live Postgres. The `S3`/`Redis`/`Oidc`
+    checks' own happy paths stay deliberately uncovered (`docs/adrs/
+    0010`) since they'd need `lib::build_health_registry`'s real-backend
+    wiring, not just a live service already in this tier.
+  - `postgres_migration_down.rs` — the `heroes` migration's `down()`
+    against real Postgres. `run_migrations` (`lib.rs`) only ever calls
+    `up()`, so this is the only place `down()` runs at all.
   - `mqtt_events.rs` — the CRUD event stream against live Mosquitto.
     The only place NFR-0029's persistent-session replay guarantee can be
-    verified at all (`Mode::Mock`'s bus has no broker).
+    verified at all (`Mode::Mock`'s bus has no broker). Also covers
+    `lib::build_event_bus`'s real-broker branch directly (its
+    `Mode::Mock` branch is unit-tested in `src/lib.rs`) and a subscriber
+    skipping an undecodable payload on the wire -- something only a raw
+    client bypassing `EventBus::publish` can put on the topic at all.
+  - `redis_rate_limiter.rs` — `rate_limit::RateLimiter`'s real-Redis
+    backend against live Redis: `RateLimiter::connect`'s success path and
+    a check/increment/reject round trip. The unreachable-server failure
+    path and the in-memory `Backend::Mock` half stay in `src/rate_limit.
+    rs`'s own colocated unit tests, which need no live service.
+  - `keycloak_oidc.rs` — `oidc::OidcVerifier`'s real (non-`Mode::Mock`)
+    verification path against live Keycloak: discovery + JWKS fetch (and
+    its cache), a real signed token round trip, and the malformed-token/
+    unrecognized-`kid`/wrong-audience rejection paths. `Mode::Mock`'s
+    unsigned-token path stays in `src/oidc/mod.rs`'s own colocated unit
+    tests. `e2e.rs`'s `MODE=dev` journey also exercises this path, but
+    over a spawned child process that gets SIGKILLed at the end of the
+    test (`AppProcess::drop`), so its coverage profile never flushes —
+    this file, running in-process, is what actually counts toward the
+    coverage gate.
   - `common/mod.rs` — shared fixtures. Not a test binary (Cargo treats a
     subdirectory `mod.rs` as a module, not a target).
 - **e2e-equivalent** — `e2e.rs`, also in this directory (Cargo has no
@@ -75,22 +102,23 @@ happy path had no end-to-end coverage before.
 
 ## Coverage gate
 
-`cargo llvm-cov --fail-under-lines 92` measures `src/`'s line coverage
-across the unit **and** integration tiers and fails below a 92% floor —
+`cargo llvm-cov --fail-under-lines 97` measures `src/`'s line coverage
+across the unit **and** integration tiers and fails below a 97% floor —
 see `docs/nfrs/NFR-0023-test-coverage-gate.md` and
 `docs/adrs/0010-80-percent-line-coverage-floor-via-cargo-llvm-cov.md`
 for why this number rather than template-fastapi's 95%: Rust's type
 system statically rules out a class of bug the Python floor is partly
 there to catch at runtime, so the same number would be cargo-culted, not
 justified. (The floor was 80% while the unit tier was the only one
-collected; that ADR records the raise and what stays deliberately
-uncovered.)
+collected, then 92% once the integration tier landed; that ADR records
+both raises and what stays deliberately uncovered at 97%.)
 
 Because the integration tier reaches real services, this command now
-needs the devcontainer stack's Postgres and MQTT running.
+needs the devcontainer stack's Postgres, Redis, MQTT and Keycloak
+running.
 
 ```bash
-cargo llvm-cov --fail-under-lines 92
+cargo llvm-cov --fail-under-lines 97
 ```
 
 Wired into `.pre-commit-config.yaml` as `cargo-llvm-cov`, `pre-push`/

@@ -409,6 +409,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_rejects_a_non_utf8_body_with_422() {
+        let mut request = Request::builder()
+            .method("POST")
+            .uri("/")
+            .header(
+                "Authorization",
+                format!("Bearer {}", token("alice", &["editor"])),
+            )
+            .header("Content-Type", "application/xml")
+            .body(Body::from(vec![0xff, 0xfe, 0xfd]))
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 12345))));
+        let response = app().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
     async fn get_by_id_and_list_round_trip_through_xml() {
         let shared_app = app();
         let create = shared_app

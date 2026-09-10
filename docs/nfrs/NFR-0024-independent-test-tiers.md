@@ -37,7 +37,7 @@ CI runs each tier as a distinct step/command; each tier's existence and
 scope is reviewed against `tests/README.md`.
 
 - **unit** + **integration**: `cargo test` / `cargo llvm-cov
-  --fail-under-lines 92`, via `.pre-commit-config.yaml`'s
+  --fail-under-lines 97`, via `.pre-commit-config.yaml`'s
   `cargo-test`/`cargo-llvm-cov` hooks (`checks.yml`).
 - **e2e-equivalent**: `tests/e2e.rs`, run by the same `cargo test`
   invocation above (it's an ordinary Cargo integration-test binary) —

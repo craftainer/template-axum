@@ -326,6 +326,51 @@ mod tests {
     }
 
     #[test]
+    fn backend_err_wraps_the_dberr_display_text() {
+        let RepoError::Backend(msg) = backend_err(sea_orm::DbErr::ConvertFromU64("i32"));
+        assert!(msg.contains("i32"));
+    }
+
+    #[test]
+    fn apply_filters_renders_a_ne_clause() {
+        let filters = vec![FilterClause {
+            field: "name".to_string(),
+            op: FilterOp::Ne,
+            value: FilterValue::Str("Spectra".to_string()),
+        }];
+        let sql = apply_filters(Entity::find(), &filters)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(sql.contains("<>"));
+    }
+
+    #[test]
+    fn apply_filters_renders_a_lte_clause() {
+        let filters = vec![FilterClause {
+            field: "power_level".to_string(),
+            op: FilterOp::Lte,
+            value: FilterValue::Int(5),
+        }];
+        let sql = apply_filters(Entity::find(), &filters)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(sql.contains("<="));
+    }
+
+    #[test]
+    fn apply_filters_renders_a_gt_clause() {
+        let filters = vec![FilterClause {
+            field: "power_level".to_string(),
+            op: FilterOp::Gt,
+            value: FilterValue::Int(5),
+        }];
+        let sql = apply_filters(Entity::find(), &filters)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(sql.contains(" > "));
+    }
+
+    #[test]
     fn apply_filters_renders_an_in_clause() {
         let filters = vec![FilterClause {
             field: "id".to_string(),
@@ -424,5 +469,31 @@ mod tests {
     fn scalar_str_defaults_to_empty_for_a_non_string_value() {
         assert_eq!(scalar_str(&FilterValue::Int(1)), "");
         assert_eq!(scalar_str(&FilterValue::Str("x".to_string())), "x");
+    }
+
+    #[test]
+    fn scalar_defaults_to_a_null_int_for_a_malformed_list_value() {
+        // Only reachable for a malformed FilterOp::In clause whose value
+        // isn't itself a List -- crud_query.rs's parser never produces
+        // this (see `scalar`'s own doc comment).
+        assert_eq!(
+            scalar(&FilterValue::List(vec![FilterValue::Int(1)])),
+            sea_orm::Value::Int(None)
+        );
+    }
+
+    #[test]
+    fn apply_filters_renders_an_in_clause_for_a_malformed_non_list_value() {
+        // Same malformed-input case as above, exercised through
+        // `condition_for`'s `(FilterOp::In, other)` fallback arm.
+        let filters = vec![FilterClause {
+            field: "id".to_string(),
+            op: FilterOp::In,
+            value: FilterValue::Int(1),
+        }];
+        let sql = apply_filters(Entity::find(), &filters)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(sql.contains("IN"));
     }
 }

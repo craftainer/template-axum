@@ -175,6 +175,16 @@ mod tests {
     }
 
     #[test]
+    fn update_rejects_an_empty_superpower() {
+        let v1 = HeroUpdateV1 {
+            superpower: Some(String::new()),
+            ..Default::default()
+        };
+        let errors = v1.validate().expect_err("an empty superpower is invalid");
+        assert!(errors.iter().any(|e| e.field == "superpower"));
+    }
+
+    #[test]
     fn update_into_hero_update_maps_superpower_to_powers_when_present() {
         let v1 = HeroUpdateV1 {
             superpower: Some("stealth".to_string()),

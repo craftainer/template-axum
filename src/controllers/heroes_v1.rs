@@ -475,4 +475,120 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
+
+    async fn create_hero_v1(app: &Router, sub: &str) -> i64 {
+        let response = app
+            .clone()
+            .oneshot(authed(
+                "POST",
+                "/",
+                sub,
+                &["editor"],
+                serde_json::from_str(VALID_HERO_V1).unwrap(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        json_body(response).await["id"].as_i64().unwrap()
+    }
+
+    #[tokio::test]
+    async fn get_by_id_returns_a_single_hero() {
+        let shared_app = app();
+        let id = create_hero_v1(&shared_app, "alice").await;
+
+        let response = shared_app
+            .oneshot(authed(
+                "GET",
+                &format!("/?id={id}"),
+                "alice",
+                &["viewer"],
+                serde_json::Value::Null,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["superpower"], "flight");
+    }
+
+    #[tokio::test]
+    async fn update_by_id_returns_the_updated_hero() {
+        let shared_app = app();
+        let id = create_hero_v1(&shared_app, "alice").await;
+
+        let response = shared_app
+            .oneshot(authed(
+                "PATCH",
+                &format!("/?id={id}"),
+                "alice",
+                &["editor"],
+                serde_json::json!({"superpower": "stealth"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["superpower"], "stealth");
+    }
+
+    #[tokio::test]
+    async fn bulk_update_over_filters_returns_a_bulk_result() {
+        let shared_app = app();
+        create_hero_v1(&shared_app, "alice").await;
+        create_hero_v1(&shared_app, "alice").await;
+
+        let response = shared_app
+            .oneshot(authed(
+                "PATCH",
+                "/?power_level=5",
+                "alice",
+                &["editor"],
+                serde_json::json!({"superpower": "stealth"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["matched"], 2);
+    }
+
+    #[tokio::test]
+    async fn delete_by_id_returns_204() {
+        let shared_app = app();
+        let id = create_hero_v1(&shared_app, "alice").await;
+
+        let response = shared_app
+            .oneshot(authed(
+                "DELETE",
+                &format!("/?id={id}"),
+                "alice",
+                &["maintainer"],
+                serde_json::Value::Null,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn bulk_delete_over_filters_returns_a_bulk_result() {
+        let shared_app = app();
+        create_hero_v1(&shared_app, "alice").await;
+        create_hero_v1(&shared_app, "alice").await;
+
+        let response = shared_app
+            .oneshot(authed(
+                "DELETE",
+                "/?power_level=5",
+                "alice",
+                &["maintainer"],
+                serde_json::Value::Null,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["matched"], 2);
+    }
 }

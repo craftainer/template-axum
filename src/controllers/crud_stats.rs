@@ -260,6 +260,19 @@ mod tests {
     }
 
     #[test]
+    fn advance_steps_by_whole_weeks() {
+        let start = dt(2027, 3, 15);
+        assert_eq!(advance(start, TimeBucket::Week, 2), dt(2027, 3, 29));
+    }
+
+    #[test]
+    fn as_str_round_trips_every_bucket() {
+        assert_eq!(TimeBucket::Day.as_str(), "day");
+        assert_eq!(TimeBucket::Week.as_str(), "week");
+        assert_eq!(TimeBucket::Month.as_str(), "month");
+    }
+
+    #[test]
     fn forecast_errors_with_fewer_than_two_buckets() {
         let series = [BucketValue {
             bucket_start: dt(2027, 1, 1),

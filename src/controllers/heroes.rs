@@ -1495,4 +1495,103 @@ mod tests {
         assert!(body.contains(&format!("{id_a}")), "{body}");
         assert!(body.contains(&format!("{id_b}")), "{body}");
     }
+
+    #[tokio::test]
+    async fn get_by_id_returns_a_single_hero() {
+        let shared_app = app();
+        let id = create_hero(
+            &shared_app,
+            "alice",
+            serde_json::json!({"name": "Spectra", "powers": ["flight"], "power_level": 5}),
+        )
+        .await;
+
+        let response = shared_app
+            .oneshot(authed(
+                "GET",
+                &format!("/?id={id}"),
+                "alice",
+                &["viewer"],
+                serde_json::Value::Null,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["name"], "Spectra");
+        assert_eq!(body["id"], id);
+    }
+
+    #[tokio::test]
+    async fn update_by_id_returns_the_updated_hero() {
+        let shared_app = app();
+        let id = create_hero(
+            &shared_app,
+            "alice",
+            serde_json::json!({"name": "Spectra", "powers": ["flight"], "power_level": 5}),
+        )
+        .await;
+
+        let response = shared_app
+            .oneshot(authed(
+                "PATCH",
+                &format!("/?id={id}"),
+                "alice",
+                &["editor"],
+                serde_json::json!({"name": "Spectra Prime"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["name"], "Spectra Prime");
+        assert_eq!(body["id"], id);
+    }
+
+    // -- crud_stats helper functions (pure), directly: Hero has no
+    // categorical/boolean field (see `boolean_value`'s own doc comment),
+    // so the stats endpoint's categorical branch is never reachable
+    // through HTTP -- these are unit-tested directly instead.
+
+    #[test]
+    fn numeric_stat_reports_zero_for_no_values() {
+        let stat = numeric_stat("power_level", &[]);
+        assert_eq!(stat.count, 0);
+        assert!(stat.minimum.is_none());
+        assert!(stat.maximum.is_none());
+        assert!(stat.average.is_none());
+        assert!(stat.total.is_none());
+    }
+
+    #[test]
+    fn numeric_value_is_none_for_an_unrecognized_field() {
+        let now = chrono::Utc::now().naive_utc();
+        let hero = hero::Model {
+            id: 1,
+            name: Some("Spectra".to_string()),
+            powers: Some(vec!["flight".to_string()]),
+            power_level: Some(5),
+            owner_id: "alice".to_string(),
+            archived_at: None,
+            created_at: now,
+            updated_at: now,
+        };
+        assert_eq!(numeric_value(&hero, "name"), None);
+    }
+
+    #[test]
+    fn boolean_value_is_always_none_for_hero() {
+        let now = chrono::Utc::now().naive_utc();
+        let hero = hero::Model {
+            id: 1,
+            name: Some("Spectra".to_string()),
+            powers: Some(vec!["flight".to_string()]),
+            power_level: Some(5),
+            owner_id: "alice".to_string(),
+            archived_at: None,
+            created_at: now,
+            updated_at: now,
+        };
+        assert_eq!(boolean_value(&hero, "power_level"), None);
+    }
 }

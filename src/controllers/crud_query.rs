@@ -386,4 +386,41 @@ mod tests {
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].field, "sort");
     }
+
+    #[test]
+    fn sort_skips_an_empty_segment_from_a_stray_comma() {
+        let clauses = parse_sort(SPECS, &params(&[("sort", "name,,id")])).unwrap();
+        assert_eq!(
+            clauses,
+            vec![
+                SortClause {
+                    field: "name".to_string(),
+                    descending: false
+                },
+                SortClause {
+                    field: "id".to_string(),
+                    descending: false
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn suffix_to_op_is_none_for_an_unrecognized_suffix() {
+        assert_eq!(suffix_to_op("bogus"), None);
+    }
+
+    #[test]
+    fn cast_datetime_falls_back_to_a_naive_non_rfc3339_timestamp() {
+        let clauses =
+            parse_filters(SPECS, &params(&[("created_at", "2024-01-01T12:00:00")])).unwrap();
+        assert_eq!(clauses.len(), 1);
+        assert!(matches!(clauses[0].value, FilterValue::DateTime(_)));
+    }
+
+    #[test]
+    fn cast_one_boolean_is_none_for_an_unrecognized_value() {
+        let errors = parse_filters(SPECS, &params(&[("is_locked", "maybe")])).unwrap_err();
+        assert_eq!(errors.len(), 1);
+    }
 }

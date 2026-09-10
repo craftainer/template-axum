@@ -166,4 +166,30 @@ mod tests {
         assert_eq!(update.powers, Some(vec!["stealth".to_string()]));
         assert_eq!(update.power_level, Some(9));
     }
+
+    #[test]
+    fn into_hero_update_rejects_a_non_numeric_power_level() {
+        let fields = HeroFormFields {
+            name: "Renamed".to_string(),
+            powers: "stealth".to_string(),
+            power_level: "not-a-number".to_string(),
+        };
+        let errors = fields
+            .into_hero_update()
+            .expect_err("a non-numeric power level is invalid");
+        assert!(errors.iter().any(|e| e.field == "power_level"));
+    }
+
+    #[test]
+    fn into_hero_update_rejects_an_empty_name() {
+        let fields = HeroFormFields {
+            name: "".to_string(),
+            powers: "stealth".to_string(),
+            power_level: "5".to_string(),
+        };
+        let errors = fields
+            .into_hero_update()
+            .expect_err("an empty name is invalid");
+        assert!(errors.iter().any(|e| e.field == "name"));
+    }
 }

@@ -149,3 +149,85 @@ where
         ids,
     }))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::crud::CrudService;
+    use crate::repositories::filtering::{FilterOp, FilterValue};
+    use crate::repositories::hero_memory::HeroMemoryRepository;
+    use crate::views::hero::{HeroCreate, HeroUpdate};
+
+    fn service() -> CrudService<HeroMemoryRepository> {
+        CrudService::new(HeroMemoryRepository::new())
+    }
+
+    fn filter() -> Vec<FilterClause> {
+        vec![FilterClause {
+            field: "owner_id".to_string(),
+            op: FilterOp::Eq,
+            value: FilterValue::Str("alice".to_string()),
+        }]
+    }
+
+    async fn seed(crud: &CrudService<HeroMemoryRepository>, n: usize) {
+        for i in 0..n {
+            crud.create(
+                "alice",
+                HeroCreate {
+                    name: format!("Hero {i}"),
+                    powers: vec!["flight".to_string()],
+                    power_level: None,
+                },
+            )
+            .await
+            .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_delete_by_id_returns_not_found_when_missing() {
+        let crud = service();
+        let result = resolve_delete(&crud, Some(999), "alice", vec![], 1000).await;
+        let err = match result {
+            Ok(_) => panic!("deleting a nonexistent id must 404"),
+            Err(err) => err,
+        };
+        assert!(matches!(err, AppError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn resolve_update_rejects_a_bulk_action_over_the_max_matched_cap() {
+        let crud = service();
+        seed(&crud, 3).await;
+        let result = resolve_update(
+            &crud,
+            None,
+            "alice",
+            filter(),
+            HeroUpdate {
+                name: Some("Renamed".to_string()),
+                ..Default::default()
+            },
+            2,
+        )
+        .await;
+        let err = match result {
+            Ok(_) => panic!("matching more records than max_matched must be rejected"),
+            Err(err) => err,
+        };
+        assert!(matches!(err, AppError::UnprocessableEntity(_)));
+    }
+
+    #[tokio::test]
+    async fn resolve_delete_rejects_a_bulk_action_over_the_max_matched_cap() {
+        let crud = service();
+        seed(&crud, 3).await;
+        let result = resolve_delete(&crud, None, "alice", filter(), 2).await;
+        let err = match result {
+            Ok(_) => panic!("matching more records than max_matched must be rejected"),
+            Err(err) => err,
+        };
+        assert!(matches!(err, AppError::UnprocessableEntity(_)));
+    }
+}

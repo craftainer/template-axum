@@ -643,6 +643,341 @@ mod tests {
         assert!(!body.contains("Renamed"));
     }
 
+    fn token_with_no_sub(roles: &[&str]) -> String {
+        jsonwebtoken::encode(
+            &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256),
+            &serde_json::json!({
+                "resource_access": { "api": { "roles": roles } }
+            }),
+            &jsonwebtoken::EncodingKey::from_secret(b"mock-mode-doesnt-verify-signatures"),
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn form_page_is_forbidden_without_a_read_role() {
+        let response = app()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/form?token={}", token("alice", &["security"])))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn create_without_a_token_shows_the_bootstrap_page() {
+        let response = app()
+            .oneshot(with_addr(
+                Request::builder()
+                    .method("POST")
+                    .uri("/form")
+                    .header("Content-Type", "application/x-www-form-urlencoded")
+                    .body(Body::from("name=Spectra&powers=flight&power_level=5"))
+                    .unwrap(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn create_rejects_a_token_with_no_subject() {
+        let response = app()
+            .oneshot(with_addr(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/form?token={}", token_with_no_sub(&["editor"])))
+                    .header("Content-Type", "application/x-www-form-urlencoded")
+                    .body(Body::from("name=Spectra&powers=flight&power_level=5"))
+                    .unwrap(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn update_without_a_token_shows_the_bootstrap_page() {
+        let response = app()
+            .oneshot(with_addr(
+                Request::builder()
+                    .method("POST")
+                    .uri("/form/1/update")
+                    .header("Content-Type", "application/x-www-form-urlencoded")
+                    .body(Body::from("name=Renamed&powers=stealth&power_level=9"))
+                    .unwrap(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn update_is_forbidden_without_a_write_role() {
+        let response = app()
+            .oneshot(with_addr(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/form/1/update?token={}",
+                        token("alice", &["viewer"])
+                    ))
+                    .header("Content-Type", "application/x-www-form-urlencoded")
+                    .body(Body::from("name=Renamed&powers=stealth&power_level=9"))
+                    .unwrap(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn update_rejects_an_invalid_payload_with_422() {
+        let response = app()
+            .oneshot(with_addr(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/form/1/update?token={}",
+                        token("alice", &["editor"])
+                    ))
+                    .header("Content-Type", "application/x-www-form-urlencoded")
+                    .body(Body::from(
+                        "name=Renamed&powers=stealth&power_level=not-a-number",
+                    ))
+                    .unwrap(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn update_rejects_a_token_with_no_subject() {
+        let response = app()
+            .oneshot(with_addr(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/form/1/update?token={}",
+                        token_with_no_sub(&["editor"])
+                    ))
+                    .header("Content-Type", "application/x-www-form-urlencoded")
+                    .body(Body::from("name=Renamed&powers=stealth&power_level=9"))
+                    .unwrap(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn update_of_a_nonexistent_id_returns_404() {
+        let response = app()
+            .oneshot(with_addr(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/form/999999/update?token={}",
+                        token("alice", &["editor"])
+                    ))
+                    .header("Content-Type", "application/x-www-form-urlencoded")
+                    .body(Body::from("name=Renamed&powers=stealth&power_level=9"))
+                    .unwrap(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn delete_without_a_token_shows_the_bootstrap_page() {
+        let response = app()
+            .oneshot(with_addr(
+                Request::builder()
+                    .method("POST")
+                    .uri("/form/1/delete")
+                    .body(Body::empty())
+                    .unwrap(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn delete_is_forbidden_without_the_maintainer_role() {
+        let response = app()
+            .oneshot(with_addr(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/form/1/delete?token={}",
+                        token("alice", &["editor"])
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn delete_rejects_a_token_with_no_subject() {
+        let response = app()
+            .oneshot(with_addr(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/form/1/delete?token={}",
+                        token_with_no_sub(&["maintainer"])
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn delete_of_a_nonexistent_id_returns_404() {
+        let response = app()
+            .oneshot(with_addr(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/form/999999/delete?token={}",
+                        token("alice", &["maintainer"])
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    fn app_with_write_limit(limit: u32) -> Router {
+        let settings = Arc::new(Settings {
+            rate_limit_hero_write_per_minute: limit,
+            ..mock_settings()
+        });
+        let state = AppState {
+            oidc: Arc::new(OidcVerifier::new(settings.clone())),
+            settings,
+            health_registry: Arc::new(HealthRegistry::new()),
+            hero_crud: Arc::new(crate::crud::CrudService::new(DynHeroRepository(Box::new(
+                HeroMemoryRepository::new(),
+            )))),
+            rate_limiter: Arc::new(crate::rate_limit::RateLimiter::mock()),
+            events: Arc::new(crate::events::EventBus::mock()),
+        };
+        router().with_state(state)
+    }
+
+    #[tokio::test]
+    async fn create_returns_429_once_the_per_caller_limit_is_exceeded() {
+        let shared_app = app_with_write_limit(1);
+        let create_token = token("alice", &["editor"]);
+        for _ in 0..1 {
+            shared_app
+                .clone()
+                .oneshot(with_addr(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!("/form?token={create_token}"))
+                        .header("Content-Type", "application/x-www-form-urlencoded")
+                        .body(Body::from("name=Spectra&powers=flight&power_level=5"))
+                        .unwrap(),
+                ))
+                .await
+                .unwrap();
+        }
+        let response = shared_app
+            .oneshot(with_addr(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/form?token={create_token}"))
+                    .header("Content-Type", "application/x-www-form-urlencoded")
+                    .body(Body::from("name=Spectra&powers=flight&power_level=5"))
+                    .unwrap(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn update_returns_429_once_the_per_caller_limit_is_exceeded() {
+        let shared_app = app_with_write_limit(1);
+        let owner_token = token("alice", &["editor"]);
+        // Spends the one allowed write on the create itself, so the
+        // update below is the first write to find the limit already hit.
+        let create = shared_app
+            .clone()
+            .oneshot(with_addr(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/form?token={owner_token}"))
+                    .header("Content-Type", "application/x-www-form-urlencoded")
+                    .body(Body::from("name=Spectra&powers=flight&power_level=5"))
+                    .unwrap(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(create.status(), StatusCode::SEE_OTHER);
+
+        let response = shared_app
+            .oneshot(with_addr(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/form/1/update?token={owner_token}"))
+                    .header("Content-Type", "application/x-www-form-urlencoded")
+                    .body(Body::from("name=Renamed&powers=stealth&power_level=9"))
+                    .unwrap(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn delete_returns_429_once_the_per_caller_limit_is_exceeded() {
+        let shared_app = app_with_write_limit(1);
+        let owner_token = token("alice", &["editor", "maintainer"]);
+        let create = shared_app
+            .clone()
+            .oneshot(with_addr(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/form?token={owner_token}"))
+                    .header("Content-Type", "application/x-www-form-urlencoded")
+                    .body(Body::from("name=Spectra&powers=flight&power_level=5"))
+                    .unwrap(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(create.status(), StatusCode::SEE_OTHER);
+
+        let response = shared_app
+            .oneshot(with_addr(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/form/1/delete?token={owner_token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
     #[tokio::test]
     async fn components_js_is_served_as_javascript() {
         let response = app()
