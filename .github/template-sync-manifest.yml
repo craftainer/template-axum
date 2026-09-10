@@ -89,6 +89,12 @@ ignore:
   - tests/
   - .cargo/
 
+  # The release smoke-test stack (NFR-0010): which backing services it
+  # composes is this instance's own (Postgres/Redis/S3/Keycloak, per
+  # src/lib.rs::build_health_registry) -- template-base ships no
+  # equivalent file at all.
+  - compose.yml
+
   # Product/domain knowledge and working plans: instance-owned from the
   # moment it's instantiated.
   - docs/architecture.md

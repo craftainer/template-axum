@@ -23,13 +23,14 @@
   contract" — `make build`/`sbom`/`release-assets`/`publish`) and
   creates a GitHub release with auto-generated notes and whatever
   `make release-assets` populated `dist/` with. Between `make build` and
-  `make sbom`, a smoke-test gate (`NFR-0024`) starts the real
-  Postgres/Redis/S3/Keycloak backing services (the same
-  `.devcontainer/stack/*/compose.yml` fragments local development and
-  `checks.yml` use, composed standalone here) and runs the just-built
-  `runner` image against them, polling `/health/ready` (5s
-  interval/timeout, 30 retries, ~150s total) before letting the release
-  proceed — a release that can't report healthy is never published.
+  `make sbom`, a smoke-test gate (`NFR-0010`) starts the real
+  Postgres/Redis/S3/Keycloak backing services (the root-level
+  `compose.yml`, which `include:`s the same `.devcontainer/stack/*/
+  compose.yml` fragments local development and `checks.yml` use) and
+  runs the just-built `runner` image against them, polling
+  `/health/ready` (5s interval/timeout, 30 retries, ~150s total) before
+  letting the release proceed — a release that can't report healthy is
+  never published.
 - `perf.yml` — manually triggered. Builds the `runner` image, runs it
   under `MODE=mock` (self-contained, no backing-service stack needed),
   and drives `tests/perf` (`goose`, `docs/adrs/0018`) against it for a
@@ -37,7 +38,8 @@
   report as a workflow artifact. Perf tier of `NFR-0024`; see
   `tests/perf/README.md`.
 - `moderate-bug-triage.yml` / `moderate-bug-fix.yml` /
-  `moderate-feature-triage.yml` / `moderate-feature-build.yml` /
+  `moderate-bug-fix-apply.yml` / `moderate-feature-triage.yml` /
+  `moderate-feature-build.yml` / `moderate-feature-build-apply.yml` /
   `moderate-cleanup.yml` / `moderate-setup.yml` — see "Issue moderation"
   below.
 - `template-sync.yml` — runs in an *instance* of this template, not
@@ -81,7 +83,8 @@ verified end-to-end on arm64 hardware on 2026-09-06.
 ## Issue moderation
 
 `moderate-bug-triage.yml`, `moderate-bug-fix.yml`,
-`moderate-feature-triage.yml`, `moderate-feature-build.yml`, and
+`moderate-bug-fix-apply.yml`, `moderate-feature-triage.yml`,
+`moderate-feature-build.yml`, `moderate-feature-build-apply.yml`, and
 `moderate-cleanup.yml` run the `claude` CLI as an issue moderator: on a
 bug report, it verifies the report is actionable, reproduces it as a
 failing test on a branch, and asks the reporter to confirm before a
@@ -89,6 +92,27 @@ second workflow fixes it and opens a PR; on a feature request, it
 verifies the request fits the project, drafts a plan on a branch, and
 asks for confirmation before a second workflow implements it and opens a
 PR.
+
+**Split fix/build pipeline.** `moderate-bug-fix.yml` and
+`moderate-feature-build.yml` (the two stages that run Claude against
+untrusted issue/PR content *and* previously would have needed
+push/PR/label-write credentials to act on the result) run with
+`contents: read` only: Claude either makes exactly one commit or writes
+`.moderation-outcome.md`, and `../scripts/moderate_package_result.sh`
+turns that into a git patch + `meta.json` artifact — data, never
+anything executed. A separate `moderate-bug-fix-apply.yml` /
+`moderate-feature-build-apply.yml` workflow (no Claude invocation,
+triggered by `workflow_run` once the worker completes) holds
+`contents: write` / `issues: write` / `pull-requests: write` and runs
+`../scripts/moderate_apply_result.sh` to push the branch, open the PR,
+and relabel the issue. This closes CodeQL's
+`actions/untrusted-checkout` alert: a single job that both runs Claude
+against untrusted text and holds write-scoped credentials is exactly
+what that rule flags. The triage stages (`moderate-bug-triage.yml`,
+`moderate-feature-triage.yml`) aren't split the same way — they only
+ever write a branch/comment/label from Claude's own analysis of the
+issue, not from applying an executable result, so the alert doesn't
+apply to them.
 
 Activating this in a given repo/fork takes two one-time steps, neither
 of which is itself a workflow: provisioning a dedicated Anthropic
@@ -98,8 +122,9 @@ and a usage alert at 80% of it) and storing that key as the
 once to create the labels below.
 
 Two independent label sequences track state, applied by `gh issue edit`
-inside each stage's Claude prompt (`../scripts/prompts/`) or by a
-deterministic workflow step:
+inside a triage stage's Claude prompt (`../scripts/prompts/`), by
+`../scripts/moderate_apply_result.sh` once a fix/build worker's result is
+applied, or by a deterministic workflow step:
 
 - Bug: `bug` → (`bug:needs-info` | `bug:repro-ready`) → `bug:confirmed`
   → `bug:fixed`.
@@ -158,10 +183,17 @@ spend cap lives in the Anthropic Console (a dedicated workspace/key with
 a monthly limit), since `claude` itself has no such flag.
 
 A single `moderate-issue-<number>` `concurrency:` group, shared across
-all five moderation workflows, serializes every stage against the same
-issue — a burst of comments can't launch overlapping fix/build jobs, a
-close landing mid-run doesn't race cleanup, and a rapid close-then-reopen
-runs cleanup before the reopened triage's reset step.
+the five `issue_comment`-triggered moderation workflows (both triage
+stages, both fix/build workers, and cleanup), serializes every stage
+against the same issue — a burst of comments can't launch overlapping
+fix/build jobs, a close landing mid-run doesn't race cleanup, and a rapid
+close-then-reopen runs cleanup before the reopened triage's reset step.
+The two `-apply.yml` workflows aren't part of that group —
+`workflow_run` can't see the triggering issue number to key a
+concurrency group on before downloading the result artifact — so
+`../scripts/moderate_apply_result.sh` handles the resulting race itself
+(see its own "Idempotency" comment): a second apply run for an
+already-processed issue is a no-op.
 
 ## Template sync
 

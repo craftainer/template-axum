@@ -1,0 +1,25 @@
+# Release smoke-test stack (NFR-0010): the real backing services the
+# built `runner` image is checked against in `.github/workflows/
+# release.yml`, before a release counts as verified. Distinct from
+# `.devcontainer/compose.yml` (which also builds/runs the `develop` stage
+# as an `api` service and is never referenced here) -- this file only
+# brings up the backing services the app's own health registry actually
+# checks (`src/lib.rs::build_health_registry` -- see
+# `src/README.md`'s "MODE" section): Postgres, Redis, S3, and Keycloak.
+# MQTT and Selenium are left out on purpose -- `build_health_registry`
+# registers no check for either, so neither can affect `/health/ready`
+# either way (MQTT is dev/e2e-only via `events.rs`'s `Mode::Mock`
+# fallback; Selenium backs `tests/`' browser-driven e2e tier, not runtime
+# traffic at all).
+#
+# `release.yml` runs the `runner` image itself directly (`docker run`,
+# not a service here) against this stack's network, since the runner
+# image (debian-slim, no shell interpreter or curl -- see
+# `scripts/runner-setup.sh`) can't host its own Compose healthcheck the
+# way `.devcontainer/compose.yml`'s `develop`-stage `api` service can;
+# release.yml polls `/health/ready` from the runner instead.
+include:
+  - ./.devcontainer/stack/postgres/compose.yml
+  - ./.devcontainer/stack/redis/compose.yml
+  - ./.devcontainer/stack/s3/compose.yml
+  - ./.devcontainer/stack/keycloak/compose.yml

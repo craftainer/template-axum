@@ -4,26 +4,28 @@
 //! and state rather than each re-deriving the wiring.
 //!
 //! See `src/README.md` for the module layering this file sits at the top
-//! of: `config` -> `oidc` -> `models` -> `views` -> `repositories` ->
-//! `crud` -> `health` -> `controllers`, with `events`/`rate_limit`/
-//! `telemetry`/`problem_details`/`http_headers` flat alongside. The wiring
-//! functions below are the only thing above `controllers`, and `main.rs`
-//! does nothing but call them.
+//! of: `config` -> `oidc` -> `generic::models`/`hero::models` ->
+//! `generic::views`/`hero::views` -> `generic::repositories`/
+//! `hero::repositories` -> `crud` -> `health` ->
+//! `generic::controllers`/`hero::controllers`, with `events`/
+//! `rate_limit`/`telemetry`/`problem_details`/`http_headers` flat
+//! alongside. `generic`/`hero` are this app's two resource-layering
+//! packages (see `src/README.md`'s "Generic vs. Hero-specific split");
+//! the wiring functions below are the only thing above `controllers`, and
+//! `main.rs` does nothing but call them.
 
 pub mod config;
-pub mod controllers;
 pub mod crud;
 pub mod events;
+pub mod generic;
 pub mod health;
+pub mod hero;
 pub mod http_headers;
 pub mod migration;
-pub mod models;
 pub mod oidc;
 pub mod problem_details;
 pub mod rate_limit;
-pub mod repositories;
 pub mod telemetry;
-pub mod views;
 
 use std::sync::Arc;
 
@@ -32,17 +34,18 @@ use sea_orm_migration::MigratorTrait;
 use tower_http::trace::TraceLayer;
 
 use config::{Mode, Settings};
-use controllers::AppState;
 use crud::CrudService;
 use events::EventBus;
+use generic::controllers as generic_controllers;
 use health::checks::{
     DatabaseHealthCheck, MockHealthCheck, OidcHealthCheck, RedisHealthCheck, S3HealthCheck,
 };
 use health::HealthRegistry;
+use hero::controllers::{self as hero_controllers, AppState};
+use hero::repositories::hero_memory::HeroMemoryRepository;
+use hero::repositories::hero_sea_orm::HeroSeaOrmRepository;
 use oidc::OidcVerifier;
 use rate_limit::RateLimiter;
-use repositories::hero_memory::HeroMemoryRepository;
-use repositories::hero_sea_orm::HeroSeaOrmRepository;
 
 /// Applies pending SeaORM migrations, off the request path, before the
 /// server starts accepting connections (FR-0020). Never runs under
@@ -109,11 +112,11 @@ pub fn build_event_bus(settings: &Settings) -> EventBus {
 /// `Mode::Mock`; builds the in-memory fakes inside it.
 pub async fn build_state(settings: Arc<Settings>) -> AppState {
     let (hero_repository, db_for_health): (
-        controllers::DynHeroRepository,
+        hero_controllers::DynHeroRepository,
         Option<sea_orm::DatabaseConnection>,
     ) = if settings.mode == Mode::Mock {
         (
-            controllers::DynHeroRepository(Box::new(HeroMemoryRepository::new())),
+            hero_controllers::DynHeroRepository(Box::new(HeroMemoryRepository::new())),
             None,
         )
     } else {
@@ -122,7 +125,7 @@ pub async fn build_state(settings: Arc<Settings>) -> AppState {
             .expect("failed to connect to Postgres");
         run_migrations(&db).await;
         (
-            controllers::DynHeroRepository(Box::new(HeroSeaOrmRepository::new(db.clone()))),
+            hero_controllers::DynHeroRepository(Box::new(HeroSeaOrmRepository::new(db.clone()))),
             Some(db),
         )
     };
@@ -152,19 +155,28 @@ pub async fn build_state(settings: Arc<Settings>) -> AppState {
 /// `Mode::Mock`.
 pub fn build_router(state: AppState) -> Router {
     let mut app = Router::new()
-        .nest("/health", controllers::health::router())
-        .nest("/audit", controllers::audit::router())
-        .nest("/crud/v1/heroes/v2/json", controllers::heroes::router())
-        .nest("/crud/v1/heroes/v2/xml", controllers::heroes_xml::router())
-        .nest("/crud/v1/heroes/v1/json", controllers::heroes_v1::router())
+        .nest("/health", generic_controllers::health::router())
+        .nest("/audit", generic_controllers::audit::router())
+        .nest(
+            "/crud/v1/heroes/v2/json",
+            hero_controllers::heroes::router(),
+        )
+        .nest(
+            "/crud/v1/heroes/v2/xml",
+            hero_controllers::heroes_xml::router(),
+        )
+        .nest(
+            "/crud/v1/heroes/v1/json",
+            hero_controllers::heroes_v1::router(),
+        )
         .nest(
             "/crud/v1/heroes/v1/xml",
-            controllers::heroes_v1_xml::router(),
+            hero_controllers::heroes_v1_xml::router(),
         )
-        .nest("/heroes", controllers::heroes_web::router());
+        .nest("/heroes", hero_controllers::heroes_web::router());
 
     if state.settings.mode == Mode::Mock {
-        app = app.nest("/mock", controllers::mock::router());
+        app = app.nest("/mock", generic_controllers::mock::router());
     }
 
     app.with_state(state).layer(TraceLayer::new_for_http())

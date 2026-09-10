@@ -24,6 +24,23 @@
   `bug`/`enhancement` label and reconciles any leftover branch/PR, on
   issue reopen; used by `../workflows/moderate-bug-triage.yml` and
   `../workflows/moderate-feature-triage.yml`.
+- `moderate_package_result.sh` — packages a Claude worker job's outcome
+  (a git patch plus `meta.json`, never anything executed) as a workflow
+  artifact; used by the read-only halves of the fix/build pipelines
+  (`../workflows/moderate-bug-fix.yml`, `../workflows/moderate-
+  feature-build.yml`). See "Issue moderation" in `../workflows/README.md`.
+- `moderate_apply_result.sh` — consumes that artifact in the privileged
+  `-apply.yml` half (`../workflows/moderate-bug-fix-apply.yml`,
+  `../workflows/moderate-feature-build-apply.yml`) and does the actual
+  push/PR/relabel. Shared between both resource kinds via its
+  branch-prefix/label arguments.
+- `check_layering.py` — enforces `../../src/`'s module layering
+  (`../../docs/adrs/0009`, `../../docs/nfrs/NFR-0018`): no
+  `src/generic/` file may reference `src/hero/` (or any future sibling
+  resource package) at all, and every module category may only import
+  from the categories a fixed allow-list says it can. Backs the
+  `check-layering` prek hook; tested against synthetic trees in
+  `../../tests/check_layering.rs`.
 - `prompts/` — the Claude prompt for each moderation stage
   (`bug-triage.md`, `bug-fix.md`, `feature-triage.md`,
   `feature-build.md`), read by `run_claude.sh`.

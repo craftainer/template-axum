@@ -2,7 +2,11 @@
 
 ## Status
 
-Accepted
+Superseded in part — see "2026-09 update" below. The physical
+`generic/`/`hero` split and the `check_layering.py` automated gate it
+describes now exist; the rest of this record (why per-layer crates were
+rejected, the doc-comment-as-contract convention for everything that
+gate doesn't cover) still holds.
 
 ## Context
 
@@ -59,3 +63,41 @@ against `NFR-0018`'s intent (`docs/nfrs/0018-strict-module-layering.md`
 below) -- the honest trade this phase makes given the workspace-split
 alternative's cost, not a claim that convention alone is equivalent to
 `import-linter`.
+
+## 2026-09 update: the generic/hero split, and the gap this ADR predicted gets closed
+
+`docs/plans/2026-09-fastapi-parity-improvements.md`'s item 3 did the
+work this record's "documented follow-up" (`scripts/check-layering.sh`)
+deferred, in two parts:
+
+1. **Physical split**: `controllers/`/`views/`/`models/`/
+   `repositories/` were each split into `src/generic/<layer>/`
+   (resource-agnostic) and `src/hero/<layer>/` (this template's worked
+   example resource), mirroring template-fastapi's own `src/crud/` vs.
+   `src/app/` two-package structure -- named `generic`, not `crud`,
+   because this crate's own `crud::CrudService` module (`src/crud/
+   README.md`) already owns that name and predates this split; see
+   `src/README.md`'s "Generic vs. Hero-specific split" for the full
+   shape. Splitting per-language-layer crates (this ADR's original
+   rejected alternative) still wasn't taken -- the two-package split
+   above achieves the same independence guarantee at far lower ceremony
+   cost, since Rust's module system (not `Cargo.toml`) is doing the
+   separating.
+2. **Automated gate**: `.github/scripts/check_layering.py` (backing the
+   `check-layering` prek hook) now checks, on every commit, that (a) no
+   file under `src/generic/` references `src/hero/` at all, and (b)
+   every module category only imports from the categories a fixed
+   allow-list says it can -- closing the "advisory rather than
+   build-enforced" gap this ADR originally accepted. It's a small,
+   dependency-free Python script (matching `.github/scripts/
+   template_sync_manifest.py`'s own local-prek-hook shape) rather than
+   `cargo-modules` or a similar off-the-shelf tool: nothing in the Rust
+   ecosystem offers `import-linter`'s "layers"/"independence" contract
+   directly, and piping a visualization tool's graph output into a
+   custom checker anyway would add a heavier, version-pinned toolchain
+   dependency for no real gain over a ~150-line script.
+
+The doc-comment-as-contract convention (point 1 in the original
+Decision) still applies to everything the automated gate doesn't cover
+in finer detail (e.g. exactly which flat utility module may import which
+other one) -- see each module's own header comment.

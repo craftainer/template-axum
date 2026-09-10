@@ -13,14 +13,14 @@ use std::sync::Arc;
 use chrono::NaiveDateTime;
 use sea_orm::{ActiveModelTrait, ConnectionTrait, Database, DatabaseConnection, Set};
 use template_axum::config::{Mode, Settings};
-use template_axum::controllers::{AppState, DynHeroRepository};
 use template_axum::crud::CrudService;
 use template_axum::events::{new_subscriber_id, EventBus};
 use template_axum::health::HealthRegistry;
-use template_axum::models::hero;
+use template_axum::hero::controllers::{AppState, DynHeroRepository};
+use template_axum::hero::models::hero;
+use template_axum::hero::repositories::hero_sea_orm::HeroSeaOrmRepository;
 use template_axum::oidc::OidcVerifier;
 use template_axum::rate_limit::RateLimiter;
-use template_axum::repositories::hero_sea_orm::HeroSeaOrmRepository;
 
 /// A short, unique suffix for a schema or MQTT topic, so concurrently
 /// running test binaries (and reruns) never collide.

@@ -112,19 +112,19 @@ async fn the_auth_claims_extractor_rejects_a_bad_bearer_token_over_http() {
     use tower::ServiceExt;
 
     let settings = dev_settings(None);
-    let state = template_axum::controllers::AppState {
+    let state = template_axum::hero::controllers::AppState {
         oidc: Arc::new(OidcVerifier::new(settings.clone())),
         settings,
         health_registry: Arc::new(template_axum::health::HealthRegistry::new()),
         hero_crud: Arc::new(template_axum::crud::CrudService::new(
-            template_axum::controllers::DynHeroRepository(Box::new(
-                template_axum::repositories::hero_memory::HeroMemoryRepository::new(),
+            template_axum::hero::controllers::DynHeroRepository(Box::new(
+                template_axum::hero::repositories::hero_memory::HeroMemoryRepository::new(),
             )),
         )),
         rate_limiter: Arc::new(template_axum::rate_limit::RateLimiter::mock()),
         events: Arc::new(template_axum::events::EventBus::mock()),
     };
-    let app = template_axum::controllers::audit::router().with_state(state);
+    let app = template_axum::generic::controllers::audit::router().with_state(state);
 
     let response = app
         .oneshot(

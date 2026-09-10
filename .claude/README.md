@@ -47,12 +47,29 @@ this directory).
     tools, launched via `npx`. `npx` needs Node.js, which is the only
     reason `scripts/develop.sh` installs it (pinned via the Dockerfile's
     `NODE_VERSION` ARG) — Claude Code itself doesn't need it.
+  - `playwright` (`@playwright/mcp`) — browser automation against the
+    `selenium` stack service's Chromium, via `mcp/
+    playwright_selenium_bridge.py`.
 
   An instance adds its own stack-specific MCP servers here (database,
   object storage, browser automation, ...), pinned to an exact
   version/commit the same way, and reading credentials via `${VAR}` from
   the same env vars its own `../.devcontainer/compose.yml` gives its dev
   service — never re-pinned a second time.
+- `mcp/playwright_selenium_bridge.py` — `@playwright/mcp` only takes a
+  static `--cdp-endpoint`, but `selenium` (Selenium Grid) only hands out
+  a CDP URL per WebDriver session — there is no static endpoint to point
+  at. This script opens a session against `.devcontainer/stack/selenium`
+  (`E2E_SELENIUM_URL`, defaulting to its in-network address), passes the
+  resulting `se:cdp` capability to `npx @playwright/mcp`, and keeps the
+  session alive for the MCP server's lifetime (closing it would tear
+  down the browser CDP is talking to). Ported from template-fastapi's
+  script of the same name; adapted to run standalone via `uv run`'s
+  PEP 723 inline script metadata (`selenium` pinned as a throwaway
+  dependency in the script header) rather than a Python project's `dev`
+  extra, since this repo carries no Python project of its own — see
+  `../.mcp.json`'s `playwright` entry, which shares the `selenium` stack
+  service's default URL, so it works with no extra configuration.
 
 ## Do
 
@@ -74,3 +91,5 @@ this directory).
 - **clear-thought**: delete its entry from `../.mcp.json`; if nothing
   else needs Node.js, also remove its install block (and `NODE_VERSION`
   ARG) from `../Dockerfile`/`scripts/develop.sh`.
+- **playwright**: delete its entry from `../.mcp.json` and
+  `mcp/playwright_selenium_bridge.py`.
