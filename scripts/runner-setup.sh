@@ -1,25 +1,34 @@
 #!/usr/bin/env bash
 # Prepares the runner stage's runtime user for arbitrary-UID platforms
 # (e.g. OpenShift, which ignores an image's own UID and always runs it
-# under group 0): group-0 ownership plus group read/write/execute on
-# every directory the app needs, and a numeric (not named) final USER in
-# the Dockerfile. The compiled binary gets the equivalent treatment via
-# COPY --chown/--chmod instead of a recursive chmod here.
+# under group 0), and a numeric (not named) final USER in the Dockerfile.
+#
+# Run it BEFORE copying app content. It creates the user and group 0
+# ownership only where the app writes at runtime: the home directory and
+# /app/data (group read/write/execute). /app itself stays root-owned and not
+# writable. Then COPY app code with `--chown=<uid>:0 --chmod=...` as
+# read-only (e.g. `--chmod=u=rX,g=rX,o=`: 0550 directories, 0440 files), so it
+# needs no recursive chgrp/chmod (which would copy every file into a new
+# layer) and the runtime user can't modify it. Other writable directories
+# (caches, upload dirs) are created by runner-setup.d hooks.
+#
+# Usage: runner-setup.sh APP_UID
+#
+# Afterwards runs every runner-setup.d/*.sh next to this script, in glob
+# order, as `bash NN-name.sh APP_UID`; see runner-setup.d/README.md.
 set -euo pipefail
 
 app_uid=$1
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# ca-certificates: debian-slim ships none by default, but the app needs a
-# trust store to validate TLS to Postgres/Redis/S3/the OIDC provider (phase
-# 2) -- installed here, not builder.sh, since only the runner stage needs it
-# at runtime.
-apt-get update
-apt-get install -y --no-install-recommends ca-certificates
-apt-get clean
-rm -rf /var/lib/apt/lists/*
-
-chmod +x /usr/local/bin/runner.sh
 useradd --create-home --uid "$app_uid" --gid 0 appuser
+chgrp -R 0 /home/appuser
+chmod -R g+rwX /home/appuser
 
-chgrp -R 0 /app /home/appuser
-chmod -R g+rwX /app /home/appuser
+install -d -m 0755 /app
+install -d -o "$app_uid" -g 0 -m 0770 /app/data
+
+shopt -s nullglob
+for hook in "$here"/runner-setup.d/*.sh; do
+    bash "$hook" "$app_uid"
+done
