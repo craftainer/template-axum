@@ -24,7 +24,7 @@ exist immediately — no manual admin-console setup required.
 Unlike the other stack services, Keycloak's port is listed in
 `forwardPorts` in `.devcontainer/devcontainer.json` so you can reach the
 login and admin UI from your host browser at `http://localhost:8080`. Since
-Keycloak runs in a sibling container rather than the primary `api` one, that
+Keycloak runs in a sibling container rather than the primary `myapp` one, that
 entry must use the `"keycloak:8080"` (`serviceName:port`) form, not a bare
 `8080` — a bare port number only forwards from the primary container. That
 still isn't a compose `ports:` mapping — see the root README's "Don't" for
@@ -60,6 +60,6 @@ kcadm PUT /admin/realms/template-axum/users/<id> '{"firstName": "Dev"}'
 ## Removing this service
 
 Delete this directory, remove its compose file entry from
-`.devcontainer/compose.yml`'s `include:` list, and remove
+`.devcontainer/compose.instance.yml`'s `include:` list, and remove
 `"keycloak:8080"` from `forwardPorts`/`portsAttributes` in
 `devcontainer.json` too.

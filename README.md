@@ -6,6 +6,9 @@
 A template repository for Rust/axum projects — the Rust counterpart to
 [`template-fastapi`](https://github.com/craftainer/template-fastapi), built
 around a devcontainer setup composed from independent, swappable pieces.
+An instance of [`template-docker`](https://github.com/craftainer/template-docker)
+(the shared image layer) that is itself a template; see
+[`docs/adrs/0019-re-parent-onto-template-docker.md`](docs/adrs/0019-re-parent-onto-template-docker.md).
 See [`docs/TEMPLATE.md`](docs/TEMPLATE.md) for contents, getting started,
 checks, template sync, versions/config, and code style — everything about
 this repository that's identical across every instance of this template.

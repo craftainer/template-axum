@@ -1,81 +1,25 @@
 #!/usr/bin/env bash
 # Sets up the `develop` stage on top of Microsoft's generic base
 # devcontainer image (which already provides the `vscode` user, git, sudo,
-# and curl); Rust itself is installed below via rustup, pinned to the same
-# exact version as the builder/runner stages' own `rust`/`debian` image tags.
+# and curl). Installs only the language-agnostic AI-assisted-workflow
+# tooling this template requires everywhere; an instance's own
+# scripts/develop.sh (or an addition to this one) installs its language
+# runtime and any stack-specific CLI on top -- see docs/TEMPLATE.md.
 set -euo pipefail
 
-rust_version=$1
-rustup_version=$2
-cargo_audit_version=$3
-cargo_cyclonedx_version=$4
-cargo_llvm_cov_version=$5
-prek_version=$6
-claude_code_version=$7
-snip_version=$8
-rustfs_cli_version=$9
-uv_version=${10}
-python_version=${11}
-node_version=${12}
+prek_version=$1
+claude_code_version=$2
+snip_version=$3
+uv_version=$4
+python_version=$5
+node_version=$6
+gh_version=$7
 
-# postgresql-client/redis-tools give psql/redis-cli for connecting to the
-# stack's postgres/redis services (see .devcontainer/stack/postgres and
-# .devcontainer/stack/redis's READMEs). Debian's own repo only carries one
-# version of each -- no exact-version pin available via apt, same reasoning
-# as template-fastapi's own develop.sh; a newer client talking to an older
-# server is standard practice for both. pkg-config/libssl-dev: some cargo
-# dependencies (phase 2's aws-sdk-s3/openidconnect stack) link against
-# OpenSSL via -sys crates even though the app's own TLS is rustls. xz-utils:
-# Node's own release tarballs are .tar.xz.
+# xz-utils: Node's own release tarballs are .tar.xz.
 apt-get update
-apt-get install -y --no-install-recommends \
-    libpq-dev postgresql-client redis-tools pkg-config libssl-dev xz-utils
+apt-get install -y --no-install-recommends xz-utils
 apt-get clean
 rm -rf /var/lib/apt/lists/*
-
-# rustup-init, fetched as a release binary for the pinned RUSTUP_VERSION and
-# checksum-verified against static.rust-lang.org's own published .sha256 --
-# same checksummed-release pattern as snip/rustfs-cli below, rather than
-# trusting the unversioned https://sh.rustup.rs installer.
-rustup_arch="$(dpkg --print-architecture)"
-case "$rustup_arch" in
-    amd64) rustup_target=x86_64-unknown-linux-gnu ;;
-    arm64) rustup_target=aarch64-unknown-linux-gnu ;;
-    *)
-        echo "unsupported architecture for rustup install: $rustup_arch" >&2
-        exit 1
-        ;;
-esac
-rustup_tmpdir="$(mktemp -d)"
-sudo chmod a+rwx "$rustup_tmpdir"
-rustup_url="https://static.rust-lang.org/rustup/archive/${rustup_version}/${rustup_target}/rustup-init"
-curl -LsSf -o "${rustup_tmpdir}/rustup-init" "$rustup_url"
-curl -LsSf -o "${rustup_tmpdir}/rustup-init.sha256" "${rustup_url}.sha256"
-(cd "$rustup_tmpdir" && sha256sum -c rustup-init.sha256)
-chmod +x "${rustup_tmpdir}/rustup-init"
-sudo -u vscode env HOME=/home/vscode "${rustup_tmpdir}/rustup-init" -y \
-    --default-toolchain "$rust_version" --profile default --no-modify-path
-rm -rf "$rustup_tmpdir"
-ln -s /home/vscode/.cargo/bin/rustup /usr/local/bin/rustup
-ln -s /home/vscode/.cargo/bin/cargo /usr/local/bin/cargo
-ln -s /home/vscode/.cargo/bin/rustc /usr/local/bin/rustc
-ln -s /home/vscode/.cargo/bin/rustfmt /usr/local/bin/rustfmt
-ln -s /home/vscode/.cargo/bin/cargo-clippy /usr/local/bin/cargo-clippy
-
-# For the pre-commit/CI checks (`cargo audit`, the Makefile's `sbom`
-# target) -- cargo-installed, pinned like every other tool in this stage.
-sudo -u vscode env HOME=/home/vscode CARGO_TARGET_DIR=/home/vscode/.cache/cargo-target \
-    /home/vscode/.cargo/bin/cargo install --locked "cargo-audit@${cargo_audit_version}"
-sudo -u vscode env HOME=/home/vscode CARGO_TARGET_DIR=/home/vscode/.cache/cargo-target \
-    /home/vscode/.cargo/bin/cargo install --locked "cargo-cyclonedx@${cargo_cyclonedx_version}"
-
-# For the `cargo-llvm-cov` pre-commit hook (tests/README.md's "Coverage
-# gate", docs/nfrs/NFR-0023-test-coverage-gate.md) -- needs the
-# `llvm-tools-preview` rustup component to instrument coverage, on top of
-# the cargo-installed subcommand itself.
-sudo -u vscode env HOME=/home/vscode /home/vscode/.cargo/bin/rustup component add llvm-tools-preview
-sudo -u vscode env HOME=/home/vscode CARGO_TARGET_DIR=/home/vscode/.cache/cargo-target \
-    /home/vscode/.cargo/bin/cargo install --locked "cargo-llvm-cov@${cargo_llvm_cov_version}"
 
 curl -LsSf "https://releases.astral.sh/github/uv/releases/download/${uv_version}/uv-installer.sh" \
     | sudo -u vscode env HOME=/home/vscode INSTALLER_NO_MODIFY_PATH=1 sh
@@ -83,10 +27,14 @@ ln -s /home/vscode/.local/bin/uv /usr/local/bin/uv
 ln -s /home/vscode/.local/bin/uvx /usr/local/bin/uvx
 
 # python3 isn't otherwise a dependency of this template -- it's
-# infrastructure tooling only: prek needs *some* interpreter to build the
-# venv for any "language: python" hook, and .github/scripts/*.py need one
-# directly. uv is the mechanism for an exact, checksum-verified build
-# (python-build-standalone) rather than an unpinned apt package.
+# infrastructure tooling only: prek (like pre-commit) needs *some*
+# interpreter to build the venv for any "language: python" hook
+# (.pre-commit-config.yaml's pre-commit-hooks repo -- trailing-whitespace,
+# check-yaml, ...), and .github/scripts/*.py need one directly. uv is the
+# mechanism for an exact, checksum-verified build (python-build-standalone)
+# rather than an unpinned apt package; `uv python find` below resolves the
+# path so it can be symlinked to a plain, unversioned `python3` on PATH --
+# prek's own hook-venv creation looks for that directly, not via `uv run`.
 sudo -u vscode env HOME=/home/vscode /usr/local/bin/uv python install "$python_version"
 python_bin="$(sudo -u vscode env HOME=/home/vscode /usr/local/bin/uv python find "$python_version")"
 ln -s "$python_bin" /usr/local/bin/python3
@@ -97,7 +45,7 @@ ln -s "$python_bin" /usr/local/bin/python
 # directly from nodejs.org's own release tarballs (checksum-verified
 # against that release's published SHASUMS256.txt) rather than a
 # devcontainer feature, so every tool this stage installs is pinned the
-# same way, in the same place.
+# same way, in the same place -- see .devcontainer/Dockerfile's NODE_VERSION ARG.
 node_dpkg_arch="$(dpkg --print-architecture)"
 case "$node_dpkg_arch" in
     amd64) node_arch=x64 ;;
@@ -122,7 +70,9 @@ ln -s "/usr/local/lib/nodejs/${node_asset}/bin/npm" /usr/local/bin/npm
 ln -s "/usr/local/lib/nodejs/${node_asset}/bin/npx" /usr/local/bin/npx
 
 # prek (https://prek.j178.dev/) is installed as a standalone tool, not a
-# project dependency of any particular language's package manager.
+# project dependency of any particular language's package manager -- every
+# instance, regardless of language, is expected to run
+# `prek run --all-files --hook-stage manual` (see checks.yml).
 curl -LsSf "https://github.com/j178/prek/releases/download/v${prek_version}/prek-installer.sh" \
     | sudo -u vscode env HOME=/home/vscode INSTALLER_NO_MODIFY_PATH=1 sh
 ln -s /home/vscode/.local/bin/prek /usr/local/bin/prek
@@ -132,8 +82,8 @@ curl -fsSL https://claude.ai/install.sh \
 ln -s /home/vscode/.local/bin/claude /usr/local/bin/claude
 
 # For the snip Claude Code PreToolUse hook -- see .claude/README.md. Not on
-# PyPI/npm/crates.io, so fetched as a release tarball and checksum-verified
-# against the project's own published checksums.txt instead of trusting a
+# PyPI/npm, so fetched as a release tarball and checksum-verified against
+# the project's own published checksums.txt instead of trusting a
 # curl-pipe-to-sh installer.
 snip_arch="$(dpkg --print-architecture)"
 snip_asset="snip_${snip_version}_linux_${snip_arch}.tar.gz"
@@ -149,59 +99,23 @@ sudo -u vscode install -Dm755 "${snip_tmpdir}/snip" /home/vscode/.local/bin/snip
 rm -rf "$snip_tmpdir"
 ln -s /home/vscode/.local/bin/snip /usr/local/bin/snip
 
-# For connecting to the s3 stack service (RustFS) -- see
-# .devcontainer/stack/s3/README.md. Published as .deb/.rpm release assets
-# plus a SHA256SUMS file, not on apt/PyPI/npm/crates.io, so fetched and
-# checksum-verified the same way as snip above.
-rustfs_cli_arch="$(dpkg --print-architecture)"
-rustfs_cli_asset="rustfs-cli_${rustfs_cli_version}_${rustfs_cli_arch}.deb"
-rustfs_cli_tmpdir="$(mktemp -d)"
-curl -LsSf -o "${rustfs_cli_tmpdir}/${rustfs_cli_asset}" \
-    "https://github.com/rustfs/cli/releases/download/v${rustfs_cli_version}/${rustfs_cli_asset}"
-curl -LsSf -o "${rustfs_cli_tmpdir}/SHA256SUMS" \
-    "https://github.com/rustfs/cli/releases/download/v${rustfs_cli_version}/SHA256SUMS"
-(cd "$rustfs_cli_tmpdir" && grep " ${rustfs_cli_asset}\$" SHA256SUMS | sha256sum -c -)
-apt-get install -y --no-install-recommends "${rustfs_cli_tmpdir}/${rustfs_cli_asset}"
-rm -rf "$rustfs_cli_tmpdir"
-
-# `kcadm` reaches the sibling `keycloak` container's Admin REST API from
-# the devcontainer -- see .devcontainer/stack/keycloak/README.md. A thin
-# curl wrapper rather than the official kcadm.sh, which ships only inside
-# Keycloak's full server distribution and needs a JVM neither this stage
-# nor the app otherwise requires.
-kcadm_tmpfile="$(mktemp)"
-sudo chmod a+rwx "$kcadm_tmpfile"
-cat > "$kcadm_tmpfile" <<'EOF'
-#!/usr/bin/env bash
-# Thin curl wrapper for the Keycloak Admin REST API. See
-# .devcontainer/stack/keycloak/README.md for usage and required env vars.
-set -euo pipefail
-
-if [[ $# -lt 2 ]]; then
-    echo "Usage: kcadm METHOD PATH [JSON_BODY]" >&2
-    echo "Example: kcadm GET /admin/realms/template-axum/users" >&2
-    exit 1
-fi
-
-method=$1
-path=$2
-body=${3:-}
-base_url=${KEYCLOAK_URL:-http://keycloak:8080}
-
-token=$(curl -sf -X POST "${base_url}/realms/master/protocol/openid-connect/token" \
-    -d grant_type=password \
-    -d client_id=admin-cli \
-    -d "username=${KEYCLOAK_ADMIN}" \
-    -d "password=${KEYCLOAK_ADMIN_PASSWORD}" \
-    | python3 -c 'import json, sys; print(json.load(sys.stdin)["access_token"])')
-
-curl_args=(-sf -X "$method" "${base_url}${path}" \
-    -H "Authorization: Bearer ${token}" \
-    -H "Content-Type: application/json")
-[[ -n "$body" ]] && curl_args+=(-d "$body")
-
-curl "${curl_args[@]}" | { python3 -m json.tool 2>/dev/null || cat; }
-EOF
-sudo -u vscode install -Dm755 "$kcadm_tmpfile" /home/vscode/.local/bin/kcadm
-rm -f "$kcadm_tmpfile"
-ln -s /home/vscode/.local/bin/kcadm /usr/local/bin/kcadm
+# GitHub CLI: CLAUDE.md's workflow drives GitHub (PRs, workflow runs,
+# releases) through `gh`, so it's part of the base toolset rather than a
+# per-instance add-on. Fetched as a release tarball and checksum-verified
+# against the release's own checksums file, like snip above. Its login
+# state lives in the gh-config volume (.devcontainer/compose.yml), so a
+# rebuild doesn't require `gh auth login` again.
+gh_arch="$(dpkg --print-architecture)"
+gh_asset="gh_${gh_version}_linux_${gh_arch}"
+gh_tmpdir="$(mktemp -d)"
+curl -LsSf -o "${gh_tmpdir}/${gh_asset}.tar.gz" \
+    "https://github.com/cli/cli/releases/download/v${gh_version}/${gh_asset}.tar.gz"
+curl -LsSf -o "${gh_tmpdir}/checksums.txt" \
+    "https://github.com/cli/cli/releases/download/v${gh_version}/gh_${gh_version}_checksums.txt"
+(cd "$gh_tmpdir" && grep " ${gh_asset}.tar.gz\$" checksums.txt | sha256sum -c -)
+tar -xzf "${gh_tmpdir}/${gh_asset}.tar.gz" -C "$gh_tmpdir" "${gh_asset}/bin/gh"
+install -Dm755 "${gh_tmpdir}/${gh_asset}/bin/gh" /usr/local/bin/gh
+rm -rf "$gh_tmpdir"
+# Pre-create the gh-config volume's mount point owned by vscode, so a new
+# named volume is initialized with that ownership instead of root's.
+sudo -u vscode mkdir -p /home/vscode/.config/gh

@@ -39,7 +39,7 @@ had to begin with, since it's introduced fresh here.
 ## Removing this service
 
 Delete this directory and remove its compose file entry from
-`.devcontainer/compose.yml`'s `include:` list (and the `api` service's
+`.devcontainer/compose.instance.yml`'s `include:` list (and the `myapp` service's
 matching `depends_on:` entry there) — this also removes the real (non-mock-mode) backend for the application's CRUD event-sink
 interface, so a resource using it would need mock mode or a different
 broker configured via the application's own settings (see phase 2).
