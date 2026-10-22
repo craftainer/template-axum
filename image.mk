@@ -41,10 +41,11 @@ coverage:
 stack-smoke:
 	@args="-e MODE=dev -e POSTGRES_PORT=5432 -e POSTGRES_HOST=postgres -e POSTGRES_DB=$${POSTGRES_DB:-app} -e S3_ENDPOINT_URL=http://s3:9000 -e REDIS_URL=redis://redis:6379/0"; \
 	for h in postgres redis s3 keycloak; do \
-		ip="$$(getent hosts $$h | awk '{print $$1; exit}')"; \
+		ip="$$(getent ahostsv4 $$h | awk '{print $$1; exit}')"; \
 		test -n "$$ip" || { echo "stack-smoke: cannot resolve $$h" >&2; exit 1; }; \
 		args="$$args --add-host=$$h:$$ip"; \
 	done; \
 	for e in postgres/postgres s3/s3 keycloak/keycloak; do args="$$args --env-file=.devcontainer/stack/$$e.env"; done; \
-	IMAGE_SMOKE_RUN_ARGS="$$args" IMAGE_SMOKE_PATH=/health/ready IMAGE_SMOKE_TIMEOUT=150 \
+	arch="$${RELEASE_ARCH:-$$(case "$$(uname -m)" in aarch64|arm64) echo arm64;; *) echo amd64;; esac)}"; \
+		RELEASE_ARCH="$$arch" IMAGE_SMOKE_RUN_ARGS="$$args" IMAGE_SMOKE_PATH=/health/ready IMAGE_SMOKE_TIMEOUT=150 \
 		bash scripts/image-smoke.sh

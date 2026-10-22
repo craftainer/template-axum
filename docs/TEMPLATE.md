@@ -250,7 +250,7 @@ these files over base:
 | `scripts/image-smoke.sh` | `replace` | loads the image tar from `dist/`, runs it and polls a URL |
 | `scripts/runner-setup.sh` | `replace` | creates the group-0 runtime user and its writable directories for the `runner` stage |
 | `scripts/image-scan.sh` | `replace` | the Trivy scan the `image-scan` hook runs |
-| `scripts/runner-setup.d/*.sh` | `ignore` | the instance's runner-stage hooks |
+| `scripts/runner-setup.d/*.sh` | `replace` for the scripts template-axum ships (`10-ca-certificates.sh`); an instance's own go in `.github/template-sync-manifest.local.yml` | runner-stage hooks |
 | `scripts/check-dockerfile-versions.sh` | `replace` | the version-ARG consistency check |
 
 ### `image.mk` variables

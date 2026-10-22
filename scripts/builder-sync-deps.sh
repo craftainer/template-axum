@@ -18,5 +18,6 @@ cargo build --release --locked
 # which stay cached) so builder-sync-app.sh's real build doesn't mistake
 # the dummy binary for already up to date once the real src/ lands.
 rm -rf target/release/deps/template_axum-* target/release/deps/libtemplate_axum-* \
-    target/release/template-axum target/release/libtemplate_axum.*
+    target/release/template-axum target/release/libtemplate_axum.* \
+    target/release/.fingerprint/template-axum-* target/release/.fingerprint/template_axum-*
 rm -f src/main.rs src/lib.rs

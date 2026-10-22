@@ -89,7 +89,7 @@ replace:
   # (identical for every image-shipping app; instances customise it only
   # through variables in image.mk), the smoke test, and the runner-setup
   # driver. Hook scripts are listed one by one, not as globs: an instance's
-  # own scripts/runner-setup.d/*.sh are ignore tier (below).
+  # own scripts/runner-setup.d/*.sh go in the local manifest.
   # Same precedent as template-python-package: the Makefile implements the
   # release contract identically for every instance, so it's template-owned.
   - Makefile
@@ -98,6 +98,13 @@ replace:
   - scripts/runner-setup.d/README.md
   - scripts/check-dockerfile-versions.sh
   - scripts/check-rust-version.sh
+  # Hook scripts template-axum ships (replace tier, per template-base's
+  # scripts/*.d/README.md convention); an instance's own hook scripts go in
+  # .github/template-sync-manifest.local.yml.
+  - scripts/develop.d/10-rust.sh
+  - scripts/develop.d/20-stack-tools.sh
+  - scripts/post-create.d/10-cargo-build.sh
+  - scripts/runner-setup.d/10-ca-certificates.sh
   - scripts/image-scan.sh
   - scripts/skopeo.sh
 
@@ -138,12 +145,9 @@ ignore:
   - .github/template-sync-state.json
 
   # Instance hook files (see docs/TEMPLATE.md's "Instance extension
-  # points"): an instance's own compose fragment and the scripts it drops
-  # into the two hook directories.
+  # points"): an instance's own compose fragment. Its hook scripts are listed
+  # in .github/template-sync-manifest.local.yml.
   - .devcontainer/compose.instance.yml
-  - scripts/develop.d/*.sh
-  - scripts/post-create.d/*.sh
-  - scripts/runner-setup.d/*.sh
 
   # An instance's own extra "ignore" patterns for paths this manifest can't
   # know about (see docs/TEMPLATE.md's "Template sync" section).
