@@ -85,7 +85,7 @@ RUN bash /tmp/runner-setup.sh "$APP_UID" && rm -rf /tmp/runner-setup.sh /tmp/run
 
 COPY --chmod=755 scripts/runner.sh /usr/local/bin/runner.sh
 WORKDIR /app
-COPY --from=builder --chown=${APP_UID}:0 --chmod=u=rx,g=rx,o= /build/bin/template-axum /app/template-axum
+COPY --from=builder --chown=${APP_UID}:0 --chmod=0550 /build/bin/template-axum /app/template-axum
 
 # Set by `make build` through BUILD_ARGS in image.mk; declared last so a new
 # commit hash doesn't invalidate the layers above.

@@ -107,6 +107,7 @@ replace:
   - scripts/runner-setup.d/10-ca-certificates.sh
   - scripts/image-scan.sh
   - scripts/skopeo.sh
+  - scripts/test-image-scripts.sh
 
 ignore:
   # The application: its crate, tests and the runtime image's Rust build
