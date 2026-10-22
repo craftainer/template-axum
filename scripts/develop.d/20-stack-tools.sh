@@ -20,7 +20,7 @@ rm -rf /var/lib/apt/lists/*
 # For connecting to the s3 stack service (RustFS) -- see
 # .devcontainer/stack/s3/README.md. Published as .deb/.rpm release assets
 # plus a SHA256SUMS file, not on apt/PyPI/npm/crates.io, so fetched and
-# checksum-verified the same way as snip above.
+# checksum-verified (the SHA256SUMS file), like the other pinned downloads.
 rustfs_cli_arch="$(dpkg --print-architecture)"
 rustfs_cli_asset="rustfs-cli_${RUSTFS_CLI_VERSION}_${rustfs_cli_arch}.deb"
 rustfs_cli_tmpdir="$(mktemp -d)"
