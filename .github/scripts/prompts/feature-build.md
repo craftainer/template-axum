@@ -18,8 +18,9 @@ under `docs/plans/`.
   fold anything ADR-worthy into `docs/adrs/` (only if it involved a
   significant, reversible-at-cost decision) or into product docs under
   `docs/`, then delete the plan file -- a finished plan doesn't linger.
-- Run the full check suite: `prek run --all-files --hook-stage manual`
-  (see docs/TEMPLATE.md's "Checks" section). Fix anything it flags.
+- Run the full check suite: `prek run --all-files --hook-stage
+  manual` (see docs/TEMPLATE.md's "Checks" section). Fix anything it
+  flags.
 - Make exactly one commit with a Conventional Commits message (e.g.
   `feat: <what>`) -- its subject and body become the PR title and body
   verbatim, so write it like one (no need to reference the issue

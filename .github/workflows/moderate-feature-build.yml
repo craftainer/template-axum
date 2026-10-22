@@ -2,8 +2,7 @@
 # the plan branch -- see ../workflows/README.md's "Issue moderation"
 # section for the split-workflow design (this half only runs Claude and
 # packages the result; moderate-feature-build-apply.yml does the actual
-# push/PR/relabel) and ../../docs/plans/2026-09-issue-moderator.md for the
-# original design. Dormant (job shows Skipped, not Failed) unless the
+# push/PR/relabel). Dormant (job shows Skipped, not Failed) unless the
 # ANTHROPIC_API_KEY repository secret is configured.
 name: Moderate feature build
 
@@ -90,7 +89,7 @@ jobs:
           runCmd: >-
             .github/scripts/run_claude.sh
             .github/scripts/prompts/feature-build.md
-            "Read,Grep,Glob,Write,Edit,Bash(git *),Bash(prek run *)"
+            "Read,Grep,Glob,Write,Edit,Bash(git *),Bash(prek run *)${{ vars.MODERATION_EXTRA_TOOLS && format(',{0}', vars.MODERATION_EXTRA_TOOLS) || '' }}"
             40 900
         env:
           GITHUB_ISSUE_NUMBER: ${{ github.event.issue.number }}
@@ -112,7 +111,7 @@ jobs:
 
       - name: Upload result artifact
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: moderation-result
           path: moderation-result

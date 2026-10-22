@@ -15,9 +15,9 @@ the bug and no fix yet.
 - Make the failing test pass without weakening or deleting it (no
   loosening assertions, no skip/xfail markers, no deleting the test and
   writing a different one that happens to pass).
-- Run the full check suite: `prek run --all-files --hook-stage manual`
-  (see docs/TEMPLATE.md's "Checks" section). Fix anything it flags --
-  lint, types, coverage, the rest of the test suite -- don't
+- Run the full check suite: `prek run --all-files --hook-stage
+  manual` (see docs/TEMPLATE.md's "Checks" section). Fix anything it
+  flags -- lint, types, coverage, the rest of the test suite -- don't
   just make the one new test pass at the expense of breaking others.
 - Make exactly one commit with a Conventional Commits message (e.g.
   `fix: <what>`) -- its subject and body become the PR title and body

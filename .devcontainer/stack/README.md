@@ -9,7 +9,7 @@ cache, identity provider, e2e test runner, ...). Each contains:
   see "Configuration" below — only present when the service actually has
   credentials to hold (redis and selenium don't).
 
-Every fragment here is listed in `../compose.yml`'s own `include:` list,
+Every fragment here is listed in `../compose.instance.yml`'s own `include:` list,
 so all of them start together. Each fragment's relative bind-mount or
 `env_file:` path — like keycloak's `realm-export.json` or
 `keycloak.env` — resolves relative to *that fragment's own directory*,
@@ -18,13 +18,16 @@ fragment's own header comment.
 
 ## Devcontainer stack pattern
 
-`../compose.yml` defines the app service and pulls every supporting
-service in via this `include:` list — not the `dockerComposeFile` array
-in `devcontainer.json`, which only ever names `../compose.yml` itself. A
+`../compose.instance.yml` configures the app service (`myapp`, defined in
+the template-owned `../compose.yml`) and pulls every supporting service in
+via this `include:` list — not the `dockerComposeFile` array in
+`devcontainer.json`, which only ever names `../compose.yml` and
+`../compose.instance.yml`. A
 new service follows this same `compose.yml` + `README.md` pattern and
-gets added to `../compose.yml`'s `include:` list.
+gets added to `../compose.instance.yml`'s `include:` list.
 
-No fragment here (including the app service's own `../compose.yml`)
+No fragment here (including the app service's own `../compose.yml` and
+`../compose.instance.yml`)
 declares a `ports:` mapping or a `networks:` block:
 
 - **No `networks:`** — every service already reaches every other one by
@@ -40,9 +43,9 @@ declares a `ports:` mapping or a `networks:` block:
   exactly one place instead of scattered `ports:` blocks.
 
 Every stack fragment's service also defines a `healthcheck:`, and
-`../compose.yml`'s `api` service lists a matching `depends_on:
+`../compose.instance.yml`'s `myapp` service lists a matching `depends_on:
 <service>: condition: service_healthy` entry for it. Compose won't start
-`api` until every dependency reports healthy, so `docker compose up`
+`myapp` until every dependency reports healthy, so `docker compose up`
 (and therefore `devcontainers/ci`'s `runCmd`, and a fresh
 `postCreateCommand`) never runs a check or a test against a stack
 service that's still starting — e.g. Keycloak, a JVM app doing
@@ -62,8 +65,8 @@ inside that service's own subdirectory here — the single source of
 truth for that service's values, tracked in git since these are
 dev-only defaults, not real secrets (each service's `README.md` says
 so). That fragment's own `compose.yml` loads its file via `env_file:`
-directly into the service's container. Where `api` needs those same
-values (`../compose.yml`), it lists the same per-service files under its
+directly into the service's container. Where `myapp` needs those same
+values (`../compose.instance.yml`), it lists the same per-service files under its
 own `env_file:` — never re-pins the values a second time; see the application's own configuration module (phase 2) for how it
 assembles them into the settings the app itself reads.
 
@@ -73,8 +76,8 @@ assembles them into the settings the app itself reads.
   `compose.yml` + `README.md` pattern, plus a `<service>.env` if it has
   credentials or other config values to hold.
 - Give the service a `healthcheck:`, and add a matching `depends_on:
-  <service>: condition: service_healthy` entry to `api` in
-  `../compose.yml` — see "Devcontainer stack pattern" above for why, and
+  <service>: condition: service_healthy` entry to `myapp` in
+  `../compose.instance.yml` — see "Devcontainer stack pattern" above for why, and
   verify the healthcheck command against the real pinned image before
   trusting it (don't assume `curl`/`wget` are present).
 - Let it join the default network compose generates for this project —

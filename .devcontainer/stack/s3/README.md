@@ -34,4 +34,4 @@ template uses RustFS instead.
 ## Removing this service
 
 Delete this directory and remove its compose file entry from
-`.devcontainer/compose.yml`'s `include:` list.
+`.devcontainer/compose.instance.yml`'s `include:` list.

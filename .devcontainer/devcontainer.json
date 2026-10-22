@@ -1,13 +1,14 @@
 {
   "name": "template-axum",
   "dockerComposeFile": [
-    "compose.yml"
+    "compose.yml",
+    "compose.instance.yml"
   ],
-  "service": "api",
+  "service": "myapp",
   "workspaceFolder": "/workspace",
   "shutdownAction": "stopCompose",
   "features": {
-    "ghcr.io/devcontainers/features/docker-in-docker:4.1.0": {
+    "ghcr.io/devcontainers/features/docker-in-docker:4.1.3": {
       "moby": false,
       "dockerDashComposeVersion": "v2"
     }
@@ -15,7 +16,7 @@
   "forwardPorts": [8000, "keycloak:8080"],
   "portsAttributes": {
     "8000": {
-      "label": "axum (api)",
+      "label": "axum (myapp)",
       "onAutoForward": "openPreview"
     },
     "keycloak:8080": {
@@ -30,7 +31,7 @@
   "remoteEnv": {
     "SSH_AUTH_SOCK": "/home/vscode/.ssh-agent-resolved.sock"
   },
-  "postCreateCommand": "git config --global --add safe.directory /workspace && prek install && cargo build",
+  "postCreateCommand": "bash /workspace/scripts/post-create.sh",
   "postStartCommand": "sh /workspace/.devcontainer/resolve-ssh-agent.sh",
   "customizations": {
     "vscode": {

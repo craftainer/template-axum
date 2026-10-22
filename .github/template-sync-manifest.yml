@@ -10,50 +10,71 @@
 # wants a template-owned path gone for good should move its pattern to
 # "ignore" in a template release rather than deleting the file locally.
 #
-# This is template-base's own manifest, classifying the generic subset it
-# ships. A repo that's itself both an instance of template-base and its own
-# template for further instances (e.g. template-fastapi) keeps a completely
-# separate manifest of its own, covering its own (larger) tracked-file set --
-# see that repo's docs/TEMPLATE.md.
+# This started as template-docker's manifest and is itself "merge" tier:
+# template-axum is an instance of template-docker (itself an instance of
+# template-base) and its own template for further instances, so it edits
+# this file directly, covering its own (larger) tracked-file set, and
+# resolves template-docker's additions by hand -- see docs/TEMPLATE.md's
+# "Image layer (template-docker)" section and docs/adrs/0019.
+#
+# An instance that isn't itself a template doesn't edit this file; it lists
+# its own files (e.g. src/) in ../template-sync-manifest.local.yml instead --
+# same format, "ignore" tier only, read by the completeness check but never
+# by sync.
 #
 # Patterns: a trailing "/" matches the directory and everything under it; "*"
 # matches any run of characters (including "/"); anything else is an exact
 # path. Every pattern here is anchored at the repo root.
 
 replace:
-  # Devcontainer, editor, CI, and CLI-assistant config -- no instance ever
-  # has a reason to diverge from the template's own setup for these.
-  # .claude/ in particular: if an instance ever needs to add its own
-  # permissions/hooks to .claude/settings.json, that one file (not the
-  # whole directory) should move to "merge" in a template release, rather
-  # than losing replace-tier sync for .claude/'s other, still-generic
-  # contents.
-  - .devcontainer/
-  - .vscode/
-  - .claude/
-  - .github/workflows/
+  # Base-owned files an instance extends through a hook (see
+  # docs/TEMPLATE.md's "Instance extension points") rather than by editing
+  # them, so a sync can overwrite them safely.
+  - .claude/hooks/self-check.sh
+  - .claude/skills/
+  - .claude/agents/
+  - .devcontainer/compose.yml
+  - .devcontainer/devcontainer-lock.json
+  - .devcontainer/resolve-ssh-agent.sh
+  - .vscode/extensions.json
+  - .vscode/settings.json
+  # The Playwright-over-Selenium MCP bridge .mcp.json points at.
+  - .claude/mcp/
+  # The backing-services stack (Postgres, S3, Keycloak, Redis, MQTT,
+  # Selenium) every axum instance's devcontainer and tests use.
+  - .devcontainer/stack/
+  # Listed one by one, not as a glob: .github/workflows/README.md is merge.
+  - .github/workflows/checks.yml
+  - .github/workflows/moderate-bug-fix-apply.yml
+  - .github/workflows/moderate-bug-fix.yml
+  - .github/workflows/moderate-bug-triage.yml
+  - .github/workflows/moderate-cleanup.yml
+  - .github/workflows/moderate-feature-build-apply.yml
+  - .github/workflows/moderate-feature-build.yml
+  - .github/workflows/moderate-feature-triage.yml
+  - .github/workflows/moderate-setup.yml
+  - .github/workflows/release.yml
+  - .github/workflows/template-sync.yml
+  # axum's own perf tier (NFR-0024); instances inherit it.
+  - .github/workflows/perf.yml
   - .github/scripts/
-  - .github/CONTENTS.md
-  - .github/renovate.json
-  - .github/template-sync-manifest.yml
   - .github/ISSUE_TEMPLATE/
   - .github/PULL_REQUEST_TEMPLATE.md
 
-  # Build/dependency/hook plumbing, all instance-agnostic. Dockerfile and
-  # scripts/ are NOT here -- see "ignore" below for why this instance
-  # diverges from template-base's generic single-stage versions.
-  - .dockerignore
+  # Build/dependency/hook plumbing, all instance-agnostic.
+  - .devcontainer/Dockerfile
+  - .devcontainer/Dockerfile.dockerignore
   - .gitattributes
-  - .gitignore
-  - .pre-commit-config.yaml
-  - .mcp.json
+  - scripts/develop.sh
+  - scripts/post-create.sh
+  - scripts/develop.d/README.md
+  - scripts/post-create.d/README.md
   - .secrets/README.md
   - .secrets/.gitkeep
 
   # The AI-assisted workflow, and every directory README/template documenting
   # this repo's own conventions rather than product knowledge.
   - CLAUDE.md
-  - docs/TEMPLATE.md
   - docs/README.md
   - docs/adrs/README.md
   - docs/adrs/template.md
@@ -64,36 +85,51 @@ replace:
   - docs/plans/README.md
   - docs/plans/template.md
 
-ignore:
-  # Each instance chooses its own license and copyright holder.
-  - LICENSE
-
-  # The release-artifact contract (see docs/TEMPLATE.md's "Release: a
-  # Makefile contract" section) is the whole point that this differs per
-  # instance -- template-owned in shape only, never in content.
+  # template-docker's own layer on top of base: the image-release Makefile
+  # (identical for every image-shipping app; instances customise it only
+  # through variables in image.mk), the smoke test, and the runner-setup
+  # driver. Hook scripts are listed one by one, not as globs: an instance's
+  # own scripts/runner-setup.d/*.sh go in the local manifest.
+  # Same precedent as template-python-package: the Makefile implements the
+  # release contract identically for every instance, so it's template-owned.
   - Makefile
+  - scripts/image-smoke.sh
+  - scripts/runner-setup.sh
+  - scripts/runner-setup.d/README.md
+  - scripts/check-dockerfile-versions.sh
+  - scripts/check-rust-version.sh
+  # Hook scripts template-axum ships (replace tier, per template-base's
+  # scripts/*.d/README.md convention); an instance's own hook scripts go in
+  # .github/template-sync-manifest.local.yml.
+  - scripts/develop.d/10-rust.sh
+  - scripts/develop.d/20-stack-tools.sh
+  - scripts/post-create.d/10-cargo-build.sh
+  - scripts/runner-setup.d/10-ca-certificates.sh
+  - scripts/image-scan.sh
+  - scripts/skopeo.sh
+  - scripts/test-image-scripts.sh
 
-  # template-base's Dockerfile/scripts/ ship only a generic single `develop`
-  # stage -- this instance's own three-stage develop/builder/runner Rust
-  # build (Dockerfile) and its per-stage setup scripts (scripts/) diverge
-  # structurally, not just in pinned versions, so a "replace" sync from
-  # template-base would destroy them. Instance-owned from the moment this
-  # repo added its own Rust toolchain.
-  - Dockerfile
-  - scripts/
-
-  # This instance's own application, entirely absent from template-base.
+ignore:
+  # The application: its crate, tests and the runtime image's Rust build
+  # scripts. Instance-owned from the moment it's instantiated.
   - Cargo.toml
   - Cargo.lock
   - src/
   - tests/
   - .cargo/
+  - scripts/builder.sh
+  - scripts/builder-sync-deps.sh
+  - scripts/builder-sync-app.sh
+  - scripts/runner.sh
 
-  # The release smoke-test stack (NFR-0010): which backing services it
-  # composes is this instance's own (Postgres/Redis/S3/Keycloak, per
-  # src/lib.rs::build_health_registry) -- template-base ships no
-  # equivalent file at all.
-  - compose.yml
+  # Each instance chooses its own license and copyright holder.
+  - LICENSE
+
+  # The instance's own image: its Dockerfile (toolchain, build, runtime
+  # stages) and the image.mk variables that tune the template's Makefile.
+  # The skeletons shipped here are examples to replace, never synced.
+  - Dockerfile
+  - image.mk
 
   # Product/domain knowledge and working plans: instance-owned from the
   # moment it's instantiated.
@@ -109,7 +145,43 @@ ignore:
   # Instance-owned bookkeeping, written only by the sync workflow itself.
   - .github/template-sync-state.json
 
+  # Instance hook files (see docs/TEMPLATE.md's "Instance extension
+  # points"): an instance's own compose fragment. Its hook scripts are listed
+  # in .github/template-sync-manifest.local.yml.
+  - .devcontainer/compose.instance.yml
+
+  # An instance's own extra "ignore" patterns for paths this manifest can't
+  # know about (see docs/TEMPLATE.md's "Template sync" section).
+  - .github/template-sync-manifest.local.yml
+
 merge:
-  # Project identity (name/description) is interpolated per instance;
-  # everything else in this file is template-owned.
+  # Project identity (name/description) is interpolated per instance.
   - README.md
+
+  # Baseline excludes the instance extends with its own entries.
+  - .dockerignore
+
+  # Files with no include mechanism of their own (JSON configs, prek's
+  # .pre-commit-config.yaml), and docs an instance appends to: a three-way
+  # merge keeps the instance's additions.
+  - .claude/settings.json
+  - .claude/README.md
+  - .devcontainer/devcontainer.json
+  - .devcontainer/README.md
+  - .vscode/tasks.json
+  - .vscode/README.md
+  - .github/workflows/README.md
+  - .github/CONTENTS.md
+  - .github/renovate.json
+  - .pre-commit-config.yaml
+  - .mcp.json
+  - .gitignore
+  - scripts/README.md
+  - docs/TEMPLATE.md
+
+  # The critical one: as "replace", the first sync would overwrite a
+  # downstream template's own manifest, which classifies *its* tree for
+  # *its* instances. Ordinary instances never edit this file (they use the
+  # local manifest), so a merge applies cleanly for them and keeps their
+  # completeness check current with new base files.
+  - .github/template-sync-manifest.yml

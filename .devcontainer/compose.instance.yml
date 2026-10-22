@@ -1,0 +1,58 @@
+# Instance-owned, never touched by template sync: the axum app's backing
+# services and the settings of the dev service (`myapp`, defined in the
+# template-owned compose.yml). The workspace is bind-mounted, so source
+# edits are picked up without a rebuild. env_file below pulls in each stack
+# service's own credentials (see stack/README.md's "Configuration" section);
+# the application's config module assembles a DATABASE_URL and the S3
+# access/secret key fields from the raw postgres/rustfs values at runtime,
+# and OIDC_* arrive from keycloak.env already fully composed.
+include:
+  - ./stack/postgres/compose.yml
+  - ./stack/s3/compose.yml
+  - ./stack/keycloak/compose.yml
+  - ./stack/redis/compose.yml
+  - ./stack/mqtt/compose.yml
+  - ./stack/selenium/compose.yml
+
+services:
+  myapp:
+    env_file:
+      - ./stack/postgres/postgres.env
+      - ./stack/s3/s3.env
+      - ./stack/keycloak/keycloak.env
+    # Waits for every stack service's own healthcheck (see each fragment's
+    # compose.yml) so `docker compose up` -- and therefore devcontainers/ci's
+    # runCmd, and postCreateCommand -- never starts myapp, prek, or cargo
+    # test before the service they'd talk to is actually ready.
+    depends_on:
+      postgres:
+        condition: service_healthy
+      s3:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mqtt:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+      selenium:
+        condition: service_healthy
+    environment:
+      # Keep cargo's build artefacts outside the bind-mounted /workspace: on
+      # Windows hosts a target/ inside the mount gets scanned file-by-file by
+      # antivirus/malware tools and is painfully slow to compile into. It
+      # lives purely in the container's writable layer and is rebuilt by
+      # scripts/post-create.d/10-cargo-build.sh when needed.
+      CARGO_TARGET_DIR: /home/vscode/.cache/cargo-target
+      # Fixed in-network hostnames/ports, not credentials, so they're
+      # literal here rather than pulled from a stack env file.
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      S3_ENDPOINT_URL: http://s3:9000
+      REDIS_URL: redis://redis:6379/0
+      MQTT_HOST: mqtt
+      MQTT_PORT: "1883"
+    # No ports: mapping and no networks: block -- see .devcontainer/README.md's
+    # "Don't". Host access to :8000 comes from devcontainer.json's
+    # forwardPorts, and myapp reaches every stack service by name on the
+    # default network compose generates for this project.
