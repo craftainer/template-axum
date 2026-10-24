@@ -125,3 +125,7 @@ target/
 # Claude Code CLI: personal, per-user overrides — never the shared
 # .claude/settings.json.
 .claude/settings.local.json
+
+# Python bytecode (the scripts-tests hook runs the tests in-tree)
+__pycache__/
+*.pyc
