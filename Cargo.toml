@@ -69,19 +69,21 @@ redis = { version = "=1.7.0", features = ["tokio-comp", "connection-manager", "s
 # (0.21/0.101, with open RUSTSEC advisories) alongside the current one
 # "default-https-client" already pulls in -- see docs/adrs/ once phase 2
 # lands the real S3 wiring for the ADR this belongs in.
-aws-sdk-s3 = { version = "=1.112.0", default-features = false, features = ["default-https-client", "rt-tokio", "sigv4a", "behavior-version-latest"] }
+# "sigv4a" (multi-region access point signing) deliberately off: unused, and
+# it pulls p256 0.11 / crypto-bigint 0.4.9 (RUSTSEC-2026-0387).
+aws-sdk-s3 = { version = "=1.112.0", default-features = false, features = ["default-https-client", "rt-tokio", "behavior-version-latest"] }
 aws-config = "=1.8.11"
 
-# OIDC/OAuth2 client -- phase 2's Keycloak-backed auth.
-openidconnect = "=4.0.1"
-oauth2 = "=5.0.0"
+# No OIDC/OAuth2 client crates (openidconnect/oauth2) yet: they were pinned
+# but never used, and openidconnect's non-optional p256/p384 0.13 chain
+# carries crypto-bigint 0.5.x (RUSTSEC-2026-0387, no fixed release). Add them
+# when a browser OIDC login flow is wired up.
 
 # Bearer-token decode/verify against a fetched JWKS (see src/oidc/mod.rs) --
-# openidconnect/oauth2 above cover the Authorization Code + PKCE flow the
-# frontend runs to obtain a token; this resource-server side needs its own
-# JWT decode since openidconnect's own verifier is tied to its own
-# authorization-flow-scoped nonce/state, not a bare bearer token on an
-# unrelated request.
+# the frontend obtains a token via the Authorization Code + PKCE flow; this
+# resource-server side needs its own JWT decode. (If openidconnect is added
+# later, note its own verifier is tied to its authorization-flow-scoped
+# nonce/state, not a bare bearer token on an unrelated request.)
 # "aws_lc_rs": 11.x requires picking a CryptoProvider explicitly (no
 # longer implicit), and aws-lc-rs is already in the dependency graph via
 # rustls's default backend, so this reuses that copy rather than pulling

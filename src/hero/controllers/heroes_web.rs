@@ -13,11 +13,11 @@
 //! **Auth, and why this router alone accepts `?token=`:** this app's only
 //! auth mechanism is a bearer token (`oidc::AuthClaims`); it has no
 //! browser session/cookie login flow (the `openidconnect`/`oauth2`
-//! dependencies `Cargo.toml` pins stay unwired -- see that file's own
-//! note). A plain HTML navigation can't attach an `Authorization` header,
-//! so this router's own `WebAuthClaims` extractor additionally accepts
-//! the token via `?token=`, and every link/form this router renders
-//! carries it forward in its `action`/`href`. This is a deliberate,
+//! crates get added to `Cargo.toml` when OIDC login is wired up). A plain HTML
+//! navigation can't attach an `Authorization` header, so this router's own
+//! `WebAuthClaims` extractor additionally accepts the
+//! token via `?token=`, and every link/form this router renders carries it
+//! forward in its `action`/`href`. This is a deliberate,
 //! narrow scope decision for demonstrating progressive enhancement over
 //! the existing JSON API -- not a general browser-auth mechanism, and not
 //! something any other router in this app does.

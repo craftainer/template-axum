@@ -18,7 +18,7 @@ CARGO_AUDIT_VERSION=0.22.2
 # renovate: datasource=crate depName=cargo-llvm-cov
 CARGO_LLVM_COV_VERSION=0.9.1
 
-# pkg-config/libssl-dev: some cargo dependencies (aws-sdk-s3/openidconnect)
+# pkg-config/libssl-dev: some cargo dependencies (e.g. aws-sdk-s3)
 # link against OpenSSL via -sys crates even though the app's own TLS is
 # rustls. libpq-dev: the Postgres client library for the same reason.
 apt-get update
