@@ -57,3 +57,35 @@ was never going to reach. If a real deployment of an instance of this
 template later needs distributed load generation goose's `--manager`/
 `--worker` gaggle mode doesn't cover, that's a reason to revisit this
 ADR then, not a reason to default to Locust now.
+
+## Addendum (2026-10-25): a real-stack mode next to the mock one
+
+The original scenario runs only under `MODE=mock`, with no Postgres,
+Redis or MQTT behind it, so it cannot measure anything those services
+influence (pool settings, a stats cache, conditional requests, tracing
+overhead). `tests/perf` now has two modes selected by `PERF_TARGET`:
+`mock` (unchanged: the `HeroJourney` scenario, still what `perf.yml`
+runs) and `real` (`HeroJourneyReal`, plus a `HeroSeedReal` seeding
+scenario), driven by `tests/perf/run-real-stack.sh` against the
+devcontainer stack.
+
+Decisions:
+
+- **Auth stays the production path.** Real mode runs the app as
+  `MODE=dev`, which verifies Keycloak-signed tokens; goose obtains them
+  with the realm's existing password grant for the seeded `maintainer`
+  user. No test-only bypass was added to the app, and none is needed.
+- **Fresh database per run** (`ax4h_perf`, dropped and recreated by the
+  script) because deletes are soft and the table would otherwise drift
+  between A/B runs. Seed data goes through the API, not SQL.
+- **Environment variables, not CLI flags**, for the mode and credentials,
+  since goose owns the command line.
+- **CI stays mock-only.** A GitHub runner has no Keycloak/Postgres stack;
+  wiring service containers plus a realm import would duplicate the
+  devcontainer stack for a manually triggered workflow. Real-mode numbers
+  are taken on the devcontainer host.
+- The documented mock command now raises the app's per-IP rate limits;
+  at the defaults the single load-generator IP is throttled (`429`) and
+  the run reports errors.
+
+See `tests/perf/README.md` for usage.
