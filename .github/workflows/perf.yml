@@ -1,6 +1,8 @@
 # Perf tier (NFR-0024, docs/adrs/0018, tests/perf/README.md): builds the
 # runner-stage image, runs it under MODE=mock (self-contained -- no
-# backing-service stack needed), and drives tests/perf against it.
+# backing-service stack needed), and drives tests/perf against it. The
+# real-stack mode (tests/perf/run-real-stack.sh) needs the devcontainer's
+# Postgres/Redis/MQTT/Keycloak and is deliberately not run here.
 # Manually triggered only -- a load test is neither fast nor free enough
 # to run on every push/PR the way checks.yml's own suite does.
 name: Perf
@@ -39,6 +41,8 @@ jobs:
           docker run -d --name template-axum-perf-target \
             -p 8000:8000 \
             -e MODE=mock -e ALLOW_MOCK_MODE=1 \
+            -e RATE_LIMIT_HERO_WRITE_PER_MINUTE=1000000 \
+            -e RATE_LIMIT_MOCK_TOKEN_PER_MINUTE=1000000 \
             template-axum:perf
 
           for _ in $(seq 1 30); do
