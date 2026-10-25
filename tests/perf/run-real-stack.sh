@@ -12,7 +12,7 @@
 # `mqtt-mqtt-1` and `keycloak-keycloak-1` are running (one compose project
 # per fragment under .devcontainer/stack/, so each has its own network).
 # Environment overrides: PERF_DB (default ax4h_perf), PERF_SEED (records to
-# seed, default 500), PERF_TOOLCHAIN_IMAGE (a rust image with cargo).
+# seed, rounded up to a multiple of 4, default 500), PERF_TOOLCHAIN_IMAGE (a rust image with cargo).
 set -euo pipefail
 
 image=${1:?usage: $0 <image> [goose args...]}
@@ -30,6 +30,29 @@ for c in postgres-postgres-1 redis-redis-1 mqtt-mqtt-1 keycloak-keycloak-1; do
     echo "required stack container $c is not running" >&2
     exit 1
   fi
+done
+
+for n in keycloak_default postgres_default redis_default mqtt_default; do
+  if ! docker network inspect "$n" >/dev/null 2>&1; then
+    echo "required docker network $n does not exist (stack started under another compose project name?)" >&2
+    exit 1
+  fi
+done
+if ! docker image inspect "$toolchain" >/dev/null 2>&1; then
+  echo "toolchain image $toolchain is not available locally (set PERF_TOOLCHAIN_IMAGE)" >&2
+  exit 1
+fi
+mkdir -p "$cargo_cache"
+
+# Goose picks the scenario itself; a caller-supplied --scenarios would
+# duplicate it.
+for a in "$@"; do
+  case "$a" in
+    --scenarios | --scenarios=* | -s)
+      echo "do not pass --scenarios; the script selects HeroJourneyReal" >&2
+      exit 2
+      ;;
+  esac
 done
 
 cleanup() {
@@ -95,7 +118,8 @@ goose() {
 # Seed through the API (4 users x seed/4 iterations of one create each),
 # then run the journey. Seeding is not part of the measured run.
 if [ "$seed" -gt 0 ]; then
-  goose --scenarios HeroSeedReal --users 4 --iterations $((seed / 4)) \
+  per_user=$(((seed + 3) / 4)) # rounded up; never 0, which goose reads as unlimited
+  goose --scenarios HeroSeedReal --users 4 --iterations "$per_user" \
     --no-print-metrics --quiet
 fi
 goose --scenarios HeroJourneyReal "$@"

@@ -65,14 +65,18 @@ async fn fetch_real_token(user: &mut GooseUser) -> TransactionResult {
         .error_for_status()
         .map_err(|err| Box::new(err.into()))?;
     let body: Value = response.json().await.map_err(|err| Box::new(err.into()))?;
+    // goose's TransactionError has no variant for a malformed body; the
+    // loud panic names the misconfiguration (wrong client or realm).
     let token = body["access_token"]
         .as_str()
         .expect("the token endpoint should return access_token")
         .to_string();
     let lifetime = body["expires_in"].as_u64().unwrap_or(60);
     // Refresh a little early so an in-flight request never carries an
-    // expired token.
-    let refresh_at = Instant::now() + Duration::from_secs(lifetime.saturating_sub(30).max(1));
+    // expired token: 30s early, but never earlier than half the lifetime,
+    // so a short-lived token cannot make every request re-fetch one.
+    let margin = 30.min(lifetime / 2);
+    let refresh_at = Instant::now() + Duration::from_secs(lifetime - margin);
     user.set_session_data(Session {
         token,
         refresh_at: Some(refresh_at),
@@ -222,7 +226,8 @@ async fn create_update_delete_hero(user: &mut GooseUser) -> TransactionResult {
 
 #[tokio::main]
 async fn main() -> Result<(), GooseError> {
-    let scenario = match env_or("PERF_TARGET", "mock").as_str() {
+    let target = env_or("PERF_TARGET", "mock");
+    let scenario = match target.as_str() {
         "mock" => scenario!("HeroJourney")
             .register_transaction(transaction!(mint_token).set_on_start())
             .register_transaction(transaction!(list_heroes).set_weight(6)?)
@@ -241,7 +246,7 @@ async fn main() -> Result<(), GooseError> {
     };
 
     let mut attack = GooseAttack::initialize()?.register_scenario(scenario);
-    if env_or("PERF_TARGET", "mock") == "real" {
+    if target == "real" {
         // Run on its own: `--scenarios HeroSeedReal --users N --iterations M`
         // creates N*M records through the API (see this directory's README).
         attack = attack.register_scenario(
