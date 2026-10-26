@@ -16,7 +16,7 @@ Mirrors template-fastapi's Hero role matrix; see ADR 0003.
 
 ## Acceptance criteria
 
-- `src/controllers/mod.rs`'s `HERO_READ_ROLES`/`HERO_WRITE_ROLES`/
+- `src/hero/controllers/mod.rs`'s `HERO_READ_ROLES`/`HERO_WRITE_ROLES`/
   `HERO_DELETE_ROLES` constants match this matrix exactly.
 - `list_or_get` requires a read role; `create`/`update` require a write
   role; `delete_hero` requires `maintainer`.

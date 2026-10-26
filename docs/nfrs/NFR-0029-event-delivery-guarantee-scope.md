@@ -38,15 +38,16 @@ one.
 
 ## Verification
 
-- `tests/mqtt_events.rs`, against the real Mosquitto service, drops a
+- The `craftainer-crud` crate's `mqtt`-feature tests, against a real
+  Mosquitto service, drops a
   subscriber's connection, publishes while it is away, reconnects with
   the same `subscriber_id`, and asserts the missed events arrive — and,
   as the negative case, that reconnecting with a *fresh* id delivers
   nothing. This is the only test that can verify this NFR: the
   `Mode::Mock` bus has none of the mechanism.
 - The scope limits above are restated at each place a reader could
-  mistake them: `events`' module doc, `EventBus::subscribe`,
-  `crud_events::resolve_subscriber_id`, and FR-0030.
+  mistake them: `craftainer_crud::events`' module doc, `EventBus::subscribe`,
+  `craftainer_crud::controllers::crud_events::resolve_subscriber_id`, and FR-0030.
 - Re-checked whenever `.devcontainer/stack/mqtt/mosquitto.conf`'s
   `persistent_client_expiration`/`max_queued_messages` change, since the
   numbers above are that file's values, not independent ones.

@@ -15,7 +15,8 @@ See ADR 0006.
 
 ## Acceptance criteria
 
-- `telemetry::configure_logging` is the only place a `tracing` subscriber
+- `craftainer_observability::logs::configure_logging` (called from
+  `src/main.rs`) is the only place a `tracing` subscriber
   is installed, called once at the start of `main()`.
 - Verified in this phase's smoke test: startup, migration, and request
   logs all render as one-JSON-object-per-line on stdout.

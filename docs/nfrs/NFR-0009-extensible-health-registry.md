@@ -20,7 +20,7 @@ See ADR 0001.
 
 ## Verification
 
-Manual/code review: `src/health/checks.rs`'s four real checks and one
-mock check all follow the identical `impl HealthCheck for X { fn name...
-async fn check... }` shape; `main.rs::build_health_registry` registers
+Manual/code review: `craftainer_observability::health::checks`'s real checks and
+`MockHealthCheck` all follow the identical `impl HealthCheck for X { fn name...
+async fn check... }` shape; `src/lib.rs`'s `build_health_registry` registers
 each with one `registry.register(Box::new(...))` call.

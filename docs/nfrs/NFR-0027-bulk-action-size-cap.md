@@ -22,8 +22,8 @@ Port of `config.py`'s `bulk_action_max_matched` /
 
 ## Verification
 
-`crud_actions::resolve_update`/`resolve_delete` call `CrudService::
-count` with the same filters before calling `update_many`/
+`craftainer_crud::controllers::crud_actions::resolve_update`/
+`resolve_delete` call `CrudService::count` with the same filters before calling `update_many`/
 `delete_many`, refusing the action if the count exceeds `max_matched`.
 Exercised indirectly by this item's `controllers::heroes::tests` bulk
 tests (which stay well under the 1000-record default); a dedicated

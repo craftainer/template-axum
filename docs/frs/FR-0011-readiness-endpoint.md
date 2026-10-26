@@ -16,7 +16,8 @@ Kubernetes readiness-probe convention; see ADR 0001.
 
 ## Acceptance criteria
 
-- `src/health/mod.rs`'s `HealthRegistry::run_all` runs every check via
+- `craftainer_observability::health::HealthRegistry::run_all` (the
+  `craftainer-observability` crate, ADR 0020) runs every check via
   `futures::future::join_all` (concurrently, not sequentially).
 - Response body: `{"status": "ok"|"degraded", "checks": {name:
   {"healthy": bool, "detail": string|null}}}`.

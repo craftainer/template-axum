@@ -30,7 +30,8 @@ ADR 0013.
 - `id`/`skip`/`limit`/`sort`/`include_archived` are never treated as
   filter fields even if a resource happens to have a same-named
   filterable field.
-- Verified by `controllers::crud_query::tests` (the generic parser, in
+- Verified by the `craftainer-crud` crate's own tests of
+  `craftainer_crud::controllers::crud_query` (the generic parser, in
   isolation) and `controllers::heroes::tests::
   list_filters_by_an_equality_query_param`/`list_sorts_descending_with_a_leading_dash`/
   `list_rejects_an_unrecognized_filter_field_with_422` (end-to-end

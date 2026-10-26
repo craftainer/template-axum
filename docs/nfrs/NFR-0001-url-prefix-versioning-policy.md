@@ -21,4 +21,4 @@ See ADR 0002.
 
 Manual: `main.rs` nests Hero's router at `/crud/v1/heroes/v2/json` only
 -- no `.route("/heroes", ...)` or similar unversioned alias exists
-anywhere in `src/controllers/`.
+anywhere in `src/hero/controllers/`.

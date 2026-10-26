@@ -29,4 +29,4 @@ Unlike the Python original (which distinguishes "field omitted" from
 port's plain `Option<T>` fields cannot represent "explicitly clear this
 field" -- `None` always means "leave unchanged". Explicitly nulling a
 previously-set `name`/`powers`/`power_level` via `PATCH` is out of scope
-for this phase; see `src/views/hero.rs`'s module doc.
+for this phase; see `src/hero/views/hero.rs`'s module doc.

@@ -28,5 +28,7 @@ doesn't change this decision's shape if added later").
 - With either variable set, `tracing` events are additionally forwarded
   to the configured OTLP endpoint via a batch log processor -- stdout
   JSON output continues unchanged alongside it.
-- Verified by `telemetry::tests::
-  otlp_log_layer_is_gated_on_the_otlp_endpoint_env_vars`.
+- Verified by the `craftainer-observability` crate's own tests of
+  `craftainer_observability::logs` (the gating on the OTLP endpoint
+  variables), and end-to-end by `tests/otlp_log_export.rs`, which runs the
+  real binary against an in-process OTLP receiver.

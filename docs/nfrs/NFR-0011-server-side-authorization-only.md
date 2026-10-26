@@ -23,4 +23,4 @@ See ADR 0003.
 Manual/code review: every role check happens inside a handler via
 `Claims::require_any_role` against the *verified* token's claims -- no
 client-supplied header/body field is treated as an authorization
-assertion anywhere in `src/controllers/`.
+assertion anywhere in `src/hero/controllers/`.

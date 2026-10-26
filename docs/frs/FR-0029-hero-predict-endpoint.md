@@ -35,4 +35,5 @@ route and `app.controllers.crud_stats.forecast`. See ADR 0015.
   `predict_rejects_periods_out_of_range_with_422`/
   `predict_reports_the_linear_regression_method_and_field_on_success_shape`,
   and the regression math itself (multi-bucket projection, month/week/
-  day bucket advancement) by `controllers::crud_stats::tests`.
+  day bucket advancement) by the `craftainer-crud` crate's own tests of
+  `craftainer_crud::controllers::crud_stats`.
