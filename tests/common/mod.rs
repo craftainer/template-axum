@@ -11,11 +11,11 @@
 use std::sync::Arc;
 
 use chrono::NaiveDateTime;
+use craftainer_crud::crud::CrudService;
+use craftainer_crud::events::EventBus;
+use craftainer_observability::health::HealthRegistry;
 use sea_orm::{ActiveModelTrait, ConnectionTrait, Database, DatabaseConnection, Set};
 use template_axum::config::{Mode, Settings};
-use template_axum::crud::CrudService;
-use template_axum::events::{new_subscriber_id, EventBus};
-use template_axum::health::HealthRegistry;
 use template_axum::hero::controllers::{AppState, DynHeroRepository};
 use template_axum::hero::models::hero;
 use template_axum::hero::repositories::hero_sea_orm::HeroSeaOrmRepository;
@@ -25,7 +25,16 @@ use template_axum::rate_limit::RateLimiter;
 /// A short, unique suffix for a schema or MQTT topic, so concurrently
 /// running test binaries (and reruns) never collide.
 pub fn unique_suffix() -> String {
-    new_subscriber_id()[..12].to_string()
+    static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.subsec_nanos());
+    format!(
+        "{:x}{:x}{:x}",
+        std::process::id(),
+        nanos,
+        COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    )
 }
 
 fn base_database_url() -> String {

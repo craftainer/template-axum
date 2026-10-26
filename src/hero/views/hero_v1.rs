@@ -20,9 +20,9 @@
 use chrono::NaiveDateTime;
 use serde::{Deserialize, Serialize};
 
-use crate::generic::views::FieldError;
 use crate::hero::models::hero;
 use crate::hero::views::hero::{HeroCreate, HeroUpdate};
+use craftainer_crud::views::FieldError;
 
 const MAX_LEN: usize = 200;
 

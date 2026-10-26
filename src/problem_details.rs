@@ -9,7 +9,9 @@ use axum::response::{IntoResponse, Response};
 use serde::Serialize;
 
 use crate::config::Mode;
-use crate::generic::views::FieldError;
+use craftainer_crud::error::{redacted_detail, CrudError};
+use craftainer_crud::repositories::RepoError;
+use craftainer_crud::views::FieldError;
 
 /// RFC 9457 body shape -- `type`/`title`/`status`/`detail`/`instance`.
 #[derive(Debug, Serialize)]
@@ -41,19 +43,20 @@ pub enum AppError {
     Unauthorized(String),
     Forbidden(String),
     UnprocessableEntity(Vec<FieldError>),
+    /// An `If-Match` precondition failed (412). Produced by
+    /// `CrudError::PreconditionFailed`; no route returns it yet (AX12).
+    PreconditionFailed(String),
     ServiceUnavailable(String),
     TooManyRequests(String),
     Internal(String),
 }
 
-/// Set once at startup (`main.rs`) so `AppError::Internal`'s `IntoResponse`
-/// can redact its detail outside `Mode::Dev` (NFR-0015) without threading
-/// `Settings` through every controller.
-static REDACT_INTERNAL_DETAIL: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(true);
-
+/// Set once at startup (`main.rs`) so `AppError::Internal` and
+/// `CrudError::Internal` redact their detail outside `Mode::Dev` (NFR-0015)
+/// without threading `Settings` through every controller. The switch itself
+/// lives in `craftainer-crud` (one static for both error types).
 pub fn configure_detail_redaction(mode: Mode) {
-    REDACT_INTERNAL_DETAIL.store(mode != Mode::Dev, std::sync::atomic::Ordering::Relaxed);
+    craftainer_crud::error::configure_detail_redaction(mode != Mode::Dev);
 }
 
 impl IntoResponse for AppError {
@@ -79,6 +82,11 @@ impl IntoResponse for AppError {
                 "Unprocessable Content",
                 ProblemDetail_Detail::Fields(errors),
             ),
+            AppError::PreconditionFailed(msg) => (
+                StatusCode::PRECONDITION_FAILED,
+                "Precondition Failed",
+                ProblemDetail_Detail::Text(msg),
+            ),
             AppError::ServiceUnavailable(msg) => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "Service Unavailable",
@@ -91,11 +99,7 @@ impl IntoResponse for AppError {
             ),
             AppError::Internal(msg) => {
                 tracing::error!(error = %msg, "unhandled internal error");
-                let detail = if REDACT_INTERNAL_DETAIL.load(std::sync::atomic::Ordering::Relaxed) {
-                    "Internal Server Error".to_string()
-                } else {
-                    msg
-                };
+                let detail = redacted_detail(msg, "Internal Server Error");
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "Internal Server Error",
@@ -125,8 +129,24 @@ impl IntoResponse for AppError {
     }
 }
 
-impl From<crate::generic::repositories::RepoError> for AppError {
-    fn from(err: crate::generic::repositories::RepoError) -> Self {
+impl From<CrudError> for AppError {
+    fn from(err: CrudError) -> Self {
+        match err {
+            CrudError::NotFound(msg) => AppError::NotFound(msg),
+            CrudError::UnprocessableEntity(errors) => AppError::UnprocessableEntity(errors),
+            CrudError::PreconditionFailed(msg) => AppError::PreconditionFailed(msg),
+            CrudError::ServiceUnavailable(msg) => AppError::ServiceUnavailable(msg),
+            CrudError::TooManyRequests(msg) => AppError::TooManyRequests(msg),
+            CrudError::Internal(msg) => AppError::Internal(msg),
+            // `CrudError` is non-exhaustive: an unknown future variant is a
+            // server-side problem, never a client error.
+            other => AppError::Internal(other.to_string()),
+        }
+    }
+}
+
+impl From<RepoError> for AppError {
+    fn from(err: RepoError) -> Self {
         AppError::Internal(err.to_string())
     }
 }
@@ -134,7 +154,6 @@ impl From<crate::generic::repositories::RepoError> for AppError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::generic::views::FieldError;
     use axum::body::to_bytes;
     use std::sync::Mutex;
 
@@ -251,9 +270,45 @@ mod tests {
 
     #[test]
     fn repo_error_converts_to_an_internal_app_error() {
-        let repo_err =
-            crate::generic::repositories::RepoError::Backend("connection reset".to_string());
+        let repo_err = RepoError::Backend("connection reset".to_string());
         let app_err: AppError = repo_err.into();
         assert!(matches!(app_err, AppError::Internal(msg) if msg.contains("connection reset")));
+    }
+
+    #[tokio::test]
+    async fn precondition_failed_maps_to_412() {
+        let response = AppError::PreconditionFailed("stale".to_string()).into_response();
+        assert_eq!(response.status(), StatusCode::PRECONDITION_FAILED);
+        let body = body_json(response).await;
+        assert_eq!(body["title"], "Precondition Failed");
+        assert_eq!(body["detail"], "stale");
+    }
+
+    #[test]
+    fn every_crud_error_converts_to_its_app_error_twin() {
+        assert!(matches!(
+            AppError::from(CrudError::NotFound("a".into())),
+            AppError::NotFound(m) if m == "a"
+        ));
+        assert!(matches!(
+            AppError::from(CrudError::UnprocessableEntity(vec![FieldError::new("f", "m")])),
+            AppError::UnprocessableEntity(e) if e.len() == 1
+        ));
+        assert!(matches!(
+            AppError::from(CrudError::PreconditionFailed("p".into())),
+            AppError::PreconditionFailed(m) if m == "p"
+        ));
+        assert!(matches!(
+            AppError::from(CrudError::ServiceUnavailable("s".into())),
+            AppError::ServiceUnavailable(m) if m == "s"
+        ));
+        assert!(matches!(
+            AppError::from(CrudError::TooManyRequests("t".into())),
+            AppError::TooManyRequests(m) if m == "t"
+        ));
+        assert!(matches!(
+            AppError::from(CrudError::Internal("i".into())),
+            AppError::Internal(m) if m == "i"
+        ));
     }
 }

@@ -92,7 +92,7 @@ fn a_generic_module_importing_hero_is_flagged() {
 fn a_hero_module_importing_generic_is_allowed() {
     let dir = synthetic_src(
         "hero/controllers/x.rs",
-        "use crate::generic::controllers::health;\n",
+        "use crate::generic::controllers::HasSettings;\n",
     );
     let output = run_against(dir.path());
     assert!(
@@ -108,8 +108,8 @@ fn an_upward_import_within_a_single_package_is_flagged() {
     // reaching "up" into controllers must be rejected regardless of the
     // generic/hero split.
     let dir = synthetic_src(
-        "generic/models/x.rs",
-        "use crate::generic::controllers::health;\n",
+        "hero/models/x.rs",
+        "use crate::hero::controllers::AppState;\n",
     );
     let output = run_against(dir.path());
     assert!(

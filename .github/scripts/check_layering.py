@@ -23,7 +23,11 @@ isn't a dependency):
    config -> ... -> controllers chain (see each module's own doc
    comment in src/ for why); ALLOWED_IMPORTS reflects the real edges
    src/README.md's "Layering" section and each module's own header
-   document, not an idealized chain.
+   document, not an idealized chain. The generic CRUD layer and the
+   health/logging layer live in the craftainer-crud and
+   craftainer-observability crates (docs/adrs/0020); imports of them are
+   `craftainer_crud::`/`craftainer_observability::` paths, not `crate::`
+   ones, so they are outside what this script checks.
 
 Exit status is non-zero (with every violation printed) if either rule is
 broken anywhere in src/.
@@ -47,56 +51,39 @@ ALLOWED_IMPORTS: dict[str, set[str]] = {
     "db": {"config"},
     # Cross-cutting utility modules (src/README.md: "stay flat, outside
     # any submodule ... no resource-specific code and no state of its
-    # own"). problem_details reaches into generic::views/repositories
-    # for AppError's `From` impls and FieldError; oidc depends on
-    # problem_details for AppError; the rest are leaves.
-    "problem_details": {"config", "generic::views", "generic::repositories"},
+    # own"). problem_details renders AppError (its `From` impls and
+    # FieldError come from the craftainer-crud crate, which is an external
+    # dependency and so not a `crate::` category) and reads config::Mode;
+    # oidc depends on problem_details for AppError; the rest are leaves.
+    # The generic CRUD layer (models, views, repositories, CrudService,
+    # events, query/bulk/stats helpers) and the health/logging layer are the
+    # craftainer-crud and craftainer-observability crates since
+    # docs/adrs/0020, so they no longer appear here.
+    "problem_details": {"config"},
     "oidc": {"config", "problem_details"},
-    "events": set(),
     "rate_limit": {"problem_details"},
     "http_headers": set(),
-    "telemetry": set(),
-    "generic::models": set(),
-    "hero::models": {"generic::models"},
-    "generic::views": {"generic::models"},
-    "hero::views": {"generic::models", "generic::views", "hero::models"},
-    "generic::repositories": {"generic::views"},
-    "hero::repositories": {
-        "generic::repositories",
-        "generic::views",
-        "hero::models",
-        "hero::views",
-    },
-    "crud": {"generic::repositories"},
-    "health": set(),
+    "hero::models": set(),
+    "hero::views": {"hero::models"},
+    "hero::repositories": {"hero::models", "hero::views"},
     # SeaORM migrations, applied at startup (src/README.md's
     # "Migrations") -- self-contained, no crate:: dependency of its own.
     "migration": set(),
+    # What stays of the generic package: the app-owned routers that need
+    # this app's configuration and authentication (audit, mock).
     "generic::controllers": {
         "config",
         "oidc",
         "problem_details",
-        "events",
         "rate_limit",
         "http_headers",
-        "generic::models",
-        "generic::views",
-        "generic::repositories",
-        "crud",
-        "health",
     },
     "hero::controllers": {
         "config",
         "oidc",
         "problem_details",
-        "events",
         "rate_limit",
         "http_headers",
-        "generic::models",
-        "generic::views",
-        "generic::repositories",
-        "crud",
-        "health",
         "generic::controllers",
         "hero::models",
         "hero::views",

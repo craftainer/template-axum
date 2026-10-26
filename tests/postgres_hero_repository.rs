@@ -16,10 +16,8 @@ mod common;
 
 use chrono::{Duration, Utc};
 use common::{seed_hero_at, IsolatedDb};
-use template_axum::generic::repositories::filtering::{
-    FilterClause, FilterOp, FilterValue, SortClause,
-};
-use template_axum::generic::repositories::{ListOptions, Repository};
+use craftainer_crud::repositories::filtering::{FilterClause, FilterOp, FilterValue, SortClause};
+use craftainer_crud::repositories::{ListOptions, Repository};
 use template_axum::hero::repositories::hero_sea_orm::HeroSeaOrmRepository;
 use template_axum::hero::views::hero::{HeroCreate, HeroUpdate};
 
@@ -44,6 +42,7 @@ fn list_opts(filters: Vec<FilterClause>, sort: Vec<SortClause>) -> ListOptions {
         skip: 0,
         limit: 100,
         include_archived: false,
+        only_archived: false,
         filters,
         sort,
     }
@@ -240,11 +239,12 @@ async fn count_respects_filters_and_the_archived_visibility_rule() {
     let repository = HeroSeaOrmRepository::new(db.connection.clone());
     seed_cast(&db.connection, "alice").await;
 
-    assert_eq!(repository.count(&[], false).await.unwrap(), 4);
+    assert_eq!(repository.count(&[], false, false).await.unwrap(), 4);
     assert_eq!(
         repository
             .count(
                 &[clause("power_level", FilterOp::Gte, FilterValue::Int(5))],
+                false,
                 false
             )
             .await
@@ -261,8 +261,21 @@ async fn count_respects_filters_and_the_archived_visibility_rule() {
         .unwrap();
     assert!(repository.delete(doomed[0].id, "alice").await.unwrap());
 
-    assert_eq!(repository.count(&[], false).await.unwrap(), 3);
-    assert_eq!(repository.count(&[], true).await.unwrap(), 4);
+    assert_eq!(repository.count(&[], false, false).await.unwrap(), 3);
+    assert_eq!(repository.count(&[], true, false).await.unwrap(), 4);
+    // `only_archived` narrows to the soft-deleted row (and wins over
+    // `include_archived`), in both `count` and `list`.
+    assert_eq!(repository.count(&[], false, true).await.unwrap(), 1);
+    assert_eq!(repository.count(&[], true, true).await.unwrap(), 1);
+    let trash = repository
+        .list(ListOptions {
+            only_archived: true,
+            ..list_opts(vec![], vec![])
+        })
+        .await
+        .unwrap();
+    assert_eq!(trash.len(), 1);
+    assert_eq!(trash[0].id, doomed[0].id);
     assert!(repository.get(doomed[0].id, false).await.unwrap().is_none());
     assert!(repository.get(doomed[0].id, true).await.unwrap().is_some());
 

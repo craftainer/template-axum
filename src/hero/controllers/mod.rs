@@ -27,16 +27,17 @@ pub mod heroes_xml;
 use std::sync::Arc;
 
 use crate::config::Settings;
-use crate::crud::CrudService;
-use crate::events::EventBus;
-use crate::generic::controllers::{HasHealthRegistry, HasRateLimiter, HasSettings};
-use crate::health::HealthRegistry;
+use crate::generic::controllers::{HasRateLimiter, HasSettings};
 use crate::hero::models::hero;
 use crate::hero::views::hero::{HeroCreate, HeroUpdate};
 use crate::oidc::{HasOidcVerifier, OidcVerifier};
 use crate::rate_limit::RateLimiter;
+use craftainer_crud::crud::CrudService;
+use craftainer_crud::events::EventBus;
+use craftainer_observability::health::router::HasHealthRegistry;
+use craftainer_observability::health::HealthRegistry;
 
-crate::dyn_repository!(
+craftainer_crud::dyn_repository!(
     DynHeroRepository,
     model = hero::Model,
     create = HeroCreate,

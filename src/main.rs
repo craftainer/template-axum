@@ -6,14 +6,34 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use template_axum::config::Settings;
-use template_axum::{
-    build_router, build_state_with_db, connect_database, problem_details, telemetry,
+use craftainer_observability::logs::{
+    configure_logging, configure_logging_without_export, LoggingGuard,
 };
+use craftainer_observability::Error as ObservabilityError;
+use template_axum::config::Settings;
+use template_axum::{build_router, build_state_with_db, connect_database, problem_details};
+
+/// Installs JSON logging (plus OTLP export when the environment asks for
+/// it). An exporter that can't be built isn't fatal: carry on with JSON
+/// logs only, and say so. Panics only if a subscriber is already installed.
+fn init_logging() -> LoggingGuard {
+    match configure_logging() {
+        Ok(guard) => guard,
+        Err(ObservabilityError::ExporterBuild(reason)) => {
+            let guard = configure_logging_without_export()
+                .expect("no subscriber is installed after a failed exporter build");
+            tracing::warn!("OTLP log exporter setup failed, continuing without it: {reason}");
+            guard
+        }
+        Err(err) => panic!("failed to install logging: {err}"),
+    }
+}
 
 #[tokio::main]
 async fn main() {
-    telemetry::configure_logging();
+    // Kept alive to the end of `main`: dropping it shuts the OTLP export
+    // down, and the last batch is only flushed by that.
+    let logging = init_logging();
 
     let settings = Settings::from_env().unwrap_or_else(|err| {
         eprintln!("invalid configuration: {err}");
@@ -48,6 +68,16 @@ async fn main() {
             tracing::warn!("error closing the database pool: {err}");
         }
     }
+
+    // The server has stopped, so blocking on the final export is fine here;
+    // `spawn_blocking` keeps the runtime's worker free regardless. Done
+    // before the `expect` below so a server error is exported too.
+    let _ = tokio::task::spawn_blocking(move || {
+        if let Err(err) = logging.shutdown() {
+            eprintln!("flushing the OTLP log export failed: {err}");
+        }
+    })
+    .await;
     served.expect("server error");
 }
 

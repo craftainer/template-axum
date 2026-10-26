@@ -3,25 +3,24 @@
 The axum application, laid out as an MVC-ish split across submodules,
 each with its own `README.md`:
 
-- `generic/` — the resource-agnostic half of the Model/View/Repository/
-  Controller layers, split into `generic/models/`, `generic/views/`,
-  `generic/repositories/`, `generic/controllers/`. See "Generic vs.
-  Hero-specific split" below.
-- `hero/` — this template's worked CRUD example, built on `generic/`:
+- `generic/` — what stays of the resource-agnostic layer in the app:
+  `generic/controllers/` (`audit`, `mock` and their accessor traits),
+  which need the app's configuration and authentication. The rest of the
+  generic CRUD layer — models, views, repositories, `CrudService`, query
+  parsing, bulk/stats/event helpers, the event bus — is the
+  `craftainer-crud` crate, and the health checks, `/health` router and
+  logging setup are the `craftainer-observability` crate
+  (`docs/adrs/0020`). See "Generic vs. Hero-specific split" below.
+- `hero/` — this template's worked CRUD example, built on the crates:
   `hero/models/`, `hero/views/`, `hero/repositories/`,
   `hero/controllers/` (including the concrete `AppState` every router is
   instantiated with). See "Generic vs. Hero-specific split" below.
-- `crud/` — the generic CRUD service built from a `Repository`. Not to
-  be confused with `generic/` above (a pre-existing, unrelated module —
-  see that package's own `README.md`).
-- `health/` — the health-check trait and registry backing
-  `generic::controllers::health`.
 - `oidc/` — provider-agnostic OIDC bearer-token validation plus
   Keycloak client-role RBAC.
 - `migration/` — SeaORM migrations, applied automatically at startup.
 
-`config.rs`/`db.rs`/`lib.rs`/`main.rs`/`telemetry.rs`/`problem_details.rs`/
-`rate_limit.rs`/`events.rs`/`http_headers.rs` stay flat, outside any
+`config.rs`/`db.rs`/`lib.rs`/`main.rs`/`problem_details.rs`/
+`rate_limit.rs`/`http_headers.rs` stay flat, outside any
 submodule — each has no resource-specific code and no state of its own
 beyond what it's explicitly passed or reads from `config::Settings`.
 
@@ -35,20 +34,16 @@ beyond what it's explicitly passed or reads from `config::Settings`.
   `build_router`, `build_event_bus`, `build_health_registry`,
   `run_migrations`). See "Library and binary"
   below.
-- `main.rs` — process entry point, deliberately thin: it only reads
-  settings and calls `lib.rs`'s wiring.
-- `telemetry.rs` — structured JSON logging setup; see "Structured
-  logging" below.
+- `main.rs` — process entry point, deliberately thin: it installs
+  logging (`craftainer_observability::logs`, keeping the guard to the end
+  so the OTLP export is flushed), reads settings and calls `lib.rs`'s
+  wiring; see "Structured logging" below.
 - `problem_details.rs` — the single `AppError` type and its RFC 9457
   `IntoResponse` impl; see "RFC 9457 error responses" below.
 - `rate_limit.rs` — `RateLimiter`, the Redis-backed (in-memory under
   `Mode::Mock`) per-caller rate limiter checked inline by Hero's
   create/update/delete handlers and `POST /mock/token`; see
   `docs/adrs/0011`.
-- `events.rs` — `EventBus`/`EventStream`, the MQTT-backed (in-memory
-  `tokio::sync::broadcast` fan-out under `Mode::Mock`) publish/subscribe
-  behind `GET <prefix>/events`; see "CRUD event stream" below and
-  `docs/adrs/0016`.
 - `http_headers.rs` — `Sunset`, an `IntoResponseParts` type a handler
   combines into its return value to attach RFC 8594 `Sunset`/
   `Deprecation`/`Link` headers (`docs/adrs/0012`), applied by every
@@ -70,82 +65,82 @@ from `lib.rs`, and `main.rs` refers to it as `template_axum::...`, not
 ## CRUD event stream
 
 `GET /crud/v1/heroes/v2/json/events` is a Server-Sent Events stream of
-Hero create/update/delete activity (FR-0030). `generic::controllers::
-crud_events` holds the resource-agnostic half (subscriber-id resolution,
-frame shape, the publish helper); `events.rs` holds the transport.
+Hero create/update/delete activity (FR-0030). The resource-agnostic half
+(subscriber-id resolution, frame shape, the publish helper) is
+`craftainer_crud::controllers::crud_events`; the transport is
+`craftainer_crud::events` (feature `mqtt` for the broker-backed bus).
 
 The delivery guarantee is narrow and deliberate: a subscriber that
-reconnects with the same `subscriber_id` gets everything published while
-it was away, because that id *is* the client id of a persistent,
-QoS-1 MQTT session. A client that discards it gets no replay, silently.
-`Mode::Mock` has no broker and no replay at all. `docs/adrs/0016`,
-`docs/nfrs/NFR-0029` and `events.rs`'s module doc all state this; don't
-paraphrase it into something broader.
+reconnects with the `subscriber_id` the server issued it gets everything
+published while it was away, because that id (a server-minted capability,
+not a client-chosen name) is part of the client id of a persistent,
+QoS-1 MQTT session. A client that discards it, or sends one the server did
+not mint, gets a new id and no replay, silently. The default minting secret
+is random per process, so an id does not resume across a restart or on
+another replica (`docs/adrs/0020`). `Mode::Mock` has no broker and no
+replay at all. `docs/adrs/0016`, `docs/nfrs/NFR-0029` and the crate's
+`events` module doc all state this; don't paraphrase it into something
+broader.
 
 A mutating handler announces its own event inline (`crud_events::
-publish`) the way it checks its own rate limit — `crud::CrudService`
-stays free of infrastructure concerns (NFR-0004). Publishing never fails
-the request that triggered it.
+publish`) the way it checks its own rate limit — `CrudService` stays free
+of infrastructure concerns (NFR-0004). Publishing never fails the request
+that triggered it.
 
 ## Generic vs. Hero-specific split
 
-Each of the Model/View/Repository/Controller layers is physically split
-into a resource-agnostic half and a Hero-specific half, mirroring
-template-fastapi's own `src/crud/` vs. `src/app/` two-package structure:
+The generic, resource-agnostic half of the Model/View/Repository/
+Controller layers is the `craftainer-crud` crate (`docs/adrs/0020`, and
+that crate's own ADR 0002), the health/logging half is
+`craftainer-observability`. What remains in the app:
 
-- `generic::models`/`generic::views`/`generic::repositories`/
-  `generic::controllers` — contain zero resource-specific code
-  (`NFR-0004`). Named `generic`, not `crud`, since this crate's own
-  `crud::CrudService` module already owns that name (a separate,
-  pre-existing abstraction — the generic CRUD *service* built from a
-  `Repository` — unrelated to this layering split; see `src/crud/
-  README.md`). A `generic::controllers` router that needs some piece of
-  shared state declares its own narrow accessor trait (`HasSettings`/
-  `HasHealthRegistry`/`HasRateLimiter`, mirroring `oidc::
-  HasOidcVerifier`'s existing pattern) rather than depending on the
-  concrete, Hero-bearing `AppState` — see `generic/controllers/
-  README.md`.
+- `generic::controllers` — the routers that need the app's configuration
+  and authentication (`audit`, `mock`). A router there that needs some
+  piece of shared state declares its own narrow accessor trait
+  (`HasSettings`/`HasRateLimiter`, mirroring `oidc::HasOidcVerifier`'s
+  existing pattern) rather than depending on the concrete, Hero-bearing
+  `AppState` — see `generic/controllers/README.md`. (The `/health` router's
+  `HasHealthRegistry` is the crate's, `craftainer_observability::health::
+  router`.)
 - `hero::models`/`hero::views`/`hero::repositories`/`hero::controllers`
-  — this template's worked CRUD example, built on top of `generic::*`.
+  — this template's worked CRUD example, built on top of the crates.
   `hero::controllers::AppState` is the one concrete state every router
-  (Hero's own and `generic::controllers`' generic ones) is instantiated
-  with — see that package's own module doc for why this app's one
-  resource-specific dependency (`hero_crud`) lives there rather than
+  (Hero's own, `generic::controllers`' and the health router) is
+  instantiated with — see that package's own module doc for why this app's
+  one resource-specific dependency (`hero_crud`) lives there rather than
   somewhere purely generic.
 
 `generic::*` never imports `hero::*` — enforced automatically by
 `.github/scripts/check_layering.py` (the `check-layering` prek hook,
 `docs/adrs/0009`'s "2026-09 update"), not just by convention. A new
 resource adds its own sibling packages (`crate::<resource>::models` etc,
-mirroring `hero::*`), building on `generic::*` the same way Hero does —
-`generic::*` itself never changes.
+mirroring `hero::*`), implementing `craftainer_crud::repositories::
+Repository` the same way Hero does.
 
 ## Layering
 
 Import order between all of the above is strict and one-directional —
-lower layers never import from higher ones: `config` → `oidc` →
-`generic::models`/`hero::models` → `generic::views`/`hero::views` →
-`generic::repositories`/`hero::repositories` → `crud` → `health` →
-`generic::controllers`/`hero::controllers` → `lib`/`main`, with `hero::*`
-additionally always sitting above its `generic::*` counterpart at the
-same layer (never the reverse). `.github/scripts/check_layering.py`
-(backing the `check-layering` prek hook) checks this automatically on
-every commit — see `docs/adrs/0009-strict-module-layering-by-
-convention-and-visibility.md`'s "2026-09 update" for why a small custom
-script rather than `cargo-modules` or a per-layer crate split. Each
-module's own doc comment remains the reference for *why* its position
-in the order is what it is.
+lower layers never import from higher ones: `config` → `problem_details`
+→ `oidc` → `hero::models` → `hero::views` → `hero::repositories` →
+`generic::controllers`/`hero::controllers` → `lib`/`main`, with
+`rate_limit` and `http_headers` flat alongside. `.github/scripts/
+check_layering.py` (backing the `check-layering` prek hook) checks this
+automatically on every commit — see `docs/adrs/0009-strict-module-
+layering-by-convention-and-visibility.md`'s "2026-09 update" for why a
+small custom script rather than `cargo-modules` or a per-layer crate
+split. Each module's own doc comment remains the reference for *why* its
+position in the order is what it is. Imports of the two crates are
+`craftainer_crud::`/`craftainer_observability::` paths, outside what the
+script checks.
 
 ```mermaid
 graph LR
-    config --> oidc --> gm[generic::models] --> gv[generic::views]
-    gv --> gr[generic::repositories] --> crud --> health
-    health --> gc[generic::controllers] --> lib --> main
-    oidc --> hm[hero::models] --> hv[hero::views]
-    gm --> hm
-    hv --> hr[hero::repositories] --> hc[hero::controllers] --> lib
-    gv --> hv
-    gr --> hr
+    config --> problem_details --> oidc
+    oidc --> hm[hero::models] --> hv[hero::views] --> hr[hero::repositories]
+    oidc --> gc[generic::controllers] --> lib --> main
+    hr --> hc[hero::controllers] --> lib
+    hv --> hc
+    hm --> hc
     gc --> hc
 ```
 
@@ -247,14 +242,20 @@ once in `main()`.
 
 ## Structured logging
 
-`telemetry::configure_logging` (called once, first thing in `main()`)
-attaches a JSON-formatting `tracing_subscriber` to every `tracing` call
+`craftainer_observability::logs::configure_logging` (called once, first
+thing in `main()`) attaches a JSON-formatting `tracing_subscriber` to every
+`tracing` call
 — every log line, including `tower_http::trace::TraceLayer`'s own HTTP
 request logs, is one JSON object per line. Level is controlled by
 `RUST_LOG`, defaulting to `info`. When `OTEL_EXPORTER_OTLP_ENDPOINT` (or
 `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`) is set, a second layer additionally
 forwards every event to an OTLP log collector over HTTP — no new app
 setting, these are OpenTelemetry's own env vars (`FR-0035`, ADR 0006).
+`OTEL_SDK_DISABLED=true` or `OTEL_LOGS_EXPORTER=none` switches it off, and
+an exporter that cannot be built falls back to JSON logs with a warning.
+`main()` holds the returned guard to the end and shuts it down after the
+server stops, which flushes the last batch (`docs/adrs/0020`,
+`tests/otlp_log_export.rs`).
 
 ## RFC 9457 error responses
 
@@ -284,19 +285,18 @@ separate storage (`docs/adrs/0017`, `FR-0031`/`FR-0032`). `hero::
 controllers::heroes_web` (`/heroes/form`, `/heroes/components.js`) is a
 third representation of the same resource — a progressively-enhanced
 HTML form, working with no JavaScript, calling the same
-`generic::controllers::crud_actions` path as every other sibling
+`craftainer_crud::controllers::crud_actions` path as every other sibling
 (`FR-0034`). Adding another resource follows the same shape: its own
 sibling packages (`crate::<resource>::models`/`views`/`repositories`/
 `controllers`, mirroring `hero::*`) — a SeaORM entity in `models/`
-(implementing `generic::models::HasId`), DTOs in `views/`, one
+(implementing `craftainer_crud::models::HasId`), DTOs in `views/`, one
 `Repository` `impl` per backend in `repositories/` (or
-`crate::dyn_repository!` plus two small `impl`s, if `MODE=mock` needs a
-fake — each mapping `generic::repositories::filtering::FilterClause`/
+`craftainer_crud::dyn_repository!` plus two small `impl`s, if `MODE=mock` needs a
+fake — each mapping `craftainer_crud::repositories::filtering::FilterClause`/
 `SortClause` onto its own storage), a `FIELD_SPECS` table for
-`generic::controllers::crud_query`, and a router in `controllers/` built
-from `crud::CrudService::new(repository)` plus `generic::controllers::
-crud_actions`'s shared resolve functions — never a file added to
-`generic::*` itself.
+`craftainer_crud::controllers::crud_query`, and a router in
+`controllers/` built from `CrudService::new(repository)` plus
+`crud_actions`'s shared resolve functions.
 
 ```mermaid
 sequenceDiagram
@@ -333,8 +333,8 @@ restricted to the caller's own `sub`) and soft delete via an
 - Register a new external service's health check with
   `HealthRegistry::register` in `lib.rs::build_health_registry`.
 - Give a new resource an event stream by adding one `/events` route and
-  one resource-name constant — `generic::controllers::crud_events` is
-  generic.
+  one resource-name constant — `craftainer_crud::controllers::crud_events`
+  is generic.
 
 ## Don't
 

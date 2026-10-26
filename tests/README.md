@@ -34,11 +34,6 @@ directory tree, so this instance's four tiers live in different places:
   - `postgres_stats_predict.rs` — `/stats` and `/predict` over HTTP
     against live Postgres, including the multi-bucket `/predict` happy
     path that needs backdated `created_at` values.
-  - `postgres_health_check.rs` — `health::checks::DatabaseHealthCheck`'s
-    `SELECT 1` happy path against live Postgres. The `S3`/`Redis`/`Oidc`
-    checks' own happy paths stay deliberately uncovered (`docs/adrs/
-    0010`) since they'd need `lib::build_health_registry`'s real-backend
-    wiring, not just a live service already in this tier.
   - `postgres_db_pool.rs` — `db::connect` against live Postgres: the
     `DB_POOL_*` sizes and timeouts are on the real pool, and closing one
     handle closes every clone
@@ -50,13 +45,15 @@ directory tree, so this instance's four tiers live in different places:
   - `postgres_migration_down.rs` — the `heroes` migration's `down()`
     against real Postgres. `run_migrations` (`lib.rs`) only ever calls
     `up()`, so this is the only place `down()` runs at all.
-  - `mqtt_events.rs` — the CRUD event stream against live Mosquitto.
-    The only place NFR-0029's persistent-session replay guarantee can be
-    verified at all (`Mode::Mock`'s bus has no broker). Also covers
-    `lib::build_event_bus`'s real-broker branch directly (its
-    `Mode::Mock` branch is unit-tested in `src/lib.rs`) and a subscriber
-    skipping an undecodable payload on the wire -- something only a raw
-    client bypassing `EventBus::publish` can put on the topic at all.
+  - `mqtt_event_bus.rs` — `lib::build_event_bus`'s real-broker branch
+    against live Mosquitto: the app's wiring delivers a published event to
+    a subscriber. The bus itself (replay, subscriber ids) is tested in
+    `craftainer-crud` (`docs/adrs/0020`).
+  - `otlp_log_export.rs` — OTLP log export through the real binary
+    (`docs/adrs/0020`, `FR-0035`): an in-process OTLP receiver stands in
+    for a collector (the stack has none), a startup record and the record
+    logged at shutdown must reach it, and an exporter that cannot be built
+    must fall back to JSON logs. Binds the fixed port 8000, like `e2e.rs`.
   - `redis_rate_limiter.rs` — `rate_limit::RateLimiter`'s real-Redis
     backend against live Redis: `RateLimiter::connect`'s success path and
     a check/increment/reject round trip. The unreachable-server failure
@@ -149,7 +146,7 @@ instrumented test-suite run.
 ## All four tiers are built
 
 `NFR-0024`: unit (colocated `mod tests`), integration (this directory's
-`postgres_*.rs`/`mqtt_events.rs`), e2e-equivalent (`e2e.rs`, real
+`postgres_*.rs`, `otlp_log_export.rs`), e2e-equivalent (`e2e.rs`, real
 Keycloak tokens included), and perf (`perf/`, against the built
 `runner`-stage image). The integration tier's own tests still mint
 `Mode::Mock` bearer tokens rather than reaching Keycloak (FR-0017,

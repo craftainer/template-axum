@@ -16,8 +16,8 @@
 use chrono::NaiveDateTime;
 use serde::{Deserialize, Serialize};
 
-use crate::generic::views::FieldError;
 use crate::hero::models::hero;
+use craftainer_crud::views::FieldError;
 
 const MAX_LEN: usize = 200;
 
@@ -142,8 +142,6 @@ pub struct HeroListQuery {
     pub skip: Option<u64>,
     #[serde(default)]
     pub limit: Option<u64>,
-    #[serde(default)]
-    pub include_archived: Option<bool>,
 }
 
 #[cfg(test)]

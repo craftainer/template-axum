@@ -2,7 +2,7 @@
 
 Hero's half of the Model layer (see `src/README.md`'s "Generic vs.
 Hero-specific split"): the concrete SeaORM entity for this template's
-worked CRUD example. See `crate::generic::models` for the resource-
+worked CRUD example. See `craftainer_crud::models` for the resource-
 agnostic `HasId` contract this implements.
 
 - `hero.rs` — the `heroes` table entity. Current-shape-only (see

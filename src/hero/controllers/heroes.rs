@@ -4,7 +4,6 @@
 //! Owner-scoped per ADR 0011 (reads open, writes/deletes restricted to the
 //! caller's own `sub`); soft-deleted per ADR 0012.
 
-use std::collections::HashMap;
 use std::net::SocketAddr;
 
 use axum::extract::{ConnectInfo, Query, State};
@@ -13,16 +12,6 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 
-use crate::crud::DEFAULT_LIMIT;
-use crate::events::EventAction;
-use crate::generic::controllers::crud_actions::{self, DeleteOutcome, ListOrGet, UpdateOutcome};
-use crate::generic::controllers::crud_events::{self, EventSse};
-use crate::generic::controllers::crud_query::{parse_filters, parse_sort, FieldSpec};
-use crate::generic::controllers::crud_stats;
-use crate::generic::views::stats::{
-    CategoricalValueCount, LifecycleStats, NumericFieldStat, Prediction, ResourceStats,
-    SeriesPoint, TimeBucketCount,
-};
 use crate::hero::controllers::{
     AppState, HERO_DELETE_ROLES, HERO_EVENT_RESOURCE, HERO_READ_ROLES, HERO_WRITE_ROLES,
 };
@@ -30,6 +19,19 @@ use crate::hero::models::hero;
 use crate::hero::views::hero::{HeroCreate, HeroListQuery, HeroRead, HeroUpdate};
 use crate::oidc::AuthClaims;
 use crate::problem_details::AppError;
+use craftainer_crud::controllers::crud_actions::{self, DeleteOutcome, ListOrGet, UpdateOutcome};
+use craftainer_crud::controllers::crud_events::{self, EventSse};
+use craftainer_crud::controllers::crud_query::{
+    parse_archived_scope, parse_filters, parse_include_archived, parse_sort, reject_only_archived,
+    FieldSpec,
+};
+use craftainer_crud::controllers::crud_stats;
+use craftainer_crud::crud::DEFAULT_LIMIT;
+use craftainer_crud::events::EventAction;
+use craftainer_crud::views::stats::{
+    CategoricalValueCount, LifecycleStats, NumericFieldStat, Prediction, ResourceStats,
+    SeriesPoint, TimeBucketCount,
+};
 
 /// Rate-limit scope key (`src/rate_limit.rs`) shared by create/update/
 /// delete -- a single record edit shares the same per-caller budget as
@@ -68,10 +70,10 @@ async fn list_or_get(
     State(state): State<AppState>,
     AuthClaims(claims): AuthClaims,
     Query(query): Query<HeroListQuery>,
-    Query(raw_params): Query<HashMap<String, String>>,
+    Query(raw_params): Query<Vec<(String, String)>>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     claims.require_any_role(&state.settings.oidc_client_id, HERO_READ_ROLES)?;
-    let include_archived = query.include_archived.unwrap_or(false);
+    let archived = parse_archived_scope(&raw_params).map_err(AppError::UnprocessableEntity)?;
     let filters =
         parse_filters(HERO_FIELD_SPECS, &raw_params).map_err(AppError::UnprocessableEntity)?;
     let sort = parse_sort(HERO_FIELD_SPECS, &raw_params).map_err(AppError::UnprocessableEntity)?;
@@ -83,7 +85,7 @@ async fn list_or_get(
         query.id,
         skip,
         limit,
-        include_archived,
+        archived,
         filters,
         sort,
     )
@@ -143,7 +145,7 @@ async fn update(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     AuthClaims(claims): AuthClaims,
     Query(query): Query<HeroListQuery>,
-    Query(raw_params): Query<HashMap<String, String>>,
+    Query(raw_params): Query<Vec<(String, String)>>,
     Json(payload): Json<HeroUpdate>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     state
@@ -159,6 +161,7 @@ async fn update(
     payload.validate().map_err(AppError::UnprocessableEntity)?;
     let filters =
         parse_filters(HERO_FIELD_SPECS, &raw_params).map_err(AppError::UnprocessableEntity)?;
+    reject_only_archived(&raw_params).map_err(AppError::UnprocessableEntity)?;
     let owner_id = claims.subject()?.to_string();
 
     match crud_actions::resolve_update(
@@ -207,7 +210,7 @@ async fn delete_hero(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     AuthClaims(claims): AuthClaims,
     Query(query): Query<HeroListQuery>,
-    Query(raw_params): Query<HashMap<String, String>>,
+    Query(raw_params): Query<Vec<(String, String)>>,
 ) -> Result<Response, AppError> {
     state
         .rate_limiter
@@ -221,6 +224,7 @@ async fn delete_hero(
     claims.require_any_role(&state.settings.oidc_client_id, HERO_DELETE_ROLES)?;
     let filters =
         parse_filters(HERO_FIELD_SPECS, &raw_params).map_err(AppError::UnprocessableEntity)?;
+    reject_only_archived(&raw_params).map_err(AppError::UnprocessableEntity)?;
     let owner_id = claims.subject()?.to_string();
 
     match crud_actions::resolve_delete(
@@ -320,7 +324,6 @@ fn time_series(records: &[hero::Model], bucket: crud_stats::TimeBucket) -> Vec<T
 #[derive(serde::Deserialize)]
 struct StatsQuery {
     bucket: Option<String>,
-    include_archived: Option<bool>,
 }
 
 /// `GET /stats` -- count/numeric/categorical/time-series/lifecycle
@@ -330,13 +333,16 @@ async fn get_stats(
     State(state): State<AppState>,
     AuthClaims(claims): AuthClaims,
     Query(query): Query<StatsQuery>,
+    Query(raw_params): Query<Vec<(String, String)>>,
 ) -> Result<Json<ResourceStats>, AppError> {
     claims.require_any_role(&state.settings.oidc_client_id, HERO_READ_ROLES)?;
-    let include_archived = query.include_archived.unwrap_or(false);
+    reject_only_archived(&raw_params).map_err(AppError::UnprocessableEntity)?;
+    let include_archived =
+        parse_include_archived(&raw_params).map_err(AppError::UnprocessableEntity)?;
     let bucket = crud_stats::parse_bucket(query.bucket.as_ref())?;
 
-    let total_visible = state.hero_crud.count(&[], false).await?;
-    let total_all = state.hero_crud.count(&[], true).await?;
+    let total_visible = state.hero_crud.count(&[], false, false).await?;
+    let total_all = state.hero_crud.count(&[], true, false).await?;
     let total = if include_archived {
         total_all
     } else {
@@ -349,6 +355,7 @@ async fn get_stats(
             0,
             crud_stats::MAX_HISTORY_RECORDS,
             include_archived,
+            false,
             vec![],
             vec![],
         )
@@ -409,7 +416,14 @@ async fn get_prediction(
 
     let records = state
         .hero_crud
-        .list(0, crud_stats::MAX_HISTORY_RECORDS, false, vec![], vec![])
+        .list(
+            0,
+            crud_stats::MAX_HISTORY_RECORDS,
+            false,
+            false,
+            vec![],
+            vec![],
+        )
         .await?;
 
     let series: Vec<crud_stats::BucketValue> = match field {
@@ -439,7 +453,7 @@ async fn get_prediction(
     };
 
     let predictions = crud_stats::forecast(&series, periods, bucket).map_err(|err| {
-        AppError::UnprocessableEntity(vec![crate::generic::views::FieldError::new(
+        AppError::UnprocessableEntity(vec![craftainer_crud::views::FieldError::new(
             "periods",
             format!(
                 "need at least 2 time buckets of history to forecast a trend, got {}",
@@ -492,13 +506,13 @@ async fn events(
     headers: HeaderMap,
 ) -> Result<EventSse, AppError> {
     claims.require_any_role(&state.settings.oidc_client_id, HERO_READ_ROLES)?;
-    crud_events::event_stream(
+    Ok(crud_events::event_stream(
         &state.events,
         HERO_EVENT_RESOURCE,
         query.subscriber_id.as_deref(),
         &headers,
     )
-    .await
+    .await?)
 }
 
 pub fn router() -> Router<AppState> {
@@ -519,12 +533,12 @@ pub fn router() -> Router<AppState> {
 mod tests {
     use super::*;
     use crate::config::{Mode, Settings};
-    use crate::health::HealthRegistry;
     use crate::hero::controllers::DynHeroRepository;
     use crate::hero::repositories::hero_memory::HeroMemoryRepository;
     use crate::oidc::OidcVerifier;
     use axum::body::{to_bytes, Body};
     use axum::http::{Request, StatusCode};
+    use craftainer_observability::health::HealthRegistry;
     use std::sync::Arc;
     use tower::ServiceExt;
 
@@ -557,16 +571,20 @@ mod tests {
     }
 
     fn app() -> Router {
+        app_with_bus(Arc::new(craftainer_crud::events::EventBus::mock()))
+    }
+
+    fn app_with_bus(events: Arc<craftainer_crud::events::EventBus>) -> Router {
         let settings = Arc::new(mock_settings());
         let state = AppState {
             oidc: Arc::new(OidcVerifier::new(settings.clone())),
             settings,
             health_registry: Arc::new(HealthRegistry::new()),
-            hero_crud: Arc::new(crate::crud::CrudService::new(DynHeroRepository(Box::new(
-                HeroMemoryRepository::new(),
-            )))),
+            hero_crud: Arc::new(craftainer_crud::crud::CrudService::new(DynHeroRepository(
+                Box::new(HeroMemoryRepository::new()),
+            ))),
             rate_limiter: Arc::new(crate::rate_limit::RateLimiter::mock()),
-            events: Arc::new(crate::events::EventBus::mock()),
+            events,
         };
         router().with_state(state)
     }
@@ -840,11 +858,11 @@ mod tests {
             oidc: Arc::new(OidcVerifier::new(settings.clone())),
             settings,
             health_registry: Arc::new(HealthRegistry::new()),
-            hero_crud: Arc::new(crate::crud::CrudService::new(DynHeroRepository(Box::new(
-                HeroMemoryRepository::new(),
-            )))),
+            hero_crud: Arc::new(craftainer_crud::crud::CrudService::new(DynHeroRepository(
+                Box::new(HeroMemoryRepository::new()),
+            ))),
             rate_limiter: Arc::new(crate::rate_limit::RateLimiter::mock()),
-            events: Arc::new(crate::events::EventBus::mock()),
+            events: Arc::new(craftainer_crud::events::EventBus::mock()),
         };
         let shared_app = router().with_state(state);
 
@@ -1332,12 +1350,22 @@ mod tests {
         collected
     }
 
+    /// The server-minted id out of a stream's first (`subscriber`) frame.
+    fn issued_id(body: &str) -> String {
+        body.lines()
+            .find_map(|line| line.strip_prefix("id: "))
+            .expect("the first frame carries an id")
+            .to_string()
+    }
+
     #[tokio::test]
     async fn events_stream_starts_with_a_subscriber_frame() {
-        let response = app()
+        let bus = std::sync::Arc::new(craftainer_crud::events::EventBus::mock());
+        let minted = bus.mint_subscriber_id(HERO_EVENT_RESOURCE);
+        let response = app_with_bus(bus)
             .oneshot(authed(
                 "GET",
-                "/events?subscriber_id=my-sub",
+                &format!("/events?subscriber_id={minted}"),
                 "alice",
                 &["viewer"],
                 serde_json::Value::Null,
@@ -1354,8 +1382,32 @@ mod tests {
         );
         let body = sse_frames(response, 1).await;
         assert!(body.contains("event: subscriber"), "{body}");
-        assert!(body.contains("id: my-sub"), "{body}");
-        assert!(body.contains(r#"{"subscriber_id":"my-sub"}"#), "{body}");
+        // A server-minted id the client hands back is resumed as is.
+        assert!(body.contains(&format!("id: {minted}")), "{body}");
+        assert!(
+            body.contains(&format!(r#"{{"subscriber_id":"{minted}"}}"#)),
+            "{body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn events_replaces_a_client_chosen_subscriber_id_with_a_minted_one() {
+        // docs/adrs/0020: ids are capabilities, so the server mints them; a
+        // made-up id gets a fresh session instead of being adopted.
+        let response = app()
+            .oneshot(authed(
+                "GET",
+                "/events?subscriber_id=my-sub",
+                "alice",
+                &["viewer"],
+                serde_json::Value::Null,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = sse_frames(response, 1).await;
+        assert!(!body.contains("my-sub"), "{body}");
+        assert_eq!(issued_id(&body).len(), 64, "{body}");
     }
 
     #[tokio::test]
@@ -1433,7 +1485,6 @@ mod tests {
         let body = sse_frames(stream, 2).await;
         assert!(body.contains("event: create"), "{body}");
         assert!(body.contains(r#""resource":"heroes""#), "{body}");
-        assert!(body.contains("id: watcher"), "{body}");
     }
 
     #[tokio::test]
@@ -1616,5 +1667,178 @@ mod tests {
             updated_at: now,
         };
         assert_eq!(boolean_value(&hero, "power_level"), None);
+    }
+    // -- behaviour that came with craftainer-crud (docs/adrs/0020) --
+
+    async fn status_of(app: &Router, method: &str, uri: &str, roles: &[&str]) -> StatusCode {
+        app.clone()
+            .oneshot(authed(method, uri, "alice", roles, serde_json::Value::Null))
+            .await
+            .unwrap()
+            .status()
+    }
+
+    #[tokio::test]
+    async fn an_id_cannot_be_combined_with_filters() {
+        let shared_app = app();
+        let id = create_hero(
+            &shared_app,
+            "alice",
+            serde_json::json!({"name": "Spectra", "powers": ["flight"], "power_level": 5}),
+        )
+        .await;
+        // Before the switch the filter was silently ignored when an id was
+        // given; now every verb refuses the pair.
+        let uri = format!("/?id={id}&power_level=9");
+        assert_eq!(
+            status_of(&shared_app, "GET", &uri, &["viewer"]).await,
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        assert_eq!(
+            status_of(&shared_app, "DELETE", &uri, &["maintainer"]).await,
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        // ...and the guarded record is still there.
+        assert_eq!(
+            status_of(&shared_app, "GET", &format!("/?id={id}"), &["viewer"]).await,
+            StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    async fn only_archived_lists_the_trash_and_is_refused_where_it_cannot_apply() {
+        let shared_app = app();
+        let live = create_hero(
+            &shared_app,
+            "alice",
+            serde_json::json!({"name": "Live", "powers": ["x"]}),
+        )
+        .await;
+        let gone = create_hero(
+            &shared_app,
+            "alice",
+            serde_json::json!({"name": "Gone", "powers": ["x"]}),
+        )
+        .await;
+        assert_eq!(
+            status_of(
+                &shared_app,
+                "DELETE",
+                &format!("/?id={gone}"),
+                &["maintainer"]
+            )
+            .await,
+            StatusCode::NO_CONTENT
+        );
+
+        let response = shared_app
+            .clone()
+            .oneshot(authed(
+                "GET",
+                "/?only_archived=true",
+                "alice",
+                &["viewer"],
+                serde_json::Value::Null,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        let ids: Vec<i64> = body
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|hero| hero["id"].as_i64().unwrap())
+            .collect();
+        assert_eq!(ids, [gone]);
+        assert!(!ids.contains(&live));
+
+        // A single-record read, a write and /stats cannot honour it.
+        for (method, uri, roles) in [
+            ("GET", format!("/?id={live}&only_archived=true"), "viewer"),
+            ("GET", "/stats?only_archived=true".to_string(), "viewer"),
+            ("GET", "/stats?include_archived=maybe".to_string(), "viewer"),
+            (
+                "DELETE",
+                "/?name=Live&only_archived=true".to_string(),
+                "maintainer",
+            ),
+        ] {
+            assert_eq!(
+                status_of(&shared_app, method, &uri, &[roles]).await,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{method} {uri}"
+            );
+        }
+        // Contradicting include_archived=false, or a malformed flag, is a 422.
+        for uri in [
+            "/?only_archived=true&include_archived=false",
+            "/?include_archived=maybe",
+        ] {
+            assert_eq!(
+                status_of(&shared_app, "GET", uri, &["viewer"]).await,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{uri}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_bulk_action_counts_only_the_callers_records_against_the_cap() {
+        let mut settings = mock_settings();
+        settings.bulk_action_max_matched = 1;
+        let settings = Arc::new(settings);
+        let state = AppState {
+            oidc: Arc::new(OidcVerifier::new(settings.clone())),
+            settings,
+            health_registry: Arc::new(HealthRegistry::new()),
+            hero_crud: Arc::new(craftainer_crud::crud::CrudService::new(DynHeroRepository(
+                Box::new(HeroMemoryRepository::new()),
+            ))),
+            rate_limiter: Arc::new(crate::rate_limit::RateLimiter::mock()),
+            events: Arc::new(craftainer_crud::events::EventBus::mock()),
+        };
+        let shared_app = router().with_state(state);
+        // Two of bob's records match the filter, alice has one: before the
+        // switch the cap counted all three and refused alice's own delete.
+        for owner in ["bob", "bob", "alice"] {
+            create_hero(
+                &shared_app,
+                owner,
+                serde_json::json!({"name": "Dup", "powers": ["x"], "power_level": 7}),
+            )
+            .await;
+        }
+        assert_eq!(
+            status_of(&shared_app, "DELETE", "/?power_level=7", &["maintainer"]).await,
+            StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    async fn a_repeated_filter_key_is_a_repeated_clause() {
+        let shared_app = app();
+        for level in [1, 5, 9] {
+            create_hero(
+                &shared_app,
+                "alice",
+                serde_json::json!({"name": "H", "powers": ["x"], "power_level": level}),
+            )
+            .await;
+        }
+        let response = shared_app
+            .oneshot(authed(
+                "GET",
+                "/?power_level=5&power_level=9",
+                "alice",
+                &["viewer"],
+                serde_json::Value::Null,
+            ))
+            .await
+            .unwrap();
+        // Both clauses apply (AND): no record has two power levels. A map of
+        // params used to keep only the last value and return the 9.
+        let body = json_body(response).await;
+        assert!(body.as_array().unwrap().is_empty(), "{body}");
     }
 }

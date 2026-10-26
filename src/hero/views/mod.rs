@@ -1,5 +1,5 @@
 //! Hero's half of the View layer: request/response DTOs for this
-//! template's example CRUD resource. See `crate::generic::views` for the
+//! template's example CRUD resource. See `craftainer_crud::views` for the
 //! resource-agnostic `FieldError`/`bulk`/`stats` shapes these build on.
 
 pub mod hero;
