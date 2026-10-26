@@ -16,7 +16,7 @@ Zero-infrastructure local/CI use; see ADR 0005.
 
 ## Acceptance criteria
 
-- `main.rs::build_health_registry` branches on `Mode::Mock` before
+- `src/lib.rs`'s `build_health_registry` branches on `Mode::Mock` before
   constructing any real client (Postgres connection, Redis client, S3
   client, reqwest client).
 - `GET /health/ready` under `MODE=mock` returns 200 with every check

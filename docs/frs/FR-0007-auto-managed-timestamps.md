@@ -16,7 +16,7 @@ Standard audit-timestamp convention; see ADR 0001.
 
 ## Acceptance criteria
 
-- `HeroCreate`/`HeroUpdate` (`src/views/hero.rs`) have no `created_at`/
+- `HeroCreate`/`HeroUpdate` (`src/hero/views/hero.rs`) have no `created_at`/
   `updated_at` fields -- a client cannot set them even if it tries.
 - Both repository implementations set `created_at`/`updated_at` to the
   current UTC time on create, and `updated_at` on every update.

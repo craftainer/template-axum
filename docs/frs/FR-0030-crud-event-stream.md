@@ -48,7 +48,8 @@ sessions + QoS 1 via `rumqttc`), NFR-0029 for the guarantee's scope, and
   bearer token `401`.
 - There is no XML sibling of this route, but a mutation made through the
   XML sibling router publishes the same event as the JSON one.
-- Verified by `controllers::crud_events::tests` (frame shape,
+- Verified by the `craftainer-crud` crate's own tests of
+  `craftainer_crud::controllers::crud_events` (frame shape,
   subscriber-id precedence) and `controllers::heroes::tests::
   events_stream_starts_with_a_subscriber_frame`/
   `events_issues_a_subscriber_id_when_the_client_supplies_none`/
@@ -56,5 +57,6 @@ sessions + QoS 1 via `rumqttc`), NFR-0029 for the guarantee's scope, and
   `a_created_hero_is_announced_on_the_event_stream`/
   `a_bulk_delete_is_announced_with_every_affected_id` against the
   `Mode::Mock` bus, and end-to-end — including the reconnect replay this
-  requirement's second paragraph promises — by `tests/mqtt_events.rs`
-  against the real Mosquitto service.
+  requirement's second paragraph promises — by the `craftainer-crud` crate's
+  `mqtt`-feature tests against a real Mosquitto service (the app's own
+  `tests/mqtt_event_bus.rs` covers its wiring of the bus).

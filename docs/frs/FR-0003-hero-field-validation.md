@@ -17,7 +17,7 @@ Mirrors template-fastapi's own Hero v2 validation rules; see ADR 0004.
 
 ## Acceptance criteria
 
-- `HeroCreate::validate`/`HeroUpdate::validate` (`src/views/hero.rs`)
+- `HeroCreate::validate`/`HeroUpdate::validate` (`src/hero/views/hero.rs`)
   return one `FieldError` per violation.
 - An empty `powers` list, or a `powers` entry over 200 characters, is
   rejected with a field-scoped message.

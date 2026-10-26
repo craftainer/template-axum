@@ -18,7 +18,7 @@ existence of another user's record).
 
 ## Acceptance criteria
 
-- `list_or_get`/`update`/`delete_hero` (`src/controllers/heroes.rs`) map
+- `list_or_get`/`update`/`delete_hero` (`src/hero/controllers/heroes.rs`) map
   a repository `None`/`false` result to `AppError::NotFound`.
 - A `PATCH`/`DELETE` against another user's Hero returns 404, not 403
   (ADR 0007's ownership-hiding property).

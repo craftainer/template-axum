@@ -18,10 +18,11 @@ See ADR 0001.
 
 ## Acceptance criteria
 
-- `src/crud/mod.rs`'s `CrudService<R>` contains no reference to `Hero` or
+- `craftainer_crud::crud`'s `CrudService<R>` (the `craftainer-crud` crate,
+  ADR 0020) contains no reference to `Hero` or
   any other concrete resource type.
-- Hero's controller (`src/controllers/heroes.rs`) is the only Hero-aware
+- Hero's controller (`src/hero/controllers/heroes.rs`) is the only Hero-aware
   code outside `models`/`views`/`repositories`.
 - A second resource could be added by implementing `Repository` for its
-  own model/DTOs and writing a thin router, per `src/repositories/mod.rs`'s
+  own model/DTOs and writing a thin router, per `craftainer_crud::repositories::Repository`'s
   module doc.

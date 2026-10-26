@@ -39,6 +39,6 @@ scope decision, narrow to this router alone).
   API, showing field errors inline on a `422` rather than navigating.
 - Every RBAC/ownership/rate-limit rule the JSON router enforces
   (`FR-0015`, `docs/adrs/0007`, `docs/adrs/0011`) applies identically
-  here -- this router calls the same `CrudService`/`crud_actions` path.
+  here -- this router calls the same `craftainer_crud::crud::CrudService`/`crud_actions` path.
 - Verified by `controllers::heroes_web::tests` and `views::hero_form::
   tests`.
