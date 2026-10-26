@@ -221,9 +221,39 @@ async fn hero_and_audit_role_journey(client: &reqwest::Client, backend: Backend)
     let created: Value = created.json().await.unwrap();
     let id = created["id"].as_i64().unwrap();
 
+    // Conditional requests (docs/adrs/0023), over real HTTP: a read carries
+    // the record's ETag, every JSON/XML route serves the same tag for the
+    // row, and a matching If-None-Match gets a bodiless 304.
+    let json_url = format!("{BASE_URL}/crud/v1/heroes/v2/json?id={id}");
+    let read = client
+        .get(&json_url)
+        .bearer_auth(&viewer)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(read.status(), 200);
+    assert_eq!(read.headers()["cache-control"], "private, no-cache");
+    let first_etag = read.headers()["etag"].to_str().unwrap().to_string();
+    for path in ["v2/json", "v2/xml", "v1/json", "v1/xml"] {
+        let url = format!("{BASE_URL}/crud/v1/heroes/{path}?id={id}");
+        let full = client.get(&url).bearer_auth(&viewer).send().await.unwrap();
+        assert_eq!(full.status(), 200, "{path}");
+        assert_eq!(full.headers()["etag"], first_etag.as_str(), "{path}");
+        let unchanged = client
+            .get(&url)
+            .bearer_auth(&viewer)
+            .header("If-None-Match", &first_etag)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(unchanged.status(), 304, "{path}");
+        assert!(unchanged.bytes().await.unwrap().is_empty(), "{path}");
+    }
+
     let updated = client
-        .patch(format!("{BASE_URL}/crud/v1/heroes/v2/json?id={id}"))
+        .patch(&json_url)
         .bearer_auth(&maintainer)
+        .header("If-Match", &first_etag)
         .json(&json!({"power_level": 9}))
         .send()
         .await
@@ -233,10 +263,40 @@ async fn hero_and_audit_role_journey(client: &reqwest::Client, backend: Backend)
         200,
         "maintainer should be able to update its own record"
     );
+    let second_etag = updated.headers()["etag"].to_str().unwrap().to_string();
+    assert_ne!(second_etag, first_etag, "an update changes the ETag");
+
+    // The tag from before the update is now stale: both writes are refused
+    // with 412 and the record is untouched.
+    let stale_patch = client
+        .patch(&json_url)
+        .bearer_auth(&maintainer)
+        .header("If-Match", &first_etag)
+        .json(&json!({"power_level": 1}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stale_patch.status(), 412, "a stale If-Match on PATCH");
+    let stale_delete = client
+        .delete(&json_url)
+        .bearer_auth(&maintainer)
+        .header("If-Match", &first_etag)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stale_delete.status(), 412, "a stale If-Match on DELETE");
+    let after = client
+        .get(&json_url)
+        .bearer_auth(&viewer)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(after.headers()["etag"], second_etag.as_str());
 
     let deleted = client
-        .delete(format!("{BASE_URL}/crud/v1/heroes/v2/json?id={id}"))
+        .delete(&json_url)
         .bearer_auth(&maintainer)
+        .header("If-Match", &second_etag)
         .send()
         .await
         .unwrap();

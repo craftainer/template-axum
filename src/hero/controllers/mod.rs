@@ -26,12 +26,18 @@ pub mod heroes_xml;
 
 use std::sync::Arc;
 
+use axum::http::HeaderMap;
+
 use crate::config::Settings;
 use crate::generic::controllers::{HasRateLimiter, HasSettings};
 use crate::hero::models::hero;
 use crate::hero::views::hero::{HeroCreate, HeroUpdate};
 use crate::oidc::{HasOidcVerifier, OidcVerifier};
+use crate::problem_details::AppError;
 use crate::rate_limit::RateLimiter;
+use craftainer_crud::conditional::{check_if_match, list_etag, record_etag};
+use craftainer_crud::controllers::crud_actions::ListOrGet;
+use craftainer_crud::controllers::crud_query::parse_include_archived;
 use craftainer_crud::crud::CrudService;
 use craftainer_crud::events::EventBus;
 use craftainer_observability::health::router::HasHealthRegistry;
@@ -71,6 +77,42 @@ pub struct AppState {
 /// (`crud-events/heroes`), shared by the JSON and XML sibling routers so
 /// both announce onto the same topic.
 pub const HERO_EVENT_RESOURCE: &str = "heroes";
+
+/// The `ETag` a `GET` of `result` carries (`docs/adrs/0023`): strong over
+/// one record, weak over a page. Shared by the four JSON/XML routers, so a
+/// row has the same tag whichever representation or version served it.
+pub(crate) fn read_etag(result: &ListOrGet<hero::Model>) -> String {
+    match result {
+        ListOrGet::One(hero) => record_etag(hero),
+        ListOrGet::Many(heroes) => list_etag(heroes),
+    }
+}
+
+/// Honour `If-Match` on a single-record `PATCH`/`DELETE` (`docs/adrs/0023`):
+/// `412` when the header is present and does not match the record's current
+/// tag. Returns without checking when the header is absent, when `id` is
+/// `None` (a bulk write has no one representation to compare) and when the
+/// record does not exist (the write's own `404` follows). The record is read
+/// with the same `include_archived` visibility the write sees.
+pub(crate) async fn enforce_if_match(
+    state: &AppState,
+    headers: &HeaderMap,
+    id: Option<i32>,
+    raw_params: &[(String, String)],
+) -> Result<(), AppError> {
+    let Some(id) = id else {
+        return Ok(());
+    };
+    if !headers.contains_key(axum::http::header::IF_MATCH) {
+        return Ok(());
+    }
+    let include_archived =
+        parse_include_archived(raw_params).map_err(AppError::UnprocessableEntity)?;
+    if let Some(current) = state.hero_crud.get(id, include_archived).await? {
+        check_if_match(headers, &record_etag(&current), "Hero")?;
+    }
+    Ok(())
+}
 
 impl HasOidcVerifier for AppState {
     fn oidc_verifier(&self) -> &OidcVerifier {

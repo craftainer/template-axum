@@ -19,7 +19,8 @@ may import from here.
   dependency on it.
   See its own module doc for why `AppState` (rather than something
   purely generic) is where this app's one resource-specific dependency
-  lives.
+  lives. Also `read_etag`/`enforce_if_match`, the conditional-request glue
+  the four JSON/XML routers share (below).
 - `heroes.rs` — the Hero v2 resource router (list/get/create/update/
   delete), mounted by `lib.rs` at `/crud/v1/heroes/v2/json`. Owner-
   scoped (`docs/adrs/0007`), soft-deleted (`docs/adrs/0008`), RBAC-gated
@@ -45,6 +46,14 @@ may import from here.
   in `hero::views::hero_v1`/`hero_v1_xml`, no separate storage. Every
   route attaches RFC 8594 `Sunset`/`Deprecation`/`Link` headers via
   `http_headers::Sunset` (NFR-0026).
+- Conditional requests (`docs/adrs/0023`): on all four JSON/XML routers
+  (`heroes`, `heroes_xml`, `heroes_v1`, `heroes_v1_xml`) a `GET` carries
+  `ETag` (strong for `?id=`, weak for a list) and `Cache-Control: private,
+  no-cache`, a matching `If-None-Match` is a bodiless `304`, a single-record
+  `PATCH`/`DELETE` with a stale `If-Match` is a `412` problem response, and
+  a `PATCH ?id=` answers with the new `ETag`. A missing `If-Match` always
+  passes and the bulk forms ignore it. Built from `craftainer_crud::
+  conditional`; `heroes_web.rs` serves no records and is untouched.
 - `heroes_web.rs` (+ `heroes_web_components.js`) — a third
   representation of the same resource at `/heroes/form` /
   `/heroes/components.js`: a progressively-enhanced HTML form, working

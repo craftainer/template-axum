@@ -16,7 +16,7 @@
 use std::net::SocketAddr;
 
 use axum::extract::{ConnectInfo, Query, State};
-use axum::http::StatusCode;
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
@@ -24,13 +24,15 @@ use chrono::{DateTime, TimeZone, Utc};
 
 use crate::hero::controllers::heroes::{HERO_FIELD_SPECS, HERO_WRITE_RATE_SCOPE};
 use crate::hero::controllers::{
-    AppState, HERO_DELETE_ROLES, HERO_EVENT_RESOURCE, HERO_READ_ROLES, HERO_WRITE_ROLES,
+    enforce_if_match, read_etag, AppState, HERO_DELETE_ROLES, HERO_EVENT_RESOURCE, HERO_READ_ROLES,
+    HERO_WRITE_ROLES,
 };
 use crate::hero::views::hero::HeroListQuery;
 use crate::hero::views::hero_v1::{HeroCreateV1, HeroReadV1, HeroUpdateV1};
 use crate::http_headers::Sunset;
 use crate::oidc::AuthClaims;
 use crate::problem_details::AppError;
+use craftainer_crud::conditional::{not_modified, record_etag, revalidation_headers};
 use craftainer_crud::controllers::crud_actions::{self, DeleteOutcome, ListOrGet, UpdateOutcome};
 use craftainer_crud::controllers::crud_events;
 use craftainer_crud::controllers::crud_query::{
@@ -63,6 +65,7 @@ async fn list_or_get(
     AuthClaims(claims): AuthClaims,
     Query(query): Query<HeroListQuery>,
     Query(raw_params): Query<Vec<(String, String)>>,
+    request_headers: HeaderMap,
 ) -> Result<Response, AppError> {
     claims.require_any_role(&state.settings.oidc_client_id, HERO_READ_ROLES)?;
     let archived = parse_archived_scope(&raw_params).map_err(AppError::UnprocessableEntity)?;
@@ -72,7 +75,7 @@ async fn list_or_get(
     let skip = query.skip.unwrap_or(0);
     let limit = query.limit.unwrap_or(DEFAULT_LIMIT);
 
-    let body = match crud_actions::resolve_list_or_get(
+    let result = crud_actions::resolve_list_or_get(
         &state.hero_crud,
         query.id,
         skip,
@@ -81,15 +84,22 @@ async fn list_or_get(
         filters,
         sort,
     )
-    .await?
-    {
+    .await?;
+    let etag = read_etag(&result);
+    if let Some(unchanged) = not_modified(&request_headers, &etag) {
+        return Ok(with_sunset(CURRENT_VERSION_LINK, unchanged));
+    }
+    let body = match result {
         ListOrGet::One(hero) => Json(hero_read_v1_json(hero)),
         ListOrGet::Many(heroes) => {
             let heroes: Vec<HeroReadV1> = heroes.into_iter().map(HeroReadV1::from).collect();
             Json(serde_json::to_value(heroes).expect("Vec<HeroReadV1> always serializes"))
         }
     };
-    Ok(with_sunset(CURRENT_VERSION_LINK, body))
+    Ok(with_sunset(
+        CURRENT_VERSION_LINK,
+        (revalidation_headers(&etag), body),
+    ))
 }
 
 async fn create(
@@ -130,6 +140,7 @@ async fn update(
     AuthClaims(claims): AuthClaims,
     Query(query): Query<HeroListQuery>,
     Query(raw_params): Query<Vec<(String, String)>>,
+    request_headers: HeaderMap,
     Json(payload): Json<HeroUpdateV1>,
 ) -> Result<Response, AppError> {
     state
@@ -147,6 +158,7 @@ async fn update(
         parse_filters(HERO_FIELD_SPECS, &raw_params).map_err(AppError::UnprocessableEntity)?;
     reject_only_archived(&raw_params).map_err(AppError::UnprocessableEntity)?;
     let owner_id = claims.subject()?.to_string();
+    enforce_if_match(&state, &request_headers, query.id, &raw_params).await?;
 
     let body = match crud_actions::resolve_update(
         &state.hero_crud,
@@ -166,7 +178,11 @@ async fn update(
                 vec![hero.id],
             )
             .await;
-            Json(hero_read_v1_json(hero))
+            (
+                [(header::ETAG, record_etag(&hero))],
+                Json(hero_read_v1_json(hero)),
+            )
+                .into_response()
         }
         UpdateOutcome::Bulk(result) => {
             crud_events::publish(
@@ -177,6 +193,7 @@ async fn update(
             )
             .await;
             Json(serde_json::to_value(result).expect("BulkUpdateResult always serializes"))
+                .into_response()
         }
     };
     Ok(with_sunset(CURRENT_VERSION_LINK, body))
@@ -188,6 +205,7 @@ async fn delete_hero(
     AuthClaims(claims): AuthClaims,
     Query(query): Query<HeroListQuery>,
     Query(raw_params): Query<Vec<(String, String)>>,
+    request_headers: HeaderMap,
 ) -> Result<Response, AppError> {
     state
         .rate_limiter
@@ -203,6 +221,7 @@ async fn delete_hero(
         parse_filters(HERO_FIELD_SPECS, &raw_params).map_err(AppError::UnprocessableEntity)?;
     reject_only_archived(&raw_params).map_err(AppError::UnprocessableEntity)?;
     let owner_id = claims.subject()?.to_string();
+    enforce_if_match(&state, &request_headers, query.id, &raw_params).await?;
 
     let body = match crud_actions::resolve_delete(
         &state.hero_crud,
@@ -593,5 +612,362 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = json_body(response).await;
         assert_eq!(body["matched"], 2);
+    }
+
+    // -- conditional requests (docs/adrs/0023): ETag + If-None-Match -> 304
+    // on reads, If-Match -> 412 on a single-record write. --
+
+    fn etag(response: &Response) -> String {
+        response.headers()[header::ETAG]
+            .to_str()
+            .unwrap()
+            .to_string()
+    }
+
+    async fn call(
+        app: &Router,
+        method: &str,
+        uri: &str,
+        roles: &[&str],
+        body: &str,
+        headers: &[(&str, &str)],
+    ) -> Response {
+        let mut request = {
+            let body = if body.is_empty() {
+                serde_json::Value::Null
+            } else {
+                serde_json::from_str(body).unwrap()
+            };
+            authed(method, uri, "alice", roles, body)
+        };
+        for (name, value) in headers {
+            request.headers_mut().insert(
+                axum::http::HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                value.parse().unwrap(),
+            );
+        }
+        app.clone().oneshot(request).await.unwrap()
+    }
+
+    async fn text(response: Response) -> String {
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        String::from_utf8(bytes.to_vec()).unwrap()
+    }
+
+    async fn cond_create(app: &Router) -> i64 {
+        let response = call(app, "POST", "/", &["editor"], VALID_HERO_V1, &[]).await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        serde_json::from_str::<serde_json::Value>(&text(response).await).unwrap()["id"]
+            .as_i64()
+            .unwrap()
+    }
+
+    fn rename_body(to: &str) -> String {
+        format!(r#"{{"name":"{to}"}}"#)
+    }
+
+    async fn rename(app: &Router, id: i64, to: &str, headers: &[(&str, &str)]) -> Response {
+        call(
+            app,
+            "PATCH",
+            &format!("/?id={id}"),
+            &["editor"],
+            &rename_body(to),
+            headers,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn get_by_id_carries_a_strong_etag_and_revalidates_with_304() {
+        let app = app();
+        let id = cond_create(&app).await;
+        let uri = format!("/?id={id}");
+
+        let first = call(&app, "GET", &uri, &["viewer"], "", &[]).await;
+        assert_eq!(first.status(), StatusCode::OK);
+        let tag = etag(&first);
+        assert!(tag.starts_with('"'), "a record tag is strong: {tag}");
+        assert_eq!(first.headers()[header::CACHE_CONTROL], "private, no-cache");
+
+        let second = call(
+            &app,
+            "GET",
+            &uri,
+            &["viewer"],
+            "",
+            &[("if-none-match", &tag)],
+        )
+        .await;
+        assert_eq!(second.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(etag(&second), tag);
+        assert_eq!(second.headers()[header::CACHE_CONTROL], "private, no-cache");
+        assert_eq!(second.headers()["deprecation"], "true");
+        assert!(second.headers().get("sunset").is_some());
+        assert!(text(second).await.is_empty());
+
+        let weak = format!("W/{tag}");
+        let third = call(
+            &app,
+            "GET",
+            &uri,
+            &["viewer"],
+            "",
+            &[("if-none-match", &weak)],
+        )
+        .await;
+        assert_eq!(third.status(), StatusCode::NOT_MODIFIED, "weak comparison");
+        let star = call(
+            &app,
+            "GET",
+            &uri,
+            &["viewer"],
+            "",
+            &[("if-none-match", "*")],
+        )
+        .await;
+        assert_eq!(star.status(), StatusCode::NOT_MODIFIED);
+    }
+
+    #[tokio::test]
+    async fn a_stale_if_none_match_gets_the_full_response() {
+        let app = app();
+        let id = cond_create(&app).await;
+        let response = call(
+            &app,
+            "GET",
+            &format!("/?id={id}"),
+            &["viewer"],
+            "",
+            &[("if-none-match", "\"stale\"")],
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(!text(response).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_list_carries_a_weak_etag_that_moves_with_a_write() {
+        let app = app();
+        let id = cond_create(&app).await;
+
+        let first = call(&app, "GET", "/", &["viewer"], "", &[]).await;
+        assert_eq!(first.status(), StatusCode::OK);
+        let tag = etag(&first);
+        assert!(tag.starts_with("W/\""), "a page tag is weak: {tag}");
+        assert_eq!(first.headers()[header::CACHE_CONTROL], "private, no-cache");
+
+        let unchanged = call(
+            &app,
+            "GET",
+            "/",
+            &["viewer"],
+            "",
+            &[("if-none-match", &tag)],
+        )
+        .await;
+        assert_eq!(unchanged.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(etag(&unchanged), tag);
+
+        assert_eq!(
+            rename(&app, id, "Renamed", &[]).await.status(),
+            StatusCode::OK
+        );
+        let changed = call(
+            &app,
+            "GET",
+            "/",
+            &["viewer"],
+            "",
+            &[("if-none-match", &tag)],
+        )
+        .await;
+        assert_eq!(changed.status(), StatusCode::OK);
+        assert_ne!(etag(&changed), tag);
+    }
+
+    #[tokio::test]
+    async fn patch_by_id_answers_with_the_records_new_etag() {
+        let app = app();
+        let id = cond_create(&app).await;
+        let uri = format!("/?id={id}");
+        let before = etag(&call(&app, "GET", &uri, &["viewer"], "", &[]).await);
+
+        let patched = rename(&app, id, "Renamed", &[]).await;
+        assert_eq!(patched.status(), StatusCode::OK);
+        let after = etag(&patched);
+        assert_ne!(after, before, "an update changes the tag");
+
+        let read = call(&app, "GET", &uri, &["viewer"], "", &[]).await;
+        assert_eq!(
+            etag(&read),
+            after,
+            "the PATCH tag is the tag a GET now serves"
+        );
+        let stale = call(
+            &app,
+            "GET",
+            &uri,
+            &["viewer"],
+            "",
+            &[("if-none-match", &before)],
+        )
+        .await;
+        assert_eq!(
+            stale.status(),
+            StatusCode::OK,
+            "the old tag no longer revalidates"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stale_if_match_on_patch_is_412_and_writes_nothing() {
+        let app = app();
+        let id = cond_create(&app).await;
+        let uri = format!("/?id={id}");
+        let stale = etag(&call(&app, "GET", &uri, &["viewer"], "", &[]).await);
+        assert_eq!(
+            rename(&app, id, "Renamed", &[]).await.status(),
+            StatusCode::OK
+        );
+
+        let refused = rename(&app, id, "Clobbered", &[("if-match", &stale)]).await;
+        assert_eq!(refused.status(), StatusCode::PRECONDITION_FAILED);
+        assert_eq!(
+            refused.headers()[header::CONTENT_TYPE],
+            "application/problem+json"
+        );
+        let problem = text(refused).await;
+        assert!(problem.contains("Hero was modified since the supplied If-Match"));
+
+        let read = text(call(&app, "GET", &uri, &["viewer"], "", &[]).await).await;
+        assert!(read.contains("Renamed") && !read.contains("Clobbered"));
+    }
+
+    #[tokio::test]
+    async fn patch_without_if_match_or_with_a_current_tag_or_star_succeeds() {
+        let app = app();
+        let id = cond_create(&app).await;
+        let uri = format!("/?id={id}");
+
+        assert_eq!(
+            rename(&app, id, "One", &[]).await.status(),
+            StatusCode::OK,
+            "absent header"
+        );
+        let tag = etag(&call(&app, "GET", &uri, &["viewer"], "", &[]).await);
+        let current = rename(&app, id, "Two", &[("if-match", &tag)]).await;
+        assert_eq!(current.status(), StatusCode::OK, "current tag");
+        let star = rename(&app, id, "Three", &[("if-match", "*")]).await;
+        assert_eq!(star.status(), StatusCode::OK, "star");
+
+        let tag = etag(&star);
+        let weak = format!("W/{tag}");
+        let refused = rename(&app, id, "Four", &[("if-match", &weak)]).await;
+        assert_eq!(
+            refused.status(),
+            StatusCode::PRECONDITION_FAILED,
+            "If-Match compares strongly, so a weak tag never matches"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stale_if_match_on_delete_is_412_and_deletes_nothing() {
+        let app = app();
+        let id = cond_create(&app).await;
+        let uri = format!("/?id={id}");
+        let stale = etag(&call(&app, "GET", &uri, &["viewer"], "", &[]).await);
+        assert_eq!(
+            rename(&app, id, "Renamed", &[]).await.status(),
+            StatusCode::OK
+        );
+
+        let refused = call(
+            &app,
+            "DELETE",
+            &uri,
+            &["maintainer"],
+            "",
+            &[("if-match", &stale)],
+        )
+        .await;
+        assert_eq!(refused.status(), StatusCode::PRECONDITION_FAILED);
+        let still_there = call(&app, "GET", &uri, &["viewer"], "", &[]).await;
+        assert_eq!(still_there.status(), StatusCode::OK);
+
+        let current = etag(&still_there);
+        let deleted = call(
+            &app,
+            "DELETE",
+            &uri,
+            &["maintainer"],
+            "",
+            &[("if-match", &current)],
+        )
+        .await;
+        assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+        let gone = call(&app, "GET", &uri, &["viewer"], "", &[]).await;
+        assert_eq!(gone.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn delete_without_if_match_still_succeeds() {
+        let app = app();
+        let id = cond_create(&app).await;
+        let deleted = call(
+            &app,
+            "DELETE",
+            &format!("/?id={id}"),
+            &["maintainer"],
+            "",
+            &[],
+        )
+        .await;
+        assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn bulk_writes_ignore_if_match() {
+        let app = app();
+        cond_create(&app).await;
+        let bulk_patch = call(
+            &app,
+            "PATCH",
+            "/?power_level=5",
+            &["editor"],
+            &rename_body("Bulk"),
+            &[("if-match", "\"stale\"")],
+        )
+        .await;
+        assert_eq!(bulk_patch.status(), StatusCode::OK);
+        assert!(bulk_patch.headers().get(header::ETAG).is_none());
+
+        let bulk_delete = call(
+            &app,
+            "DELETE",
+            "/?power_level=5",
+            &["maintainer"],
+            "",
+            &[("if-match", "\"stale\"")],
+        )
+        .await;
+        assert_eq!(bulk_delete.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn if_match_on_a_missing_record_falls_through_to_404() {
+        let app = app();
+        let patch = rename(&app, 9999, "Renamed", &[("if-match", "\"stale\"")]).await;
+        assert_eq!(patch.status(), StatusCode::NOT_FOUND);
+        let delete = call(
+            &app,
+            "DELETE",
+            "/?id=9999",
+            &["maintainer"],
+            "",
+            &[("if-match", "\"stale\"")],
+        )
+        .await;
+        assert_eq!(delete.status(), StatusCode::NOT_FOUND);
     }
 }

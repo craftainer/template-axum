@@ -9,7 +9,9 @@ agnostic `HasId` contract this implements.
   `docs/nfrs/NFR-0003-db-model-current-shape-only.md`): `id`, `name`
   (nullable), `powers` (nullable `text[]`), `power_level` (nullable),
   `owner_id` (indexed), `archived_at` (nullable — soft-delete marker,
-  ADR 0008), `created_at`/`updated_at`.
+  ADR 0008), `created_at`/`updated_at`. Implements `craftainer_crud::
+  models::HasId` and `conditional::Versioned` (`updated_at`, what the
+  `ETag`s of `docs/adrs/0023` hash).
 
 A new resource adds its own sibling package (`crate::<resource>::models`,
 mirroring this one) rather than a file here — this package is Hero's
