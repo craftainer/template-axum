@@ -111,6 +111,7 @@ mod tests {
             postgres_db: "app".to_string(),
             postgres_host: "localhost".to_string(),
             postgres_port: 5432,
+            db: Default::default(),
             s3_endpoint_url: "http://localhost:9000".to_string(),
             s3_access_key: "rustfsadmin".to_string(),
             s3_secret_key: "rustfsadmin".to_string(),

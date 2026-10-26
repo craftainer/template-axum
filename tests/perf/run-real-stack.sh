@@ -13,6 +13,10 @@
 # per fragment under .devcontainer/stack/, so each has its own network).
 # Environment overrides: PERF_DB (default ax4h_perf), PERF_SEED (records to
 # seed, rounded up to a multiple of 4, default 500), PERF_TOOLCHAIN_IMAGE (a rust image with cargo).
+# App settings under test: any of DB_POOL_SIZE, DB_POOL_MIN_SIZE,
+# DB_POOL_RECYCLE, DB_POOL_IDLE_TIMEOUT, DB_CONNECT_TIMEOUT and
+# RUN_MIGRATIONS_ON_STARTUP that is set in the caller's environment is passed to the app
+# container (docs/adrs/0022); unset ones leave the app's defaults.
 set -euo pipefail
 
 image=${1:?usage: $0 <image> [goose args...]}
@@ -66,6 +70,17 @@ psql() { docker exec postgres-postgres-1 psql -v ON_ERROR_STOP=1 -U app -d postg
 psql -qc "DROP DATABASE IF EXISTS ${db} WITH (FORCE)"
 psql -qc "CREATE DATABASE ${db}"
 
+# Pool settings under test (docs/adrs/0022): forward only those the caller set,
+# so an unset variable leaves the app's default. POSTGRES_SSLMODE is not
+# forwarded: the stack's Postgres has no TLS.
+app_env=()
+for var in DB_POOL_SIZE DB_POOL_MIN_SIZE DB_POOL_RECYCLE \
+  DB_POOL_IDLE_TIMEOUT DB_CONNECT_TIMEOUT RUN_MIGRATIONS_ON_STARTUP; do
+  if [ -n "${!var:-}" ]; then
+    app_env+=(-e "$var=${!var}")
+  fi
+done
+
 # The app joins keycloak_default (where goose also runs, so the token's
 # issuer URL is the same http://keycloak:8080/... for both) and the Postgres,
 # Redis and MQTT networks. Redis DB 14 keeps the rate-limit counters apart
@@ -82,6 +97,7 @@ docker create --name "$app" --network keycloak_default \
   -e OIDC_AUDIENCE=api \
   -e RATE_LIMIT_HERO_WRITE_PER_MINUTE=1000000 \
   -e RATE_LIMIT_MOCK_TOKEN_PER_MINUTE=1000000 \
+  ${app_env[@]+"${app_env[@]}"} \
   "$image" >/dev/null
 docker network connect postgres_default "$app"
 docker network connect redis_default "$app"

@@ -16,6 +16,7 @@
 
 pub mod config;
 pub mod crud;
+pub mod db;
 pub mod events;
 pub mod generic;
 pub mod health;
@@ -107,28 +108,51 @@ pub fn build_event_bus(settings: &Settings) -> EventBus {
     }
 }
 
+/// Open the Postgres pool (`db::connect`, `DB_POOL_*`) and, unless
+/// `RUN_MIGRATIONS_ON_STARTUP=false`, apply pending migrations. `None`
+/// under `Mode::Mock`, which has no database. The caller owns the handle
+/// and closes it at shutdown (`DatabaseConnection::close`) so pooled
+/// connections end cleanly.
+pub async fn connect_database(settings: &Settings) -> Option<sea_orm::DatabaseConnection> {
+    if settings.mode == Mode::Mock {
+        return None;
+    }
+    let db = db::connect(settings)
+        .await
+        .expect("failed to connect to Postgres");
+    if settings.db.run_migrations_on_startup {
+        run_migrations(&db).await;
+    }
+    Some(db)
+}
+
 /// Assemble every shared dependency into the state each request is handed.
 /// Connects to (and migrates) Postgres, Redis and MQTT outside
 /// `Mode::Mock`; builds the in-memory fakes inside it.
 pub async fn build_state(settings: Arc<Settings>) -> AppState {
-    let (hero_repository, db_for_health): (
-        hero_controllers::DynHeroRepository,
-        Option<sea_orm::DatabaseConnection>,
-    ) = if settings.mode == Mode::Mock {
-        (
-            hero_controllers::DynHeroRepository(Box::new(HeroMemoryRepository::new())),
-            None,
-        )
-    } else {
-        let db = sea_orm::Database::connect(settings.database_url())
-            .await
-            .expect("failed to connect to Postgres");
-        run_migrations(&db).await;
-        (
-            hero_controllers::DynHeroRepository(Box::new(HeroSeaOrmRepository::new(db.clone()))),
-            Some(db),
-        )
+    let db = connect_database(&settings).await;
+    build_state_with_db(settings, db).await
+}
+
+/// `build_state` over an already-opened pool (`connect_database`), for a
+/// caller that keeps its own handle to close at shutdown. `db` must be
+/// `Some` exactly when `settings.mode` is not `Mode::Mock` (panics if not).
+pub async fn build_state_with_db(
+    settings: Arc<Settings>,
+    db: Option<sea_orm::DatabaseConnection>,
+) -> AppState {
+    assert_eq!(
+        db.is_some(),
+        settings.mode != Mode::Mock,
+        "a database handle is required exactly outside Mode::Mock"
+    );
+    let hero_repository: hero_controllers::DynHeroRepository = match &db {
+        None => hero_controllers::DynHeroRepository(Box::new(HeroMemoryRepository::new())),
+        Some(db) => {
+            hero_controllers::DynHeroRepository(Box::new(HeroSeaOrmRepository::new(db.clone())))
+        }
     };
+    let db_for_health = db;
 
     let health_registry = build_health_registry(&settings, db_for_health).await;
 
@@ -204,6 +228,7 @@ mod tests {
             postgres_db: "app".to_string(),
             postgres_host: "localhost".to_string(),
             postgres_port: 5432,
+            db: Default::default(),
             s3_endpoint_url: "http://localhost:9000".to_string(),
             s3_access_key: "rustfsadmin".to_string(),
             s3_secret_key: "rustfsadmin".to_string(),

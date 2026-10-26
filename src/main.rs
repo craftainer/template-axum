@@ -7,7 +7,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use template_axum::config::Settings;
-use template_axum::{build_router, build_state, problem_details, telemetry};
+use template_axum::{
+    build_router, build_state_with_db, connect_database, problem_details, telemetry,
+};
 
 #[tokio::main]
 async fn main() {
@@ -20,7 +22,8 @@ async fn main() {
     problem_details::configure_detail_redaction(settings.mode);
     let settings = Arc::new(settings);
 
-    let app = build_router(build_state(settings).await);
+    let db = connect_database(&settings).await;
+    let app = build_router(build_state_with_db(settings, db.clone()).await);
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:8000")
         .await
@@ -31,13 +34,21 @@ async fn main() {
     // into_make_service()`) makes the caller's socket address available to
     // handlers via the `ConnectInfo<SocketAddr>` extractor -- src/
     // rate_limit.rs's per-IP check needs it.
-    axum::serve(
+    let served = axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
     )
     .with_graceful_shutdown(shutdown_signal())
-    .await
-    .expect("server error");
+    .await;
+
+    // Closing any clone closes the shared sqlx pool: waits for in-use
+    // connections to be returned, then ends every connection cleanly.
+    if let Some(db) = db {
+        if let Err(err) = db.close().await {
+            tracing::warn!("error closing the database pool: {err}");
+        }
+    }
+    served.expect("server error");
 }
 
 /// Resolves on Ctrl-C or `SIGTERM`, whichever comes first -- letting

@@ -102,6 +102,11 @@ tests/perf/run-real-stack.sh template-axum:<version> --users 20 --run-time 60s
 
 `run-real-stack.sh` (everything after the image is passed to goose):
 
+0. forwards the pool settings under test (`DB_POOL_SIZE`,
+   `DB_POOL_MIN_SIZE`, `DB_POOL_RECYCLE`, `DB_POOL_IDLE_TIMEOUT`,
+   `DB_CONNECT_TIMEOUT`, `RUN_MIGRATIONS_ON_STARTUP`) from the caller's
+   environment to the app container, when set (`docs/adrs/0022`), e.g.
+   `DB_POOL_SIZE=4 DB_POOL_MIN_SIZE=4 tests/perf/run-real-stack.sh ...`;
 1. drops and recreates the `ax4h_perf` database on the shared Postgres
    (`PERF_DB` to rename it; no other database is touched);
 2. starts the image as `ax4h-perf-app` on the Keycloak network, also
