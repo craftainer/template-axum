@@ -37,3 +37,12 @@ impl craftainer_crud::models::HasId for Model {
         self.id
     }
 }
+
+/// What `craftainer_crud::conditional::record_etag`/`list_etag` hash with
+/// `id`: the row's last modification (`docs/adrs/0023`). Both repositories
+/// stamp it on every create, update and soft delete.
+impl craftainer_crud::conditional::Versioned for Model {
+    fn updated_at(&self) -> DateTime {
+        self.updated_at
+    }
+}

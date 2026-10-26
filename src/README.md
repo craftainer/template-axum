@@ -320,6 +320,10 @@ Under `MODE=mock`, `Repo`/`DB` are replaced by
 `hero::repositories::hero_memory::HeroMemoryRepository`, with no other
 layer changing.
 
+Every JSON/XML Hero route carries `ETag`/`304`/`If-Match` conditional
+requests on its single-record and list reads and single-record writes
+(`docs/adrs/0023`).
+
 Hero also demonstrates `interfaces`-equivalent owner scoping
 (`docs/adrs/0007`: reads open to every authenticated caller, writes
 restricted to the caller's own `sub`) and soft delete via an

@@ -44,7 +44,8 @@ pub enum AppError {
     Forbidden(String),
     UnprocessableEntity(Vec<FieldError>),
     /// An `If-Match` precondition failed (412). Produced by
-    /// `CrudError::PreconditionFailed`; no route returns it yet (AX12).
+    /// `CrudError::PreconditionFailed`; returned by a stale `If-Match` on
+    /// a single-record Hero `PATCH`/`DELETE` (`docs/adrs/0023`).
     PreconditionFailed(String),
     ServiceUnavailable(String),
     TooManyRequests(String),
