@@ -5,6 +5,7 @@
 //! which the compose files set directly.
 
 use std::env;
+use std::time::Duration;
 
 /// Startup-time mode: controls which backend (real vs. in-memory/mock) every
 /// downstream layer selects. Read once, at process startup -- never
@@ -33,6 +34,114 @@ impl Mode {
     }
 }
 
+/// A libpq `sslmode`, as `POSTGRES_SSLMODE` spells it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PostgresSslMode {
+    Disable,
+    Allow,
+    Prefer,
+    Require,
+    VerifyCa,
+    VerifyFull,
+}
+
+impl PostgresSslMode {
+    fn parse(raw: &str) -> Result<Self, String> {
+        match raw {
+            "disable" => Ok(PostgresSslMode::Disable),
+            "allow" => Ok(PostgresSslMode::Allow),
+            "prefer" => Ok(PostgresSslMode::Prefer),
+            "require" => Ok(PostgresSslMode::Require),
+            "verify-ca" => Ok(PostgresSslMode::VerifyCa),
+            "verify-full" => Ok(PostgresSslMode::VerifyFull),
+            other => Err(format!(
+                "POSTGRES_SSLMODE must be one of disable/allow/prefer/require/verify-ca/\
+                 verify-full, got {other:?}"
+            )),
+        }
+    }
+
+    /// Whether the mode refuses a plaintext connection (what
+    /// `Mode::Production` requires).
+    fn encrypts(self) -> bool {
+        matches!(
+            self,
+            PostgresSslMode::Require | PostgresSslMode::VerifyCa | PostgresSslMode::VerifyFull
+        )
+    }
+}
+
+/// Database pool and deployment settings (`src/db.rs`,
+/// `docs/adrs/0022`). Every sizing and timeout field is `None` when its
+/// env var is unset, so `src/db.rs` passes only what is set and
+/// sea-orm/sqlx's own defaults apply -- an unconfigured process behaves
+/// exactly as it did before these settings existed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DbSettings {
+    /// `POSTGRES_SSLMODE`: unset leaves whatever `DATABASE_URL` (or
+    /// sqlx's `prefer`) says; set, it overrides it.
+    pub sslmode: Option<PostgresSslMode>,
+    /// `DB_POOL_SIZE`: the pool's maximum connections (sqlx has no
+    /// separate overflow, so this is the whole budget per process).
+    pub pool_size: Option<u32>,
+    /// `DB_POOL_MIN_SIZE`: connections kept open while idle.
+    pub pool_min_size: Option<u32>,
+    /// `DB_POOL_RECYCLE`: seconds before a connection is closed and
+    /// replaced (sqlx `max_lifetime`).
+    pub pool_recycle: Option<Duration>,
+    /// `DB_POOL_IDLE_TIMEOUT`: seconds an unused connection may idle
+    /// before it is closed.
+    pub pool_idle_timeout: Option<Duration>,
+    /// `DB_CONNECT_TIMEOUT`: seconds a caller waits for a
+    /// connection, covering both a free slot and opening a new one --
+    /// sea-orm maps `connect_timeout` and `acquire_timeout` onto the same
+    /// sqlx field, so this is the one timeout for both.
+    pub connect_timeout: Option<Duration>,
+    /// `RUN_MIGRATIONS_ON_STARTUP` (default true).
+    pub run_migrations_on_startup: bool,
+}
+
+impl Default for DbSettings {
+    fn default() -> Self {
+        Self {
+            sslmode: None,
+            pool_size: None,
+            pool_min_size: None,
+            pool_recycle: None,
+            pool_idle_timeout: None,
+            connect_timeout: None,
+            run_migrations_on_startup: true,
+        }
+    }
+}
+
+impl DbSettings {
+    fn from_env() -> Result<Self, String> {
+        let sslmode = match env::var("POSTGRES_SSLMODE") {
+            Ok(raw) => Some(PostgresSslMode::parse(&raw)?),
+            Err(_) => None,
+        };
+        let pool_size = env_positive("DB_POOL_SIZE")?;
+        let pool_min_size = env_positive("DB_POOL_MIN_SIZE")?;
+        if let (Some(min), Some(max)) = (pool_min_size, pool_size) {
+            if min > max {
+                return Err(format!(
+                    "DB_POOL_MIN_SIZE ({min}) must not exceed DB_POOL_SIZE ({max})"
+                ));
+            }
+        }
+        Ok(Self {
+            sslmode,
+            pool_size,
+            pool_min_size,
+            pool_recycle: env_seconds("DB_POOL_RECYCLE")?,
+            pool_idle_timeout: env_seconds("DB_POOL_IDLE_TIMEOUT")?,
+            connect_timeout: env_seconds("DB_CONNECT_TIMEOUT")?,
+            run_migrations_on_startup: env_bool("RUN_MIGRATIONS_ON_STARTUP", true)?,
+        })
+    }
+}
+
 /// Typed application settings, equivalent to `app.config.Settings`.
 ///
 /// `app_name`/`oidc_authorization_url`/`oidc_token_url` are read (env-
@@ -57,6 +166,8 @@ pub struct Settings {
     pub postgres_db: String,
     pub postgres_host: String,
     pub postgres_port: u16,
+    /// Pool, TLS and migration settings for the Postgres connection.
+    pub db: DbSettings,
 
     pub s3_endpoint_url: String,
     pub s3_access_key: String,
@@ -113,6 +224,7 @@ impl Settings {
             postgres_port: env_or("POSTGRES_PORT", "5432")
                 .parse()
                 .map_err(|_| "POSTGRES_PORT must be a valid port number".to_string())?,
+            db: DbSettings::from_env()?,
 
             s3_endpoint_url: env_or("S3_ENDPOINT_URL", "http://localhost:9000"),
             s3_access_key: env::var("RUSTFS_ACCESS_KEY")
@@ -162,6 +274,20 @@ impl Settings {
 
         settings.validate()?;
         Ok(settings)
+    }
+
+    /// The `sslmode` the connection will use: `POSTGRES_SSLMODE` when set
+    /// (it overrides the URL, see `db.rs`), else a recognised `sslmode=`
+    /// query parameter of `DATABASE_URL`.
+    fn effective_sslmode(&self) -> Option<PostgresSslMode> {
+        self.db.sslmode.or_else(|| {
+            let url = self.database_url();
+            let query = url.split_once('?')?.1;
+            query
+                .split('&')
+                .find_map(|pair| pair.strip_prefix("sslmode="))
+                .and_then(|raw| PostgresSslMode::parse(raw).ok())
+        })
     }
 
     /// The composed async Postgres DSN SeaORM/sqlx connects with.
@@ -219,6 +345,12 @@ impl Settings {
         }
 
         let mut insecure = Vec::new();
+        if !self
+            .effective_sslmode()
+            .is_some_and(PostgresSslMode::encrypts)
+        {
+            insecure.push("POSTGRES_SSLMODE must be require, verify-ca, or verify-full");
+        }
         if !self.s3_endpoint_url.starts_with("https://") {
             insecure.push("S3_ENDPOINT_URL must use https://");
         }
@@ -238,6 +370,34 @@ impl Settings {
 
 fn env_or(key: &str, default: &str) -> String {
     env::var(key).unwrap_or_else(|_| default.to_string())
+}
+
+/// An optional integer >= 1 (`None` when unset).
+fn env_positive(key: &str) -> Result<Option<u32>, String> {
+    match env::var(key) {
+        Err(_) => Ok(None),
+        Ok(raw) => match raw.parse::<u32>() {
+            Ok(value) if value >= 1 => Ok(Some(value)),
+            _ => Err(format!("{key} must be a whole number >= 1, got {raw:?}")),
+        },
+    }
+}
+
+/// An optional whole number of seconds >= 1 (`None` when unset).
+fn env_seconds(key: &str) -> Result<Option<Duration>, String> {
+    Ok(env_positive(key)?.map(|secs| Duration::from_secs(u64::from(secs))))
+}
+
+/// A boolean with a default when unset; `1`/`true`/`True` and `0`/`false`/
+/// `False` are accepted, anything else is rejected (a typo must not
+/// silently flip a deployment switch).
+fn env_bool(key: &str, default: bool) -> Result<bool, String> {
+    match env::var(key).as_deref() {
+        Err(_) => Ok(default),
+        Ok("1" | "true" | "True") => Ok(true),
+        Ok("0" | "false" | "False") => Ok(false),
+        Ok(other) => Err(format!("{key} must be true or false, got {other:?}")),
+    }
 }
 
 fn env_flag(key: &str) -> bool {
@@ -282,6 +442,13 @@ mod tests {
             "OIDC_ISSUER_URL",
             "OIDC_AUDIENCE",
             "DATABASE_URL",
+            "POSTGRES_SSLMODE",
+            "DB_POOL_SIZE",
+            "DB_POOL_MIN_SIZE",
+            "DB_POOL_RECYCLE",
+            "DB_POOL_IDLE_TIMEOUT",
+            "DB_CONNECT_TIMEOUT",
+            "RUN_MIGRATIONS_ON_STARTUP",
         ] {
             unsafe { env::remove_var(key) };
         }
@@ -357,9 +524,10 @@ mod tests {
         unsafe { env::set_var("POSTGRES_PASSWORD", "a-real-secret") };
         unsafe { env::set_var("RUSTFS_ACCESS_KEY", "a-real-key") };
         unsafe { env::set_var("RUSTFS_SECRET_KEY", "a-real-secret-key") };
-        // S3_ENDPOINT_URL/REDIS_URL/OIDC_ISSUER_URL left at their plaintext
-        // defaults -- all three must be flagged.
+        // S3_ENDPOINT_URL/REDIS_URL/OIDC_ISSUER_URL/POSTGRES_SSLMODE left at
+        // their plaintext defaults -- all four must be flagged.
         let err = Settings::from_env().expect_err("plaintext URLs must be rejected");
+        assert!(err.contains("POSTGRES_SSLMODE"));
         assert!(err.contains("S3_ENDPOINT_URL"));
         assert!(err.contains("REDIS_URL"));
         assert!(err.contains("OIDC_ISSUER_URL"));
@@ -378,6 +546,149 @@ mod tests {
         unsafe { env::set_var("S3_ENDPOINT_URL", "https://s3.example.com") };
         unsafe { env::set_var("REDIS_URL", "rediss://redis.example.com:6379/0") };
         unsafe { env::set_var("OIDC_ISSUER_URL", "https://issuer.example.com/realms/api") };
+        unsafe { env::set_var("POSTGRES_SSLMODE", "verify-full") };
+        assert!(Settings::from_env().is_ok());
+        clear_all();
+    }
+
+    #[test]
+    fn production_rejects_a_non_encrypting_sslmode() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_all();
+        unsafe { env::set_var("MODE", "production") };
+        unsafe { env::set_var("OIDC_AUDIENCE", "api") };
+        unsafe { env::set_var("POSTGRES_PASSWORD", "a-real-secret") };
+        unsafe { env::set_var("RUSTFS_ACCESS_KEY", "a-real-key") };
+        unsafe { env::set_var("RUSTFS_SECRET_KEY", "a-real-secret-key") };
+        unsafe { env::set_var("S3_ENDPOINT_URL", "https://s3.example.com") };
+        unsafe { env::set_var("REDIS_URL", "rediss://redis.example.com:6379/0") };
+        unsafe { env::set_var("OIDC_ISSUER_URL", "https://issuer.example.com/realms/api") };
+        for weak in ["disable", "allow", "prefer"] {
+            unsafe { env::set_var("POSTGRES_SSLMODE", weak) };
+            let err = Settings::from_env().expect_err("a weak sslmode must be rejected");
+            assert!(err.contains("POSTGRES_SSLMODE"), "{weak}: {err}");
+        }
+        for strong in ["require", "verify-ca", "verify-full"] {
+            unsafe { env::set_var("POSTGRES_SSLMODE", strong) };
+            assert!(Settings::from_env().is_ok(), "{strong}");
+        }
+        clear_all();
+    }
+
+    #[test]
+    fn production_accepts_an_encrypting_sslmode_from_database_url() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_all();
+        unsafe { env::set_var("MODE", "production") };
+        unsafe { env::set_var("OIDC_AUDIENCE", "api") };
+        unsafe { env::set_var("POSTGRES_PASSWORD", "a-real-secret") };
+        unsafe { env::set_var("RUSTFS_ACCESS_KEY", "a-real-key") };
+        unsafe { env::set_var("RUSTFS_SECRET_KEY", "a-real-secret-key") };
+        unsafe { env::set_var("S3_ENDPOINT_URL", "https://s3.example.com") };
+        unsafe { env::set_var("REDIS_URL", "rediss://redis.example.com:6379/0") };
+        unsafe { env::set_var("OIDC_ISSUER_URL", "https://issuer.example.com/realms/api") };
+        unsafe {
+            env::set_var(
+                "DATABASE_URL",
+                "postgres://u:p@h/d?application_name=x&sslmode=verify-full",
+            )
+        };
+        assert!(Settings::from_env().is_ok());
+        unsafe { env::set_var("DATABASE_URL", "postgres://u:p@h/d?sslmode=prefer") };
+        assert!(Settings::from_env().is_err());
+        unsafe { env::set_var("DATABASE_URL", "postgres://u:p@h/d") };
+        assert!(Settings::from_env().is_err());
+        clear_all();
+    }
+
+    #[test]
+    fn db_settings_default_to_todays_behaviour() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_all();
+        let settings = Settings::from_env().unwrap();
+        assert_eq!(settings.db, DbSettings::default());
+        assert_eq!(settings.db.sslmode, None);
+        assert_eq!(settings.db.pool_size, None);
+        assert_eq!(settings.db.connect_timeout, None);
+        assert!(settings.db.run_migrations_on_startup);
+    }
+
+    #[test]
+    fn db_settings_are_read_from_the_environment() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_all();
+        unsafe { env::set_var("POSTGRES_SSLMODE", "verify-ca") };
+        unsafe { env::set_var("DB_POOL_SIZE", "8") };
+        unsafe { env::set_var("DB_POOL_MIN_SIZE", "2") };
+        unsafe { env::set_var("DB_POOL_RECYCLE", "1800") };
+        unsafe { env::set_var("DB_POOL_IDLE_TIMEOUT", "300") };
+        unsafe { env::set_var("DB_CONNECT_TIMEOUT", "5") };
+        unsafe { env::set_var("RUN_MIGRATIONS_ON_STARTUP", "false") };
+        let db = Settings::from_env().unwrap().db;
+        assert_eq!(db.sslmode, Some(PostgresSslMode::VerifyCa));
+        assert_eq!(db.pool_size, Some(8));
+        assert_eq!(db.pool_min_size, Some(2));
+        assert_eq!(db.pool_recycle, Some(Duration::from_secs(1800)));
+        assert_eq!(db.pool_idle_timeout, Some(Duration::from_secs(300)));
+        assert_eq!(db.connect_timeout, Some(Duration::from_secs(5)));
+        assert!(!db.run_migrations_on_startup);
+
+        unsafe { env::set_var("RUN_MIGRATIONS_ON_STARTUP", "True") };
+        assert!(Settings::from_env().unwrap().db.run_migrations_on_startup);
+        unsafe { env::set_var("RUN_MIGRATIONS_ON_STARTUP", "0") };
+        assert!(!Settings::from_env().unwrap().db.run_migrations_on_startup);
+        clear_all();
+    }
+
+    #[test]
+    fn every_sslmode_spelling_parses() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_all();
+        for (raw, expected) in [
+            ("disable", PostgresSslMode::Disable),
+            ("allow", PostgresSslMode::Allow),
+            ("prefer", PostgresSslMode::Prefer),
+            ("require", PostgresSslMode::Require),
+            ("verify-ca", PostgresSslMode::VerifyCa),
+            ("verify-full", PostgresSslMode::VerifyFull),
+        ] {
+            unsafe { env::set_var("POSTGRES_SSLMODE", raw) };
+            assert_eq!(Settings::from_env().unwrap().db.sslmode, Some(expected));
+        }
+        clear_all();
+    }
+
+    #[test]
+    fn rejects_invalid_db_settings() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        for (key, value) in [
+            ("POSTGRES_SSLMODE", "yes"),
+            ("DB_POOL_SIZE", "0"),
+            ("DB_POOL_SIZE", "-1"),
+            ("DB_POOL_SIZE", "many"),
+            ("DB_POOL_MIN_SIZE", "0"),
+            ("DB_POOL_RECYCLE", "0"),
+            ("DB_POOL_IDLE_TIMEOUT", "1.5"),
+            ("DB_CONNECT_TIMEOUT", "soon"),
+            ("RUN_MIGRATIONS_ON_STARTUP", "maybe"),
+        ] {
+            clear_all();
+            unsafe { env::set_var(key, value) };
+            let err = Settings::from_env().expect_err(&format!("{key}={value} must be rejected"));
+            assert!(err.contains(key), "{key}={value}: {err}");
+        }
+        clear_all();
+    }
+
+    #[test]
+    fn rejects_a_min_pool_larger_than_the_max() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_all();
+        unsafe { env::set_var("DB_POOL_SIZE", "4") };
+        unsafe { env::set_var("DB_POOL_MIN_SIZE", "5") };
+        let err = Settings::from_env().expect_err("min > max must be rejected");
+        assert!(err.contains("DB_POOL_MIN_SIZE"));
+        unsafe { env::set_var("DB_POOL_MIN_SIZE", "4") };
         assert!(Settings::from_env().is_ok());
         clear_all();
     }

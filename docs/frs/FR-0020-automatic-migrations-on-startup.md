@@ -16,8 +16,10 @@ Zero-manual-step startup; see ADR 0005.
 
 ## Acceptance criteria
 
-- `main()` calls `migration::Migrator::up` once, before
-  `axum::serve` starts, only when `Mode != Mock`.
+- `main()` calls `migration::Migrator::up` once (through
+  `connect_database`), before `axum::serve` starts, only when
+  `Mode != Mock` and `RUN_MIGRATIONS_ON_STARTUP` is not `false`
+  (`docs/adrs/0022`; default `true`).
 - Verified against a real ephemeral Postgres instance: the `heroes`
   table and `ix_heroes_owner_id` index exist after startup with no
   manual migration step.

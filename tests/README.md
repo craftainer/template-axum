@@ -39,6 +39,14 @@ directory tree, so this instance's four tiers live in different places:
     checks' own happy paths stay deliberately uncovered (`docs/adrs/
     0010`) since they'd need `lib::build_health_registry`'s real-backend
     wiring, not just a live service already in this tier.
+  - `postgres_db_pool.rs` — `db::connect` against live Postgres: the
+    `DB_POOL_*` sizes and timeouts are on the real pool, and closing one
+    handle closes every clone
+    (`docs/adrs/0022`, `NFR-0031`).
+  - `postgres_connect_database.rs` — `connect_database`'s
+    `RUN_MIGRATIONS_ON_STARTUP` switch, on a throwaway database of its
+    own (it sets `DATABASE_URL` for itself, so it is the only test in its
+    binary).
   - `postgres_migration_down.rs` — the `heroes` migration's `down()`
     against real Postgres. `run_migrations` (`lib.rs`) only ever calls
     `up()`, so this is the only place `down()` runs at all.

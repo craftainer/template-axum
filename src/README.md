@@ -20,16 +20,20 @@ each with its own `README.md`:
   Keycloak client-role RBAC.
 - `migration/` — SeaORM migrations, applied automatically at startup.
 
-`config.rs`/`lib.rs`/`main.rs`/`telemetry.rs`/`problem_details.rs`/
+`config.rs`/`db.rs`/`lib.rs`/`main.rs`/`telemetry.rs`/`problem_details.rs`/
 `rate_limit.rs`/`events.rs`/`http_headers.rs` stay flat, outside any
 submodule — each has no resource-specific code and no state of its own
 beyond what it's explicitly passed or reads from `config::Settings`.
 
 - `config.rs` — settings, read from environment variables only; see
   "Configuration" and "MODE" below.
+- `db.rs` — the Postgres pool: `connect_options` builds sea-orm's
+  `ConnectOptions` from `config::DbSettings`, `connect` opens it; see
+  "Database pool" below.
 - `lib.rs` — the crate's library target: every module declaration plus
-  the wiring (`build_state`, `build_router`, `build_event_bus`,
-  `build_health_registry`, `run_migrations`). See "Library and binary"
+  the wiring (`build_state`, `build_state_with_db`, `connect_database`,
+  `build_router`, `build_event_bus`, `build_health_registry`,
+  `run_migrations`). See "Library and binary"
   below.
 - `main.rs` — process entry point, deliberately thin: it only reads
   settings and calls `lib.rs`'s wiring.
@@ -145,6 +149,9 @@ graph LR
     gc --> hc
 ```
 
+`db` is a leaf off `config` (it imports only `config`; only `lib`/`main`
+import it).
+
 An arrow means "may import from" — each module may depend on anything
 upstream of it in this graph, never anything downstream.
 
@@ -157,18 +164,48 @@ and reads `RUSTFS_ACCESS_KEY`/`RUSTFS_SECRET_KEY` (falling back to
 `S3_ACCESS_KEY`/`S3_SECRET_KEY`) the same way `config.py` does in the
 reference implementation. `Mode::Production` additionally refuses to
 construct `Settings` at all if a credential is left at its local
-default, a connection scheme is plaintext, or `OIDC_AUDIENCE` is unset
+default, a connection scheme is plaintext, `POSTGRES_SSLMODE` is not an
+encrypting mode, or `OIDC_AUDIENCE` is unset
 — see `src/config.rs`'s own doc comments and its test suite.
+
+## Database pool
+
+`db::connect_options` turns `config::DbSettings` into sea-orm's
+`ConnectOptions`; a setting is passed on only when its variable is set, so
+an unconfigured process keeps sea-orm/sqlx's defaults. `docs/adrs/0022` and
+`docs/nfrs/NFR-0031` give the reasoning; the variables are:
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `DB_POOL_SIZE` | unset (sqlx: 10) | Maximum pool connections, integer >= 1. Budget replicas x this against Postgres's `max_connections`. |
+| `DB_POOL_MIN_SIZE` | unset (sqlx: 0) | Connections kept open while idle, integer >= 1, at most `DB_POOL_SIZE`. |
+| `DB_POOL_RECYCLE` | unset (sqlx: 30 min) | Seconds before a connection is replaced, integer >= 1. |
+| `DB_POOL_IDLE_TIMEOUT` | unset (sqlx: 10 min) | Seconds an unused connection may idle, integer >= 1. |
+| `DB_CONNECT_TIMEOUT` | unset (sqlx: 30 s) | Seconds a caller waits for a connection, covering a free slot and opening a new one (sea-orm has one timeout for both); integer >= 1. |
+| `POSTGRES_SSLMODE` | unset | `disable`, `allow`, `prefer`, `require`, `verify-ca` or `verify-full`; overrides a `sslmode` in `DATABASE_URL`. `Mode::Production` requires `require`, `verify-ca` or `verify-full`. |
+| `RUN_MIGRATIONS_ON_STARTUP` | `true` | `false` skips the startup migration (see "Migrations"). |
+
+A value that does not parse, or is below 1, fails `Settings::from_env`
+rather than being ignored. There is no `DB_POOL_MODE`, `DB_MAX_OVERFLOW`
+or `DB_COMMAND_TIMEOUT` (template-fastapi has them); `docs/adrs/0022` says why.
+Behind PgBouncer in transaction mode the pooler must be >= 1.21 with
+`max_prepared_statements` > 0. `main()` keeps a handle to the pool
+(`connect_database` + `build_state_with_db`) and closes it once
+`axum::serve` returns.
 
 ## Migrations
 
-Pending SeaORM migrations apply automatically: `main()` calls
+Pending SeaORM migrations apply automatically: `connect_database` calls
 `migration::Migrator::up` once, before `axum::serve` starts, off any
 per-request path — but only when `Mode != Mock` (there is no database to
-migrate under `Mode::Mock`; see `hero::repositories::hero_memory`). This
-happens unconditionally on every real process start (there is no
-separate "apply migrations" step to remember) — verified against a real
-ephemeral Postgres instance in phase 2's own smoke test.
+migrate under `Mode::Mock`; see `hero::repositories::hero_memory`) and
+`RUN_MIGRATIONS_ON_STARTUP` is not `false`. By default this happens on
+every real process start (there is no separate "apply migrations" step to
+remember) — verified against a real ephemeral Postgres instance in phase
+2's own smoke test. Set it to `false` when several replicas could race or a
+canary runs; the migrations must then be applied some other way (a release
+with the default, or `sea-orm-cli migrate up` pointed straight at
+Postgres, never through a transaction-mode pooler).
 
 ## OIDC / auth
 

@@ -133,6 +133,7 @@ pub fn integration_settings() -> Settings {
         postgres_db: "app".to_string(),
         postgres_host: "localhost".to_string(),
         postgres_port: 5432,
+        db: Default::default(),
         s3_endpoint_url: "http://localhost:9000".to_string(),
         s3_access_key: "rustfsadmin".to_string(),
         s3_secret_key: "rustfsadmin".to_string(),
@@ -194,6 +195,7 @@ pub fn dev_settings(oidc_audience: Option<String>) -> Arc<Settings> {
             .ok()
             .and_then(|port| port.parse().ok())
             .unwrap_or(5432),
+        db: Default::default(),
         s3_endpoint_url: std::env::var("S3_ENDPOINT_URL")
             .unwrap_or_else(|_| "http://localhost:9000".into()),
         s3_access_key: std::env::var("S3_ACCESS_KEY").unwrap_or_else(|_| "rustfsadmin".into()),

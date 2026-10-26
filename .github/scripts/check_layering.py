@@ -43,6 +43,8 @@ DEFAULT_SRC = Path(__file__).resolve().parent.parent.parent / "src"
 # always reference a sibling in its own category).
 ALLOWED_IMPORTS: dict[str, set[str]] = {
     "config": set(),
+    # The Postgres pool builder (docs/adrs/0022): reads Settings only.
+    "db": {"config"},
     # Cross-cutting utility modules (src/README.md: "stay flat, outside
     # any submodule ... no resource-specific code and no state of its
     # own"). problem_details reaches into generic::views/repositories
