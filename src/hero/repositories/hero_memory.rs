@@ -11,10 +11,10 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 use chrono::Utc;
 
-use crate::generic::repositories::filtering::{FilterClause, FilterOp, FilterValue, SortClause};
-use crate::generic::repositories::{ListOptions, RepoError, Repository};
 use crate::hero::models::hero;
 use crate::hero::views::hero::{HeroCreate, HeroUpdate};
+use craftainer_crud::repositories::filtering::{FilterClause, FilterOp, FilterValue, SortClause};
+use craftainer_crud::repositories::{ListOptions, RepoError, Repository};
 
 /// Whether `hero` satisfies every clause in `filters` (AND), interpreting
 /// each clause directly against the matching `hero::Model` field -- the
@@ -131,6 +131,17 @@ fn apply_sort(items: &mut [hero::Model], sort: &[SortClause]) {
     }
 }
 
+/// Archive visibility: `only_archived` (which implies `include_archived`)
+/// keeps just the soft-deleted rows; otherwise live rows, plus archived ones
+/// when `include_archived`.
+fn visible(hero: &hero::Model, include_archived: bool, only_archived: bool) -> bool {
+    if only_archived {
+        hero.archived_at.is_some()
+    } else {
+        include_archived || hero.archived_at.is_none()
+    }
+}
+
 pub struct HeroMemoryRepository {
     records: Mutex<BTreeMap<i32, hero::Model>>,
     next_id: Mutex<i32>,
@@ -164,7 +175,7 @@ impl Repository for HeroMemoryRepository {
             .expect("hero memory repository lock poisoned");
         let mut items: Vec<hero::Model> = records
             .values()
-            .filter(|hero| opts.include_archived || hero.archived_at.is_none())
+            .filter(|hero| visible(hero, opts.include_archived, opts.only_archived))
             .filter(|hero| matches_all(hero, &opts.filters))
             .cloned()
             .collect();
@@ -185,6 +196,7 @@ impl Repository for HeroMemoryRepository {
         &self,
         filters: &[FilterClause],
         include_archived: bool,
+        only_archived: bool,
     ) -> Result<u64, RepoError> {
         let records = self
             .records
@@ -192,7 +204,7 @@ impl Repository for HeroMemoryRepository {
             .expect("hero memory repository lock poisoned");
         Ok(records
             .values()
-            .filter(|hero| include_archived || hero.archived_at.is_none())
+            .filter(|hero| visible(hero, include_archived, only_archived))
             .filter(|hero| matches_all(hero, filters))
             .count() as u64)
     }
@@ -378,6 +390,7 @@ mod tests {
             skip: 0,
             limit: 100,
             include_archived: false,
+            only_archived: false,
             filters,
             sort,
         }
@@ -468,10 +481,35 @@ mod tests {
                     value: FilterValue::DateTime(archived.archived_at.unwrap()),
                 }],
                 true,
+                false,
             )
             .await
             .unwrap();
         assert_eq!(by_archived, 1);
+    }
+
+    #[tokio::test]
+    async fn only_archived_lists_and_counts_just_the_soft_deleted_rows() {
+        let (repo, alpha, beta) = seeded_repo().await;
+        repo.delete(alpha.id, "alice").await.unwrap();
+
+        let only = repo
+            .list(ListOptions {
+                only_archived: true,
+                ..list_opts(vec![], vec![])
+            })
+            .await
+            .unwrap();
+        assert_eq!(only.iter().map(|h| h.id).collect::<Vec<_>>(), [alpha.id]);
+        assert_eq!(repo.count(&[], false, true).await.unwrap(), 1);
+        // `only_archived` wins over `include_archived`, and live rows are
+        // still counted without it.
+        assert_eq!(repo.count(&[], true, true).await.unwrap(), 1);
+        assert_eq!(repo.count(&[], false, false).await.unwrap(), 1);
+        assert_eq!(repo.count(&[], true, false).await.unwrap(), 2);
+        // The live row is excluded from the trash, and still readable.
+        assert!(!only.iter().any(|h| h.id == beta.id));
+        assert!(repo.get(beta.id, false).await.unwrap().is_some());
     }
 
     #[tokio::test]

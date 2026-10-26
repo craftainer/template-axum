@@ -32,8 +32,6 @@ use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::{Form, Router};
 
-use crate::events::EventAction;
-use crate::generic::controllers::{crud_actions, crud_events};
 use crate::hero::controllers::heroes::HERO_WRITE_RATE_SCOPE;
 use crate::hero::controllers::{
     AppState, HERO_DELETE_ROLES, HERO_EVENT_RESOURCE, HERO_READ_ROLES, HERO_WRITE_ROLES,
@@ -42,6 +40,8 @@ use crate::hero::models::hero;
 use crate::hero::views::hero_form::HeroFormFields;
 use crate::oidc::{Claims, HasOidcVerifier};
 use crate::problem_details::AppError;
+use craftainer_crud::controllers::{crud_actions, crud_events};
+use craftainer_crud::events::EventAction;
 
 const COMPONENTS_JS: &str = include_str!("heroes_web_components.js");
 
@@ -179,7 +179,11 @@ async fn form_page(
     if let Err(err) = claims.require_any_role(&state.settings.oidc_client_id, HERO_READ_ROLES) {
         return err.into_response();
     }
-    let heroes = match state.hero_crud.list(0, 100, false, vec![], vec![]).await {
+    let heroes = match state
+        .hero_crud
+        .list(0, 100, false, false, vec![], vec![])
+        .await
+    {
         Ok(heroes) => heroes,
         Err(err) => return AppError::from(err).into_response(),
     };
@@ -356,12 +360,12 @@ pub fn router() -> Router<AppState> {
 mod tests {
     use super::*;
     use crate::config::{Mode, Settings};
-    use crate::health::HealthRegistry;
     use crate::hero::controllers::DynHeroRepository;
     use crate::hero::repositories::hero_memory::HeroMemoryRepository;
     use crate::oidc::OidcVerifier;
     use axum::body::{to_bytes, Body};
     use axum::http::Request;
+    use craftainer_observability::health::HealthRegistry;
     use std::sync::Arc;
     use tower::ServiceExt;
 
@@ -399,11 +403,11 @@ mod tests {
             oidc: Arc::new(OidcVerifier::new(settings.clone())),
             settings,
             health_registry: Arc::new(HealthRegistry::new()),
-            hero_crud: Arc::new(crate::crud::CrudService::new(DynHeroRepository(Box::new(
-                HeroMemoryRepository::new(),
-            )))),
+            hero_crud: Arc::new(craftainer_crud::crud::CrudService::new(DynHeroRepository(
+                Box::new(HeroMemoryRepository::new()),
+            ))),
             rate_limiter: Arc::new(crate::rate_limit::RateLimiter::mock()),
-            events: Arc::new(crate::events::EventBus::mock()),
+            events: Arc::new(craftainer_crud::events::EventBus::mock()),
         };
         router().with_state(state)
     }
@@ -440,25 +444,26 @@ mod tests {
     struct FaultyRepository;
 
     #[async_trait::async_trait]
-    impl crate::generic::repositories::Repository for FaultyRepository {
+    impl craftainer_crud::repositories::Repository for FaultyRepository {
         type Model = hero::Model;
         type Create = crate::hero::views::hero::HeroCreate;
         type Update = crate::hero::views::hero::HeroUpdate;
 
         async fn list(
             &self,
-            _opts: crate::generic::repositories::ListOptions,
-        ) -> Result<Vec<Self::Model>, crate::generic::repositories::RepoError> {
-            Err(crate::generic::repositories::RepoError::Backend(
+            _opts: craftainer_crud::repositories::ListOptions,
+        ) -> Result<Vec<Self::Model>, craftainer_crud::repositories::RepoError> {
+            Err(craftainer_crud::repositories::RepoError::Backend(
                 "boom".to_string(),
             ))
         }
 
         async fn count(
             &self,
-            _filters: &[crate::generic::repositories::filtering::FilterClause],
+            _filters: &[craftainer_crud::repositories::filtering::FilterClause],
             _include_archived: bool,
-        ) -> Result<u64, crate::generic::repositories::RepoError> {
+            _only_archived: bool,
+        ) -> Result<u64, craftainer_crud::repositories::RepoError> {
             unimplemented!()
         }
 
@@ -466,7 +471,7 @@ mod tests {
             &self,
             _id: i32,
             _include_archived: bool,
-        ) -> Result<Option<Self::Model>, crate::generic::repositories::RepoError> {
+        ) -> Result<Option<Self::Model>, craftainer_crud::repositories::RepoError> {
             unimplemented!()
         }
 
@@ -474,8 +479,8 @@ mod tests {
             &self,
             _owner_id: &str,
             _data: Self::Create,
-        ) -> Result<Self::Model, crate::generic::repositories::RepoError> {
-            Err(crate::generic::repositories::RepoError::Backend(
+        ) -> Result<Self::Model, craftainer_crud::repositories::RepoError> {
+            Err(craftainer_crud::repositories::RepoError::Backend(
                 "boom".to_string(),
             ))
         }
@@ -485,15 +490,15 @@ mod tests {
             _id: i32,
             _owner_id: &str,
             _data: Self::Update,
-        ) -> Result<Option<Self::Model>, crate::generic::repositories::RepoError> {
+        ) -> Result<Option<Self::Model>, craftainer_crud::repositories::RepoError> {
             unimplemented!()
         }
 
         async fn update_many(
             &self,
-            _filters: &[crate::generic::repositories::filtering::FilterClause],
+            _filters: &[craftainer_crud::repositories::filtering::FilterClause],
             _data: Self::Update,
-        ) -> Result<Vec<Self::Model>, crate::generic::repositories::RepoError> {
+        ) -> Result<Vec<Self::Model>, craftainer_crud::repositories::RepoError> {
             unimplemented!()
         }
 
@@ -501,14 +506,14 @@ mod tests {
             &self,
             _id: i32,
             _owner_id: &str,
-        ) -> Result<bool, crate::generic::repositories::RepoError> {
+        ) -> Result<bool, craftainer_crud::repositories::RepoError> {
             unimplemented!()
         }
 
         async fn delete_many(
             &self,
-            _filters: &[crate::generic::repositories::filtering::FilterClause],
-        ) -> Result<Vec<Self::Model>, crate::generic::repositories::RepoError> {
+            _filters: &[craftainer_crud::repositories::filtering::FilterClause],
+        ) -> Result<Vec<Self::Model>, craftainer_crud::repositories::RepoError> {
             unimplemented!()
         }
     }
@@ -519,11 +524,11 @@ mod tests {
             oidc: Arc::new(OidcVerifier::new(settings.clone())),
             settings,
             health_registry: Arc::new(HealthRegistry::new()),
-            hero_crud: Arc::new(crate::crud::CrudService::new(DynHeroRepository(Box::new(
-                FaultyRepository,
-            )))),
+            hero_crud: Arc::new(craftainer_crud::crud::CrudService::new(DynHeroRepository(
+                Box::new(FaultyRepository),
+            ))),
             rate_limiter: Arc::new(crate::rate_limit::RateLimiter::mock()),
-            events: Arc::new(crate::events::EventBus::mock()),
+            events: Arc::new(craftainer_crud::events::EventBus::mock()),
         };
         router().with_state(state)
     }
@@ -987,11 +992,11 @@ mod tests {
             oidc: Arc::new(OidcVerifier::new(settings.clone())),
             settings,
             health_registry: Arc::new(HealthRegistry::new()),
-            hero_crud: Arc::new(crate::crud::CrudService::new(DynHeroRepository(Box::new(
-                HeroMemoryRepository::new(),
-            )))),
+            hero_crud: Arc::new(craftainer_crud::crud::CrudService::new(DynHeroRepository(
+                Box::new(HeroMemoryRepository::new()),
+            ))),
             rate_limiter: Arc::new(crate::rate_limit::RateLimiter::mock()),
-            events: Arc::new(crate::events::EventBus::mock()),
+            events: Arc::new(craftainer_crud::events::EventBus::mock()),
         };
         router().with_state(state)
     }

@@ -1,6 +1,6 @@
 //! e2e-equivalent tier (`NFR-0024`, ports reference `NFR-0021`): `reqwest`
 //! driving one live `MODE=dev` process and one live `MODE=mock` process
-//! over real HTTP -- unlike `tests/postgres_*.rs`/`tests/mqtt_events.rs`,
+//! over real HTTP -- unlike `tests/postgres_*.rs`,
 //! which build the router in-process via `tower::ServiceExt::oneshot`,
 //! this spawns the actual compiled binary (`env!("CARGO_BIN_EXE_
 //! template-axum")`) and talks to it the way a real client would: over a
@@ -245,6 +245,71 @@ async fn hero_and_audit_role_journey(client: &reqwest::Client, backend: Backend)
         204,
         "maintainer should be able to delete its own record"
     );
+
+    // Behaviour that came with craftainer-crud (docs/adrs/0020), over real
+    // HTTP. `only_archived` lists the record just soft-deleted...
+    let trash: Value = client
+        .get(format!(
+            "{BASE_URL}/crud/v1/heroes/v2/json?only_archived=true&id__in={id}"
+        ))
+        .bearer_auth(&viewer)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        trash.as_array().map(|heroes| heroes.len()),
+        Some(1),
+        "only_archived should list the soft-deleted hero: {trash}"
+    );
+    // ...an id next to a filter is refused instead of the filter being
+    // ignored...
+    let id_and_filter = client
+        .get(format!(
+            "{BASE_URL}/crud/v1/heroes/v2/json?id={id}&power_level=9"
+        ))
+        .bearer_auth(&viewer)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        id_and_filter.status(),
+        422,
+        "an id cannot combine with filters"
+    );
+    // ...and a client-chosen event subscriber id is replaced by a minted one.
+    let mut events = client
+        .get(format!(
+            "{BASE_URL}/crud/v1/heroes/v2/json/events?subscriber_id=made-up"
+        ))
+        .bearer_auth(&viewer)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(events.status(), 200);
+    let first_frame = String::from_utf8_lossy(&events.chunk().await.unwrap().unwrap()).to_string();
+    assert!(
+        first_frame.contains("event: subscriber") && !first_frame.contains("made-up"),
+        "{first_frame}"
+    );
+    drop(events);
+
+    // The readiness body keeps its shape: `status` plus one entry per
+    // dependency, whatever backs it (real services in dev, fakes in mock).
+    let ready: Value = client
+        .get(format!("{BASE_URL}/health/ready"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(ready["status"], "ok", "{ready}");
+    for name in ["database", "redis", "s3", "oidc"] {
+        assert_eq!(ready["checks"][name]["healthy"], true, "{name}: {ready}");
+    }
 
     // /audit: security in, viewer out (FR-0033).
     let audit = client

@@ -4,29 +4,23 @@
 //! and state rather than each re-deriving the wiring.
 //!
 //! See `src/README.md` for the module layering this file sits at the top
-//! of: `config` -> `oidc` -> `generic::models`/`hero::models` ->
-//! `generic::views`/`hero::views` -> `generic::repositories`/
-//! `hero::repositories` -> `crud` -> `health` ->
-//! `generic::controllers`/`hero::controllers`, with `events`/
-//! `rate_limit`/`telemetry`/`problem_details`/`http_headers` flat
-//! alongside. `generic`/`hero` are this app's two resource-layering
-//! packages (see `src/README.md`'s "Generic vs. Hero-specific split");
-//! the wiring functions below are the only thing above `controllers`, and
-//! `main.rs` does nothing but call them.
+//! of: `config` -> `oidc` -> `hero::models` -> `hero::views` ->
+//! `hero::repositories` -> `generic::controllers`/`hero::controllers`,
+//! with `rate_limit`/`problem_details`/`http_headers` flat alongside. The
+//! generic CRUD layer and the health/logging layer are the
+//! `craftainer-crud` and `craftainer-observability` crates
+//! (docs/adrs/0020); the wiring functions below are the only thing above
+//! `controllers`, and `main.rs` does nothing but call them.
 
 pub mod config;
-pub mod crud;
 pub mod db;
-pub mod events;
 pub mod generic;
-pub mod health;
 pub mod hero;
 pub mod http_headers;
 pub mod migration;
 pub mod oidc;
 pub mod problem_details;
 pub mod rate_limit;
-pub mod telemetry;
 
 use std::sync::Arc;
 
@@ -35,13 +29,14 @@ use sea_orm_migration::MigratorTrait;
 use tower_http::trace::TraceLayer;
 
 use config::{Mode, Settings};
-use crud::CrudService;
-use events::EventBus;
-use generic::controllers as generic_controllers;
-use health::checks::{
-    DatabaseHealthCheck, MockHealthCheck, OidcHealthCheck, RedisHealthCheck, S3HealthCheck,
+use craftainer_crud::crud::CrudService;
+use craftainer_crud::events::EventBus;
+use craftainer_observability::health::checks::{
+    DatabaseHealthCheck, HttpHealthCheck, MockHealthCheck, RedisHealthCheck, S3HealthCheck,
 };
-use health::HealthRegistry;
+use craftainer_observability::health::router::router as health_router;
+use craftainer_observability::health::HealthRegistry;
+use generic::controllers as generic_controllers;
 use hero::controllers::{self as hero_controllers, AppState};
 use hero::repositories::hero_memory::HeroMemoryRepository;
 use hero::repositories::hero_sea_orm::HeroSeaOrmRepository;
@@ -62,18 +57,28 @@ pub async fn build_health_registry(
     settings: &Settings,
     db: Option<sea_orm::DatabaseConnection>,
 ) -> HealthRegistry {
+    // `register` rejects a duplicate check name; the names below are fixed
+    // and distinct, so a failure is a programming error.
+    const DISTINCT: &str = "health check names are distinct";
     let mut registry = HealthRegistry::new();
     if settings.mode == Mode::Mock {
-        registry.register(Box::new(MockHealthCheck::new("database")));
-        registry.register(Box::new(MockHealthCheck::new("redis")));
-        registry.register(Box::new(MockHealthCheck::new("s3")));
-        registry.register(Box::new(MockHealthCheck::new("oidc")));
+        for name in ["database", "redis", "s3", "oidc"] {
+            registry
+                .register(Box::new(MockHealthCheck::new(name)))
+                .expect(DISTINCT);
+        }
         return registry;
     }
 
     let db = db.expect("a real database connection is required outside Mode::Mock");
-    registry.register(Box::new(DatabaseHealthCheck::new(db)));
-    registry.register(Box::new(RedisHealthCheck::new(settings.redis_url.clone())));
+    registry
+        .register(Box::new(DatabaseHealthCheck::new(
+            db.get_postgres_connection_pool().clone(),
+        )))
+        .expect(DISTINCT);
+    registry
+        .register(Box::new(RedisHealthCheck::new(settings.redis_url.clone())))
+        .expect(DISTINCT);
 
     let s3_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
         .endpoint_url(&settings.s3_endpoint_url)
@@ -88,10 +93,18 @@ pub async fn build_health_registry(
         .load()
         .await;
     let s3_client = aws_sdk_s3::Client::new(&s3_config);
-    registry.register(Box::new(S3HealthCheck::new(s3_client)));
-    registry.register(Box::new(OidcHealthCheck::new(
-        settings.oidc_issuer_url.clone(),
-    )));
+    registry
+        .register(Box::new(S3HealthCheck::new(s3_client)))
+        .expect(DISTINCT);
+    registry
+        .register(Box::new(HttpHealthCheck::new(
+            "oidc",
+            format!(
+                "{}/.well-known/openid-configuration",
+                settings.oidc_issuer_url.trim_end_matches('/')
+            ),
+        )))
+        .expect(DISTINCT);
 
     registry
 }
@@ -179,7 +192,7 @@ pub async fn build_state_with_db(
 /// `Mode::Mock`.
 pub fn build_router(state: AppState) -> Router {
     let mut app = Router::new()
-        .nest("/health", generic_controllers::health::router())
+        .nest("/health", health_router())
         .nest("/audit", generic_controllers::audit::router())
         .nest(
             "/crud/v1/heroes/v2/json",
@@ -264,10 +277,10 @@ mod tests {
         let bus = build_event_bus(&mock_settings());
         // The broker-backed variant would need a live Mosquitto; this one
         // fans out in-process, which is what makes MODE=mock container-free.
-        let mut stream = bus.subscribe("heroes", "sub-1").await.unwrap();
-        bus.publish(events::CrudEvent::new(
+        let (_id, mut stream) = bus.subscribe("heroes", None).await.unwrap();
+        bus.publish(craftainer_crud::events::CrudEvent::new(
             "heroes",
-            events::EventAction::Create,
+            craftainer_crud::events::EventAction::Create,
             vec![1],
         ))
         .await;

@@ -39,14 +39,13 @@ path = "src/main.rs"
 [dependencies]
 # HTTP framework and async runtime -- phase 1's /health/live route.
 axum = { version = "=0.8.9", features = ["json"] }
-tokio = { version = "=1.53.1", features = ["rt-multi-thread", "macros", "signal", "time"] }
+tokio = { version = "=1.54.1", features = ["rt-multi-thread", "macros", "signal", "time"] }
 tower = "=0.5.3"
 tower-http = { version = "=0.7.1", features = ["trace"] }
 
-# Structured JSON logging -- see docs/adrs/0007-structured-json-logging-only.md
-# in template-fastapi, ported to this instance's own docs in phase 3.
+# Log call sites; the subscriber (structured JSON, optional OTLP export) is
+# installed by craftainer-observability (docs/adrs/0006, 0020).
 tracing = "=0.1.44"
-tracing-subscriber = { version = "=0.3.23", features = ["json", "env-filter"] }
 
 # Below this line: not wired up yet (no routes/config use them), but pinned
 # now so Cargo.lock already reflects phase 2's real dependency graph -- see
@@ -99,21 +98,14 @@ jsonwebtoken = { version = "=11.0.0", features = ["aws_lc_rs"] }
 # pulling in a second HTTP client crate for one test file.
 reqwest = { version = "=0.13.5", default-features = false, features = ["json", "rustls", "form"] }
 
-# Object-safe async trait methods for the health-check registry (see
-# src/health/mod.rs) -- native async-fn-in-traits (stable since Rust 1.75)
-# isn't dyn-compatible, and HealthRegistry holds a heterogeneous
-# Vec<Box<dyn HealthCheck>>.
+# Object-safe async trait methods for the `Repository` implementations
+# (src/hero/repositories/): native async-fn-in-traits (stable since Rust
+# 1.75) isn't dyn-compatible, and `craftainer_crud::dyn_repository!` boxes
+# them.
 async-trait = "=0.1.92"
 
-# Concurrent execution of every registered health check (see
-# src/health/mod.rs's HealthRegistry::run_all) -- the standard
-# join-a-heterogeneous-set-of-futures primitive; tokio itself only offers
-# join!/select! for a statically-known, fixed set of futures.
-futures = "=0.3.34"
-
 serde = { version = "=1.0.229", features = ["derive"] }
-serde_json = "=1.0.151"
-thiserror = "=2.0.20"
+serde_json = "=1.0.154"
 chrono = { version = "=0.4.45", features = ["serde"] }
 
 # XML sibling representation for Hero -- docs/adrs/0014, Tier C item 4.
@@ -129,40 +121,19 @@ quick-xml = { version = "=0.42.0", features = ["serialize"] }
 # segment instead.
 base64 = "=0.22.1"
 
-# MQTT client backing the CRUD event stream (src/events.rs) -- see
-# docs/adrs/0016-mqtt-backed-sse-crud-event-stream.md for why rumqttc (pure
-# Rust, tokio-native AsyncClient/EventLoop pair) rather than the paho-mqtt C
-# bindings. default-features off: rumqttc's default "use-rustls" feature
-# pulls in its own rustls/tokio-rustls copy for TLS-to-broker support this
-# app doesn't use (the broker is an in-network, plaintext:1883 stack
-# service), and keeping a single rustls copy in the graph is the same
-# reasoning aws-sdk-s3/reqwest above are configured with.
-rumqttc = { version = "=0.25.1", default-features = false }
-
-# Subscriber-id generation for the event stream (src/events.rs): a
-# subscriber id is a capability (whoever holds it resumes that persistent
-# MQTT session), so it comes from the OS CSPRNG, not a counter. getrandom
-# directly rather than uuid/rand -- the id is an opaque string this app
-# never parses, so a UUID's formatting/versioning machinery would buy
-# nothing over 128 hex-encoded random bits.
-getrandom = "=0.4.3"
-
-# Optional OTLP log export (src/telemetry.rs, docs/adrs/0006) -- a second
-# tracing_subscriber::Layer, added only when OTEL_EXPORTER_OTLP_ENDPOINT
-# is set; ADR 0006's structured-JSON-stdout logging stays the
-# unconditional default either way. "logs" only on every crate below (no
-# "trace"/"metrics") -- this app emits no spans or metrics, only logs.
-# opentelemetry-otlp's "http-proto"/"reqwest-client" (rather than its
-# default gRPC/tonic exporter) reuses the `reqwest`+`rustls` stack already
-# in this graph instead of pulling in a second HTTP/TLS implementation
-# (same reasoning as aws-sdk-s3/reqwest/rumqttc's own feature choices
-# above).
-opentelemetry = { version = "=0.32.0", default-features = false, features = ["logs"] }
-opentelemetry_sdk = { version = "=0.32.1", default-features = false, features = ["logs", "rt-tokio"] }
-opentelemetry-otlp = { version = "=0.32.0", default-features = false, features = ["logs", "http-proto", "reqwest-client"] }
-opentelemetry-appender-tracing = { version = "=0.32.0", default-features = false }
+# The published crates that replaced the app's own copies (docs/adrs/0020).
+# Exact pins like everything else here; features are exactly what the app
+# uses: `mqtt` for the broker-backed event bus (`EventBus::connect`); the
+# four health-check clients (`postgres`, `redis`, `s3`, `http`), `otel` for
+# the OTLP log export and `testing` for `MockHealthCheck`, which
+# `Mode::Mock` registers in non-test code (the feature name is the crate's;
+# a production build never registers it outside `Mode::Mock`).
+craftainer-crud = { version = "=0.2.0", features = ["mqtt"] }
+craftainer-observability = { version = "=0.2.1", features = ["postgres", "redis", "s3", "http", "otel", "testing"] }
 
 [dev-dependencies]
+# tests/ and a few src/ tests read SSE bodies as a stream.
+futures = "=0.3.34"
 tower = { version = "=0.5.3", features = ["util"] }
 # tests/e2e.rs's `AppProcess::drop` only: `std::process::Child` has no
 # signal-other-than-kill API, so sending a real SIGTERM (for a clean

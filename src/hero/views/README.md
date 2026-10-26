@@ -2,7 +2,7 @@
 
 Hero's half of the View layer (see `src/README.md`'s "Generic vs.
 Hero-specific split"): request/response DTOs for this template's worked
-CRUD example. May import from `hero::models`/`generic::views` (for
+CRUD example. May import from `hero::models`/`craftainer_crud::views` (for
 `From<Model> for ReadDto` conversions and the shared `FieldError`),
 never the reverse.
 

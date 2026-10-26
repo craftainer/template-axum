@@ -175,7 +175,7 @@ pub struct Settings {
 
     pub redis_url: String,
 
-    /// The MQTT broker backing the CRUD event stream (`src/events.rs`,
+    /// The MQTT broker backing the CRUD event stream (`craftainer_crud::events`,
     /// `docs/adrs/0016`). Host/port rather than a URL, matching rumqttc's
     /// own `MqttOptions::new(id, host, port)` shape -- there is no
     /// credential here to protect, so `validate()`'s production checks have

@@ -32,7 +32,7 @@ pub enum Relation {}
 
 impl ActiveModelBehavior for ActiveModel {}
 
-impl crate::generic::models::HasId for Model {
+impl craftainer_crud::models::HasId for Model {
     fn id(&self) -> i32 {
         self.id
     }

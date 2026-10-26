@@ -8,7 +8,6 @@
 //! delete/list/filter/sort/bulk behave identically regardless of which
 //! sibling a caller uses.
 
-use std::collections::HashMap;
 use std::net::SocketAddr;
 
 use axum::body::Bytes;
@@ -20,12 +19,6 @@ use axum::Router;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
-use crate::crud::DEFAULT_LIMIT;
-use crate::events::EventAction;
-use crate::generic::controllers::crud_actions::{self, DeleteOutcome, ListOrGet, UpdateOutcome};
-use crate::generic::controllers::crud_events;
-use crate::generic::controllers::crud_query::{parse_filters, parse_sort};
-use crate::generic::views::FieldError;
 use crate::hero::controllers::heroes::{HERO_FIELD_SPECS, HERO_WRITE_RATE_SCOPE};
 use crate::hero::controllers::{
     AppState, HERO_DELETE_ROLES, HERO_EVENT_RESOURCE, HERO_READ_ROLES, HERO_WRITE_ROLES,
@@ -34,6 +27,14 @@ use crate::hero::views::hero::{HeroCreate, HeroListQuery, HeroUpdate};
 use crate::hero::views::hero_xml::HeroReadXml;
 use crate::oidc::AuthClaims;
 use crate::problem_details::AppError;
+use craftainer_crud::controllers::crud_actions::{self, DeleteOutcome, ListOrGet, UpdateOutcome};
+use craftainer_crud::controllers::crud_events;
+use craftainer_crud::controllers::crud_query::{
+    parse_archived_scope, parse_filters, parse_sort, reject_only_archived,
+};
+use craftainer_crud::crud::DEFAULT_LIMIT;
+use craftainer_crud::events::EventAction;
+use craftainer_crud::views::FieldError;
 
 /// Wraps a list response as `<heroes><hero>...</hero>...</heroes>` --
 /// `quick_xml`'s serde support repeats a `Vec` field using the field's own
@@ -76,10 +77,10 @@ async fn list_or_get(
     State(state): State<AppState>,
     AuthClaims(claims): AuthClaims,
     Query(query): Query<HeroListQuery>,
-    Query(raw_params): Query<HashMap<String, String>>,
+    Query(raw_params): Query<Vec<(String, String)>>,
 ) -> Result<Response, AppError> {
     claims.require_any_role(&state.settings.oidc_client_id, HERO_READ_ROLES)?;
-    let include_archived = query.include_archived.unwrap_or(false);
+    let archived = parse_archived_scope(&raw_params).map_err(AppError::UnprocessableEntity)?;
     let filters =
         parse_filters(HERO_FIELD_SPECS, &raw_params).map_err(AppError::UnprocessableEntity)?;
     let sort = parse_sort(HERO_FIELD_SPECS, &raw_params).map_err(AppError::UnprocessableEntity)?;
@@ -91,7 +92,7 @@ async fn list_or_get(
         query.id,
         skip,
         limit,
-        include_archived,
+        archived,
         filters,
         sort,
     )
@@ -147,7 +148,7 @@ async fn update(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     AuthClaims(claims): AuthClaims,
     Query(query): Query<HeroListQuery>,
-    Query(raw_params): Query<HashMap<String, String>>,
+    Query(raw_params): Query<Vec<(String, String)>>,
     body: Bytes,
 ) -> Result<Response, AppError> {
     state
@@ -164,6 +165,7 @@ async fn update(
     payload.validate().map_err(AppError::UnprocessableEntity)?;
     let filters =
         parse_filters(HERO_FIELD_SPECS, &raw_params).map_err(AppError::UnprocessableEntity)?;
+    reject_only_archived(&raw_params).map_err(AppError::UnprocessableEntity)?;
     let owner_id = claims.subject()?.to_string();
 
     match crud_actions::resolve_update(
@@ -204,7 +206,7 @@ async fn delete_hero(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     AuthClaims(claims): AuthClaims,
     Query(query): Query<HeroListQuery>,
-    Query(raw_params): Query<HashMap<String, String>>,
+    Query(raw_params): Query<Vec<(String, String)>>,
 ) -> Result<Response, AppError> {
     state
         .rate_limiter
@@ -218,6 +220,7 @@ async fn delete_hero(
     claims.require_any_role(&state.settings.oidc_client_id, HERO_DELETE_ROLES)?;
     let filters =
         parse_filters(HERO_FIELD_SPECS, &raw_params).map_err(AppError::UnprocessableEntity)?;
+    reject_only_archived(&raw_params).map_err(AppError::UnprocessableEntity)?;
     let owner_id = claims.subject()?.to_string();
 
     match crud_actions::resolve_delete(
@@ -262,13 +265,13 @@ pub fn router() -> Router<AppState> {
 mod tests {
     use super::*;
     use crate::config::{Mode, Settings};
-    use crate::health::HealthRegistry;
     use crate::hero::controllers::DynHeroRepository;
     use crate::hero::repositories::hero_memory::HeroMemoryRepository;
     use crate::oidc::OidcVerifier;
     use crate::rate_limit::RateLimiter;
     use axum::body::{to_bytes, Body};
     use axum::http::Request;
+    use craftainer_observability::health::HealthRegistry;
     use std::sync::Arc;
     use tower::ServiceExt;
 
@@ -306,11 +309,11 @@ mod tests {
             oidc: Arc::new(OidcVerifier::new(settings.clone())),
             settings,
             health_registry: Arc::new(HealthRegistry::new()),
-            hero_crud: Arc::new(crate::crud::CrudService::new(DynHeroRepository(Box::new(
-                HeroMemoryRepository::new(),
-            )))),
+            hero_crud: Arc::new(craftainer_crud::crud::CrudService::new(DynHeroRepository(
+                Box::new(HeroMemoryRepository::new()),
+            ))),
             rate_limiter: Arc::new(RateLimiter::mock()),
-            events: Arc::new(crate::events::EventBus::mock()),
+            events: Arc::new(craftainer_crud::events::EventBus::mock()),
         };
         router().with_state(state)
     }

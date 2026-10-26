@@ -11,8 +11,8 @@
 //! "leave unchanged" (a form always submits every field, so there is no
 //! partial-update case to distinguish here the way JSON `PATCH` has).
 
-use crate::generic::views::FieldError;
 use crate::hero::views::hero::{HeroCreate, HeroUpdate};
+use craftainer_crud::views::FieldError;
 
 #[derive(Debug, serde::Deserialize)]
 pub struct HeroFormFields {

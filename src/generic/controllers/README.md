@@ -1,27 +1,20 @@
 # generic/controllers/
 
-The generic half of the Controller layer (see `src/README.md`'s
-"Generic vs. Hero-specific split"). Two kinds of file live here:
+What stays of the generic half of the Controller layer in the app (see
+`src/README.md`'s "Generic vs. Hero-specific split"). The resource-agnostic
+helpers (`crud_actions`, `crud_query`, `crud_stats`, `crud_events`) and the
+`/health` router are the `craftainer-crud` and `craftainer-observability`
+crates since `docs/adrs/0020`; what is left here needs this app's
+configuration and authentication:
 
-- Pure, resource-agnostic helper functions generic over any
-  `R: generic::repositories::Repository`, with no axum `State` of their
-  own: `crud_actions.rs` (shared id/filter/bulk list-or-get/update/delete
-  decision logic), `crud_query.rs` (query-string-to-`FilterClause`/
-  `SortClause` parsing, driven by a resource's own field table),
-  `crud_stats.rs` (resource-agnostic parts of `GET /stats`/`GET
-  /predict`: `TimeBucket`, field-kind narrowing, the OLS `forecast`),
-  `crud_events.rs` (resource-agnostic parts of `GET <prefix>/events`:
-  subscriber-id resolution, the SSE frame shape, the `publish` helper).
-- Full axum routers that need nothing resource-specific at all:
-  `health.rs` (`GET /health/live`, `GET /health/ready`), `audit.rs`
-  (`GET /audit`), `mock.rs` (`POST /mock/token`). Each is generic over
-  its state type `S`, bound only by the small accessor traits this
-  package's `mod.rs` defines (`HasSettings`/`HasHealthRegistry`/
-  `HasRateLimiter` — mirrors `oidc::HasOidcVerifier`'s own pattern) —
-  never the concrete, Hero-bearing `crate::hero::controllers::AppState`.
-  `lib.rs::build_router` instantiates each at the concrete state type
-  and merges the result with Hero's own routers into one
-  `Router<AppState>`.
+- `audit.rs` (`GET /audit`) and `mock.rs` (`POST /mock/token`, mounted only
+  under `Mode::Mock`). Each is generic over its state type `S`, bound only
+  by the small accessor traits this package's `mod.rs` defines
+  (`HasSettings`/`HasRateLimiter` — mirrors `oidc::HasOidcVerifier`'s own
+  pattern) — never the concrete, Hero-bearing
+  `crate::hero::controllers::AppState`. `lib.rs::build_router` instantiates
+  each at the concrete state type and merges the result with Hero's own
+  routers (and the crate's health router) into one `Router<AppState>`.
 
 Hero's own routers (`heroes.rs` and siblings) live in
 `crate::hero::controllers`, not here — see that package's own `README.md`.
@@ -32,16 +25,13 @@ by `.github/scripts/check_layering.py` (see `docs/adrs/0009`).
 
 ## Do
 
-- Keep a new resource-agnostic helper generic over `R: Repository` (or
-  whatever trait bound it actually needs) rather than hardcoding a
-  concrete resource type, so a second resource gets it for free.
 - Give a new router here that needs some piece of shared state its own
   narrow `HasX` accessor trait, the same way `HasSettings`/
-  `HasHealthRegistry`/`HasRateLimiter` do — never a direct dependency on
+  `HasRateLimiter` do — never a direct dependency on
   `crate::hero::controllers::AppState`.
 - Use a small `FakeState` implementing only the trait(s) a router's own
-  tests need (see `audit.rs`/`health.rs`/`mock.rs`'s test modules),
-  never a real resource's repository/state, even in `#[cfg(test)]` code.
+  tests need (see `audit.rs`/`mock.rs`'s test modules), never a real
+  resource's repository/state, even in `#[cfg(test)]` code.
 
 ## Don't
 

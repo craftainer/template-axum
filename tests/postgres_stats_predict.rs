@@ -19,7 +19,7 @@ mod common;
 use axum::http::StatusCode;
 use chrono::{Duration, Utc};
 use common::{authed_request, json_body, seed_hero_at, state_for, IsolatedDb};
-use template_axum::events::EventBus;
+use craftainer_crud::events::EventBus;
 use tower::ServiceExt;
 
 fn app(db: sea_orm::DatabaseConnection) -> axum::Router {

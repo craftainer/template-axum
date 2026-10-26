@@ -3,7 +3,7 @@
 Hero's half of storage-agnostic CRUD access (see `src/README.md`'s
 "Generic vs. Hero-specific split"): the two concrete `Repository`
 implementations backing Hero's `CrudService`. See
-`crate::generic::repositories` for the trait/`dyn_repository!` machinery
+`craftainer_crud::repositories` for the trait/`dyn_repository!` machinery
 these implement.
 
 - `hero_sea_orm.rs` — `HeroSeaOrmRepository`, the real Postgres-backed
@@ -20,4 +20,4 @@ the verified token (see `docs/adrs/0007`), never trusts client input.
 A new resource adds its own sibling package (`crate::<resource>::
 repositories`, mirroring this one) plus a `crate::dyn_repository!(...)`
 invocation in its own controllers' `mod.rs` — no changes to
-`generic::repositories` or `crud/`.
+`craftainer_crud::repositories` or `craftainer_crud::crud`.

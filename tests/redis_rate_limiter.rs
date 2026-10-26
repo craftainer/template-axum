@@ -6,8 +6,8 @@
 
 use std::net::IpAddr;
 
-use template_axum::health::checks::RedisHealthCheck;
-use template_axum::health::HealthCheck;
+use craftainer_observability::health::checks::RedisHealthCheck;
+use craftainer_observability::health::HealthCheck;
 use template_axum::problem_details::AppError;
 use template_axum::rate_limit::RateLimiter;
 

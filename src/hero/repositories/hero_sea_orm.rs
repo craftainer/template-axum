@@ -11,10 +11,10 @@ use sea_orm::{
     QueryOrder, QuerySelect, Set,
 };
 
-use crate::generic::repositories::filtering::{FilterClause, FilterOp, FilterValue, SortClause};
-use crate::generic::repositories::{ListOptions, RepoError, Repository};
 use crate::hero::models::hero::{self, ActiveModel, Column, Entity};
 use crate::hero::views::hero::{HeroCreate, HeroUpdate};
+use craftainer_crud::repositories::filtering::{FilterClause, FilterOp, FilterValue, SortClause};
+use craftainer_crud::repositories::{ListOptions, RepoError, Repository};
 
 pub struct HeroSeaOrmRepository {
     db: DatabaseConnection,
@@ -80,6 +80,7 @@ fn scalar(value: &FilterValue) -> sea_orm::Value {
         FilterValue::Str(v) => v.clone().into(),
         FilterValue::Int(v) => (*v as i32).into(),
         FilterValue::DateTime(v) => (*v).into(),
+        FilterValue::Float(v) => (*v).into(),
         FilterValue::Bool(v) => (*v).into(),
         // Only reachable for a malformed FilterOp::In clause whose value
         // isn't a List -- crud_query.rs's parser never produces this.
@@ -91,6 +92,23 @@ fn scalar_str(value: &FilterValue) -> String {
     match value {
         FilterValue::Str(v) => v.clone(),
         _ => String::new(),
+    }
+}
+
+/// Archive visibility: `only_archived` (which implies `include_archived`)
+/// keeps just the soft-deleted rows; otherwise live rows, plus archived ones
+/// when `include_archived`.
+fn archive_scope(
+    query: sea_orm::Select<Entity>,
+    include_archived: bool,
+    only_archived: bool,
+) -> sea_orm::Select<Entity> {
+    if only_archived {
+        query.filter(Column::ArchivedAt.is_not_null())
+    } else if include_archived {
+        query
+    } else {
+        query.filter(Column::ArchivedAt.is_null())
     }
 }
 
@@ -125,10 +143,7 @@ impl Repository for HeroSeaOrmRepository {
     type Update = HeroUpdate;
 
     async fn list(&self, opts: ListOptions) -> Result<Vec<hero::Model>, RepoError> {
-        let mut query = Entity::find();
-        if !opts.include_archived {
-            query = query.filter(Column::ArchivedAt.is_null());
-        }
+        let mut query = archive_scope(Entity::find(), opts.include_archived, opts.only_archived);
         query = apply_filters(query, &opts.filters);
         query = if opts.sort.is_empty() {
             query.order_by_asc(Column::Id)
@@ -147,11 +162,9 @@ impl Repository for HeroSeaOrmRepository {
         &self,
         filters: &[FilterClause],
         include_archived: bool,
+        only_archived: bool,
     ) -> Result<u64, RepoError> {
-        let mut query = Entity::find();
-        if !include_archived {
-            query = query.filter(Column::ArchivedAt.is_null());
-        }
+        let mut query = archive_scope(Entity::find(), include_archived, only_archived);
         query = apply_filters(query, filters);
         query.count(&self.db).await.map_err(backend_err)
     }
@@ -462,8 +475,22 @@ mod tests {
         assert_eq!(scalar(&FilterValue::Str("x".to_string())), "x".into());
         assert_eq!(scalar(&FilterValue::Int(5)), 5i32.into());
         assert_eq!(scalar(&FilterValue::Bool(true)), true.into());
+        assert_eq!(scalar(&FilterValue::Float(1.5)), 1.5f64.into());
         let now = Utc::now().naive_utc();
         assert_eq!(scalar(&FilterValue::DateTime(now)), now.into());
+    }
+
+    #[test]
+    fn archive_scope_renders_the_three_visibility_modes() {
+        let sql = |include, only| {
+            archive_scope(Entity::find(), include, only)
+                .build(DbBackend::Postgres)
+                .to_string()
+        };
+        assert!(sql(false, false).contains("IS NULL"));
+        assert!(!sql(true, false).contains("WHERE"));
+        assert!(sql(false, true).contains("IS NOT NULL"));
+        assert!(sql(true, true).contains("IS NOT NULL"));
     }
 
     #[test]
