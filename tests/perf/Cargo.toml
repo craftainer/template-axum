@@ -1,4 +1,4 @@
-# Load-test client for the perf tier (NFR-0024, docs/adrs/0018) -- a
+# Load-test client for the perf tier (NFR-0024 tiers, NFR-0030 reporting, docs/adrs/0018) -- a
 # separate workspace member, not a `[dev-dependencies]` addition to the
 # app's own Cargo.toml: goose pulls in its own reqwest/tokio-tls stack,
 # entirely unrelated to the app's runtime dependency graph, and this
@@ -19,4 +19,4 @@ path = "src/main.rs"
 [dependencies]
 goose = { version = "=0.18.1", default-features = false, features = ["rustls-tls"] }
 serde_json = "=1.0.154"
-tokio = { version = "=1.54.1", features = ["rt-multi-thread", "macros"] }
+tokio = { version = "=1.54.1", features = ["rt-multi-thread", "macros", "time", "fs", "sync"] }

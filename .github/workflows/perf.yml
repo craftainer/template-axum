@@ -1,8 +1,12 @@
-# Perf tier (NFR-0024, docs/adrs/0018, tests/perf/README.md): builds the
-# runner-stage image, runs it under MODE=mock (self-contained -- no
-# backing-service stack needed), and drives tests/perf against it. The
-# real-stack mode (tests/perf/run-real-stack.sh) needs the devcontainer's
-# Postgres/Redis/MQTT/Keycloak and is deliberately not run here.
+# Perf tier (NFR-0024 tiers, NFR-0030 reporting, docs/adrs/0018,
+# tests/perf/README.md): builds the runner-stage image, runs it under
+# MODE=mock (self-contained -- no backing-service stack needed) capped at
+# 1 vCPU / 2 GB like the real-stack mode, and drives tests/perf against it.
+# Uploads goose's HTML report and the JSON summary (schema in
+# tests/perf/README.md) as artifacts. The real-stack mode
+# (tests/perf/run-real-stack.sh) needs the devcontainer's
+# Postgres/Redis/MQTT/Keycloak and is deliberately not run here; its
+# numbers are taken on the devcontainer host, in a quiet window.
 # Manually triggered only -- a load test is neither fast nor free enough
 # to run on every push/PR the way checks.yml's own suite does.
 name: Perf
@@ -18,6 +22,10 @@ on:
         description: How long to sustain load (goose --run-time, e.g. 60s, 5m)
         type: string
         default: 60s
+      startup_time:
+        description: Warm-up ramp excluded from the figures (goose --startup-time)
+        type: string
+        default: 10s
 
 permissions:
   contents: read
@@ -40,6 +48,7 @@ jobs:
         run: |
           docker run -d --name template-axum-perf-target \
             -p 8000:8000 \
+            --cpus 1 --memory 2g --memory-swap 2g \
             -e MODE=mock -e ALLOW_MOCK_MODE=1 \
             -e RATE_LIMIT_HERO_WRITE_PER_MINUTE=1000000 \
             -e RATE_LIMIT_MOCK_TOKEN_PER_MINUTE=1000000 \
@@ -63,26 +72,58 @@ jobs:
       # (unpinned) default Rust install. --network host so the
       # containerized cargo process reaches the target container's
       # published :8000 via localhost.
+      - name: Unit-test the load-test client
+        run: |
+          rust_version=$(grep -m1 '^ARG RUST_VERSION=' Dockerfile | cut -d= -f2)
+          debian_version=$(grep -m1 '^ARG DEBIAN_VERSION=' Dockerfile | cut -d= -f2)
+          docker run --rm \
+            -v "$PWD:/workspace" -w /workspace \
+            -v cargo-registry-cache:/usr/local/cargo/registry \
+            "rust:${rust_version}-slim-${debian_version}" \
+            cargo test -p template-axum-perf
+
+      # The target's cgroup directory is mounted read-only so the client
+      # can sample its cpu.stat; if the runner does not expose it the
+      # summary just has no cpu numbers.
       - name: Run the load test
         run: |
           rust_version=$(grep -m1 '^ARG RUST_VERSION=' Dockerfile | cut -d= -f2)
           debian_version=$(grep -m1 '^ARG DEBIAN_VERSION=' Dockerfile | cut -d= -f2)
+          cgroup_args=()
+          if cgroup_dir=$(tests/perf/cgroup-path.sh template-axum-perf-target); then
+            cgroup_args=(-v "$cgroup_dir:/app-cgroup:ro" -e PERF_CGROUP_CPU_STAT=/app-cgroup/cpu.stat)
+          else
+            echo "::warning::cannot locate the target's cgroup; the summary has no cpu numbers"
+          fi
           docker run --rm --network host \
+            -e PERF_SUMMARY_FILE=/workspace/perf-summary.json \
+            -e PERF_GIT_SHA="$GITHUB_SHA" -e PERF_IMAGE=template-axum:perf \
+            -e PERF_CPUS=1 -e PERF_MEMORY=2g \
+            "${cgroup_args[@]}" \
             -v "$PWD:/workspace" -w /workspace \
             -v cargo-registry-cache:/usr/local/cargo/registry \
             "rust:${rust_version}-slim-${debian_version}" \
             cargo run -p template-axum-perf --release -- \
               --host http://localhost:8000 \
               --users "${{ inputs.users }}" \
+              --startup-time "${{ inputs.startup_time }}" \
               --run-time "${{ inputs.run_time }}" \
               --report-file goose-report.html
 
       - name: Upload the goose report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: goose-report
           path: goose-report.html
+          if-no-files-found: ignore
+
+      - name: Upload the JSON summary
+        if: always()
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: perf-summary
+          path: perf-summary.json
           if-no-files-found: ignore
 
       - name: Stop the target container
