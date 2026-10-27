@@ -175,6 +175,7 @@ pub fn state_for(db: DatabaseConnection, events: EventBus) -> AppState {
         )))),
         rate_limiter: Arc::new(RateLimiter::mock()),
         events: Arc::new(events),
+        shutdown: tokio_util::sync::CancellationToken::new(),
     }
 }
 

@@ -42,6 +42,7 @@ use hero::repositories::hero_memory::HeroMemoryRepository;
 use hero::repositories::hero_sea_orm::HeroSeaOrmRepository;
 use oidc::OidcVerifier;
 use rate_limit::RateLimiter;
+use tokio_util::sync::CancellationToken;
 
 /// Applies pending SeaORM migrations, off the request path, before the
 /// server starts accepting connections (FR-0020). Never runs under
@@ -184,6 +185,7 @@ pub async fn build_state_with_db(
         health_registry: Arc::new(health_registry),
         hero_crud: Arc::new(CrudService::new(hero_repository)),
         rate_limiter: Arc::new(rate_limiter),
+        shutdown: CancellationToken::new(),
     }
 }
 

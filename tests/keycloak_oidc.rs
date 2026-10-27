@@ -122,6 +122,7 @@ async fn the_auth_claims_extractor_rejects_a_bad_bearer_token_over_http() {
             )),
         )),
         rate_limiter: Arc::new(template_axum::rate_limit::RateLimiter::mock()),
+        shutdown: tokio_util::sync::CancellationToken::new(),
         events: Arc::new(craftainer_crud::events::EventBus::mock()),
     };
     let app = template_axum::generic::controllers::audit::router().with_state(state);

@@ -409,6 +409,7 @@ mod tests {
                 Box::new(HeroMemoryRepository::new()),
             ))),
             rate_limiter: Arc::new(crate::rate_limit::RateLimiter::mock()),
+            shutdown: tokio_util::sync::CancellationToken::new(),
             events: Arc::new(craftainer_crud::events::EventBus::mock()),
         };
         router().with_state(state)
@@ -532,6 +533,7 @@ mod tests {
                 Box::new(FaultyRepository),
             ))),
             rate_limiter: Arc::new(crate::rate_limit::RateLimiter::mock()),
+            shutdown: tokio_util::sync::CancellationToken::new(),
             events: Arc::new(craftainer_crud::events::EventBus::mock()),
         };
         router().with_state(state)
@@ -1000,6 +1002,7 @@ mod tests {
                 Box::new(HeroMemoryRepository::new()),
             ))),
             rate_limiter: Arc::new(crate::rate_limit::RateLimiter::mock()),
+            shutdown: tokio_util::sync::CancellationToken::new(),
             events: Arc::new(craftainer_crud::events::EventBus::mock()),
         };
         router().with_state(state)

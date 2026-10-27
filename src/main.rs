@@ -3,6 +3,7 @@
 //! builds the same router this binary serves, rather than a CI-only
 //! lookalike. See `src/README.md` for the module layering.
 
+use std::future::IntoFuture;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -40,10 +41,19 @@ async fn main() {
         std::process::exit(1);
     });
     problem_details::configure_detail_redaction(settings.mode);
+    let shutdown_timeout =
+        template_axum::config::graceful_shutdown_timeout().unwrap_or_else(|err| {
+            eprintln!("invalid configuration: {err}");
+            std::process::exit(1);
+        });
     let settings = Arc::new(settings);
 
     let db = connect_database(&settings).await;
-    let app = build_router(build_state_with_db(settings, db.clone()).await);
+    let state = build_state_with_db(settings, db.clone()).await;
+    // Cancelled the moment the shutdown signal fires: ends every open
+    // `/events` stream, which would otherwise hold the drain open forever.
+    let shutdown = state.shutdown.clone();
+    let app = build_router(state);
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:8000")
         .await
@@ -54,12 +64,37 @@ async fn main() {
     // into_make_service()`) makes the caller's socket address available to
     // handlers via the `ConnectInfo<SocketAddr>` extractor -- src/
     // rate_limit.rs's per-IP check needs it.
-    let served = axum::serve(
+    let serve = axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
     )
-    .with_graceful_shutdown(shutdown_signal())
-    .await;
+    .with_graceful_shutdown(shutdown.clone().cancelled_owned())
+    .into_future();
+    tokio::pin!(serve);
+
+    // `with_graceful_shutdown` waits for in-flight requests with no bound of
+    // its own, so the bound is a race: the signal cancels the token (which
+    // starts the drain and ends the `/events` streams), then the timeout, if
+    // set, runs; whichever finishes first decides. On a timeout `serve` is
+    // dropped and `main` carries on to the pool close and the OTel flush
+    // below, exactly as after a clean drain (docs/adrs/0027).
+    let served = tokio::select! {
+        result = &mut serve => result,
+        () = async {
+            shutdown_signal().await;
+            shutdown.cancel();
+            match shutdown_timeout {
+                Some(limit) => tokio::time::sleep(limit).await,
+                None => std::future::pending().await,
+            }
+        } => {
+            tracing::warn!(
+                "graceful shutdown timed out after {}s, closing with requests still in flight",
+                shutdown_timeout.map_or(0, |limit| limit.as_secs())
+            );
+            Ok(())
+        }
+    };
 
     // Closing any clone closes the shared sqlx pool: waits for in-use
     // connections to be returned, then ends every connection cleanly.

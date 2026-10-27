@@ -32,7 +32,8 @@ may import from here.
   crud_query`/`crud_actions`. Also mounts `/stats`/`/predict`
   (`FR-0028`/`FR-0029`, `docs/adrs/0015`) via `craftainer_crud::controllers::
   crud_stats`, and `/events` (`FR-0030`, `docs/adrs/0016`) via
-  `craftainer_crud::controllers::crud_events`. Every mutating handler announces
+  `craftainer_crud::controllers::crud_events` (`event_stream_until` with
+  `AppState.shutdown`, so streams end at shutdown, `docs/adrs/0027`). Every mutating handler announces
   what it did on that stream after the write succeeds.
 - `heroes_xml.rs` — the XML sibling of `heroes.rs`, mounted by `lib.rs`
   at `/crud/v1/heroes/v2/xml` (`FR-0027`, `docs/adrs/0014`). Shares
