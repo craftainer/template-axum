@@ -15,7 +15,7 @@ See ADR 0006.
 
 ## Acceptance criteria
 
-- `craftainer_observability::logs::configure_logging` (called from
+- `craftainer_observability::logs::configure_telemetry` (called from
   `src/main.rs`) is the only place a `tracing` subscriber
   is installed, called once at the start of `main()`.
 - Verified in this phase's smoke test: startup, migration, and request
