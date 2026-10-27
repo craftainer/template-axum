@@ -6,21 +6,21 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use craftainer_observability::logs::{
-    configure_logging, configure_logging_without_export, LoggingGuard,
+use craftainer_observability::{
+    configure_telemetry, logs::configure_telemetry_without_export, Error as ObservabilityError,
+    Telemetry,
 };
-use craftainer_observability::Error as ObservabilityError;
 use template_axum::config::Settings;
 use template_axum::{build_router, build_state_with_db, connect_database, problem_details};
 
 /// Installs JSON logging (plus OTLP export when the environment asks for
 /// it). An exporter that can't be built isn't fatal: carry on with JSON
 /// logs only, and say so. Panics only if a subscriber is already installed.
-fn init_logging() -> LoggingGuard {
-    match configure_logging() {
+fn init_logging() -> Telemetry {
+    match configure_telemetry() {
         Ok(guard) => guard,
         Err(ObservabilityError::ExporterBuild(reason)) => {
-            let guard = configure_logging_without_export()
+            let guard = configure_telemetry_without_export()
                 .expect("no subscriber is installed after a failed exporter build");
             tracing::warn!("OTLP log exporter setup failed, continuing without it: {reason}");
             guard

@@ -242,7 +242,7 @@ once in `main()`.
 
 ## Structured logging
 
-`craftainer_observability::logs::configure_logging` (called once, first
+`craftainer_observability::configure_telemetry` (called once, first
 thing in `main()`) attaches a JSON-formatting `tracing_subscriber` to every
 `tracing` call
 — every log line, including `tower_http::trace::TraceLayer`'s own HTTP

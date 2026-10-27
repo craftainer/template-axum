@@ -35,7 +35,8 @@ use craftainer_crud::conditional::{not_modified, record_etag, revalidation_heade
 use craftainer_crud::controllers::crud_actions::{self, DeleteOutcome, ListOrGet, UpdateOutcome};
 use craftainer_crud::controllers::crud_events;
 use craftainer_crud::controllers::crud_query::{
-    parse_archived_scope, parse_filters, parse_sort, reject_only_archived,
+    parse_archived_scope, parse_bulk_delete_include_unpublished, parse_filters, parse_sort,
+    reject_only_archived,
 };
 use craftainer_crud::crud::DEFAULT_LIMIT;
 use craftainer_crud::events::EventAction;
@@ -235,6 +236,8 @@ async fn delete_hero(
     let filters =
         parse_filters(HERO_FIELD_SPECS, &raw_params).map_err(AppError::UnprocessableEntity)?;
     reject_only_archived(&raw_params).map_err(AppError::UnprocessableEntity)?;
+    let include_unpublished = parse_bulk_delete_include_unpublished(&raw_params)
+        .map_err(AppError::UnprocessableEntity)?;
     let owner_id = claims.subject()?.to_string();
     enforce_if_match(&state, &request_headers, query.id, &raw_params).await?;
 
@@ -244,6 +247,7 @@ async fn delete_hero(
         &owner_id,
         filters,
         state.settings.bulk_action_max_matched,
+        include_unpublished,
     )
     .await?
     {
