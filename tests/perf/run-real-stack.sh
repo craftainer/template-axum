@@ -13,6 +13,12 @@
 # per fragment under .devcontainer/stack/, so each has its own network).
 # Environment overrides: PERF_DB (default ax4h_perf), PERF_SEED (records to
 # seed, rounded up to a multiple of 4, default 500), PERF_TOOLCHAIN_IMAGE (a rust image with cargo).
+# The app container runs capped at PERF_CPUS (default 1) vCPUs and
+# PERF_MEMORY (default 2g, swap disabled) so runs are comparable across
+# hosts; both are recorded in the JSON summary (NFR-0030).
+# Output: PERF_OUT_DIR (default target/perf under the repo) receives
+# `summary-<UTC timestamp>.json` (schema in tests/perf/README.md) and
+# goose's `report-<UTC timestamp>.html`.
 # App settings under test: any of DB_POOL_SIZE, DB_POOL_MIN_SIZE,
 # DB_POOL_RECYCLE, DB_POOL_IDLE_TIMEOUT, DB_CONNECT_TIMEOUT and
 # RUN_MIGRATIONS_ON_STARTUP that is set in the caller's environment is passed to the app
@@ -28,6 +34,14 @@ seed=${PERF_SEED:-500}
 toolchain=${PERF_TOOLCHAIN_IMAGE:-craftainer-tc/template-rust-crate:rc2}
 app=ax4h-perf-app
 cargo_cache=${PERF_CARGO_CACHE:-$HOME/.cache}
+cpus=${PERF_CPUS:-1}
+memory=${PERF_MEMORY:-2g}
+out_dir=${PERF_OUT_DIR:-$repo/target/perf}
+stamp=$(date -u +%Y%m%dT%H%M%SZ)
+git_sha=$(git -C "$repo" rev-parse --short=12 HEAD 2>/dev/null || echo unknown)
+if [ -n "$(git -C "$repo" status --porcelain 2>/dev/null)" ]; then
+  git_sha="$git_sha-dirty"
+fi
 
 for c in postgres-postgres-1 redis-redis-1 mqtt-mqtt-1 keycloak-keycloak-1; do
   if [ "$(docker inspect -f '{{.State.Running}}' "$c" 2>/dev/null)" != true ]; then
@@ -46,7 +60,7 @@ if ! docker image inspect "$toolchain" >/dev/null 2>&1; then
   echo "toolchain image $toolchain is not available locally (set PERF_TOOLCHAIN_IMAGE)" >&2
   exit 1
 fi
-mkdir -p "$cargo_cache"
+mkdir -p "$cargo_cache" "$out_dir"
 
 # Goose picks the scenario itself; a caller-supplied --scenarios would
 # duplicate it.
@@ -88,6 +102,7 @@ done
 # raised so the limiter does not turn the load into 429s.
 docker rm -f "$app" >/dev/null 2>&1 || true
 docker create --name "$app" --network keycloak_default \
+  --cpus "$cpus" --memory "$memory" --memory-swap "$memory" \
   -e MODE=dev \
   -e POSTGRES_HOST=postgres -e POSTGRES_USER=app -e POSTGRES_PASSWORD=app \
   -e POSTGRES_DB="$db" \
@@ -118,24 +133,47 @@ if [ -z "${ready:-}" ]; then
   exit 1
 fi
 
+# The app's cgroup v2 directory, bind-mounted read-only so the goose
+# client can sample its cpu.stat (tests/perf/src/cpu.rs). Without it (cgroup
+# v1, remote daemon) the run still works and the summary's cpu is null.
+cgroup_args=()
+if cgroup_dir=$("$repo/tests/perf/cgroup-path.sh" "$app"); then
+  cgroup_args=(-v "$cgroup_dir:/app-cgroup:ro" -e PERF_CGROUP_CPU_STAT=/app-cgroup/cpu.stat)
+else
+  echo "warning: cannot locate $app's cgroup; the summary will have no cpu numbers" >&2
+fi
+
+# Extra docker args for one goose invocation (set per call below).
+goose_extra=()
 goose() {
   docker run --rm --network keycloak_default \
+    ${goose_extra[@]+"${goose_extra[@]}"} \
     -u "$(id -u):$(id -g)" \
     -e CARGO_HOME=/home/vscode/.cache/cargo-home \
     -e CARGO_TARGET_DIR=/home/vscode/.cache/cargo-target-perf \
     -e PERF_TARGET=real \
     -v "$cargo_cache:/home/vscode/.cache" \
-    -v "$repo:$repo" -w "$repo" \
+    -v "$repo:$repo" -v "$out_dir:$out_dir" -w "$repo" \
     "$toolchain" \
     cargo run -p template-axum-perf --release -- \
     --host "http://$app:8000" --no-telnet --no-websocket "$@"
 }
 
 # Seed through the API (4 users x seed/4 iterations of one create each),
-# then run the journey. Seeding is not part of the measured run.
+# then run the journey. Seeding is not part of the measured run, so it
+# writes no summary (an empty PERF_SUMMARY_FILE skips it).
 if [ "$seed" -gt 0 ]; then
   per_user=$(((seed + 3) / 4)) # rounded up; never 0, which goose reads as unlimited
+  goose_extra=(-e PERF_SUMMARY_FILE=)
   goose --scenarios HeroSeedReal --users 4 --iterations "$per_user" \
     --no-print-metrics --quiet
 fi
-goose --scenarios HeroJourneyReal "$@"
+summary="$out_dir/summary-$stamp.json"
+goose_extra=(
+  -e "PERF_SUMMARY_FILE=$summary"
+  -e "PERF_GIT_SHA=$git_sha" -e "PERF_IMAGE=$image"
+  -e "PERF_CPUS=$cpus" -e "PERF_MEMORY=$memory"
+  ${cgroup_args[@]+"${cgroup_args[@]}"}
+)
+goose --scenarios HeroJourneyReal --report-file "$out_dir/report-$stamp.html" "$@"
+echo "summary: $summary"

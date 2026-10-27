@@ -89,3 +89,34 @@ Decisions:
   the run reports errors.
 
 See `tests/perf/README.md` for usage.
+
+## Addendum (2026-10-27): CPU per request, a JSON summary and a fixed cap
+
+L2 A/B comparisons need numbers a script can read and a CPU budget that
+means the same on every host (`docs/nfrs/NFR-0030-perf-harness-reports-rps-latency-errors-cpu.md`).
+Extending the addendum above rather than opening a new ADR, because it
+adds to the same harness and reverses nothing:
+
+- **The sampler is Rust, inside the goose client** (`tests/perf/src/cpu.rs`),
+  which keeps the repository Python-free as this ADR requires. It reads
+  the app container's cgroup v2 `cpu.stat` as a file, which
+  `run-real-stack.sh` bind-mounts read-only into the goose container
+  (`tests/perf/cgroup-path.sh` finds the directory), instead of shelling
+  out to `docker exec` per sample. The window delta is interpolated
+  between the samples that bracket the measured window, whose start is
+  where goose resets its metrics (all users running), so the warm-up ramp
+  is excluded without a second clock.
+- **One JSON summary per run**, built from goose's metrics by pure
+  functions (`tests/perf/src/summary.rs`), schema versioned and
+  documented in `tests/perf/README.md`. Percentiles come from goose's
+  rounded histogram, which is adequate for A/B ratios and is stated in
+  the schema.
+- **1 vCPU / 2 GB by default** via `docker create --cpus/--memory`
+  (`PERF_CPUS`, `PERF_MEMORY`), recorded in the summary. No
+  `compose.perf.yml`: the script already starts the container with
+  `docker create`, so the flags are the smallest change.
+- **`perf.yml` stays mock-only** for the reason above, but now caps the
+  target the same way, samples its cgroup when the runner exposes it, and
+  uploads the JSON summary next to the goose report.
+- **Not built:** a capacity (step-load) mode. RPS at a fixed user count
+  is the primary metric; revisit if an A/B needs a saturation curve.

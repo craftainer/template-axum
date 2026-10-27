@@ -1,4 +1,4 @@
-//! Perf tier (`NFR-0024`, `docs/adrs/0018`): a `goose` load test against a
+//! Perf tier (`NFR-0024` tiers, `NFR-0030` reporting, `docs/adrs/0018`): a `goose` load test against a
 //! *running* `template-axum` server -- the `runner`-stage Docker image
 //! specifically (never a `cargo run` dev loop), per this directory's own
 //! `README.md`. Points at `--host` (goose's own CLI convention, e.g.
@@ -22,10 +22,23 @@
 //!   `PERF_USERNAME`, `PERF_PASSWORD`, `PERF_CLIENT_ID`); the server
 //!   validates them exactly as in production, so this needs no auth
 //!   bypass. It adds the stats read, which the mock scenario skips.
+//!
+//! After the run, a JSON summary (schema: this directory's `README.md`) is
+//! written to `PERF_SUMMARY_FILE` (default `perf-summary.json`; set but
+//! empty skips it). When `PERF_CGROUP_CPU_STAT` names the app container's
+//! cgroup v2 `cpu.stat`, that file is sampled every `PERF_CPU_SAMPLE_MS`
+//! (default 500) and the CPU used over the measured window is included.
 
+mod cpu;
+mod summary;
+
+use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use goose::metrics::GooseMetrics;
 use goose::prelude::*;
+use goose::test_plan::TestPlanStepAction;
 use serde_json::{json, Value};
 
 struct Session {
@@ -224,9 +237,101 @@ async fn create_update_delete_hero(user: &mut GooseUser) -> TransactionResult {
     Ok(())
 }
 
+/// Reduce goose's metrics to the plain types `summary` works on.
+fn endpoint_stats(metrics: &GooseMetrics) -> Vec<summary::EndpointStats> {
+    metrics
+        .requests
+        .values()
+        .map(|request| {
+            let data = &request.raw_data;
+            summary::EndpointStats {
+                method: request.method.to_string(),
+                path: request.path.clone(),
+                success: request.success_count as u64,
+                failed: request.fail_count as u64,
+                times: data
+                    .times
+                    .iter()
+                    .map(|(ms, count)| (*ms as u64, *count as u64))
+                    .collect::<BTreeMap<_, _>>(),
+                max_ms: data.maximum_time as u64,
+                total_ms: data.total_time as u64,
+            }
+        })
+        .collect()
+}
+
+fn window_of(metrics: &GooseMetrics) -> Option<summary::Window> {
+    let history: Vec<(summary::Phase, u64)> = metrics
+        .history
+        .iter()
+        .map(|step| {
+            let phase = match step.action {
+                TestPlanStepAction::Increasing => summary::Phase::Increasing,
+                TestPlanStepAction::Maintaining => summary::Phase::Maintaining,
+                _ => summary::Phase::Other,
+            };
+            (phase, step.timestamp.timestamp_millis().max(0) as u64)
+        })
+        .collect();
+    summary::Window::from_history(&history)
+}
+
+/// Write the JSON summary for a finished run (see the module docs).
+fn write_summary(
+    metrics: &GooseMetrics,
+    scenario: &str,
+    mode: &str,
+    cpu_samples: &[cpu::Sample],
+    sample_interval: Duration,
+) {
+    let path = env_or("PERF_SUMMARY_FILE", "perf-summary.json");
+    if path.is_empty() {
+        return;
+    }
+    let Some(window) = window_of(metrics) else {
+        eprintln!("no test-plan history; not writing {path}");
+        return;
+    };
+    let cpu_usage = if cpu_samples.is_empty() {
+        None
+    } else {
+        let usage = cpu::window_usage(cpu_samples, window.start_ms, window.end_ms);
+        if usage.is_none() {
+            eprintln!("cpu.stat samples do not cover the measured window; cpu is null");
+        }
+        usage
+    };
+    let run = summary::RunInfo {
+        scenario: scenario.to_string(),
+        mode: mode.to_string(),
+        users: metrics.maximum_users as u64,
+        git_sha: env_or("PERF_GIT_SHA", "unknown"),
+        image_tag: env_or("PERF_IMAGE", "unknown"),
+        cpu_limit_cores: std::env::var("PERF_CPUS")
+            .ok()
+            .and_then(|v| v.trim().parse().ok()),
+        memory_limit_mib: std::env::var("PERF_MEMORY")
+            .ok()
+            .and_then(|v| summary::parse_memory_mib(&v)),
+        cpu_sample_interval_ms: sample_interval.as_millis() as u64,
+    };
+    let document =
+        summary::build_summary(&run, &window, &endpoint_stats(metrics), cpu_usage.as_ref());
+    let text = serde_json::to_string_pretty(&document).expect("the summary should serialize");
+    match std::fs::write(&path, text + "\n") {
+        Ok(()) => eprintln!("wrote {path}"),
+        Err(err) => eprintln!("could not write {path}: {err}"),
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), GooseError> {
     let target = env_or("PERF_TARGET", "mock");
+    let scenario_name = match target.as_str() {
+        "real" => "HeroJourneyReal",
+        _ => "HeroJourney",
+    };
     let scenario = match target.as_str() {
         "mock" => scenario!("HeroJourney")
             .register_transaction(transaction!(mint_token).set_on_start())
@@ -255,7 +360,32 @@ async fn main() -> Result<(), GooseError> {
                 .register_transaction(transaction!(seed_hero)),
         );
     }
-    attack.execute().await?;
+
+    let sample_interval = Duration::from_millis(
+        std::env::var("PERF_CPU_SAMPLE_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|ms| *ms > 0)
+            .unwrap_or(500),
+    );
+    let sampler = std::env::var("PERF_CGROUP_CPU_STAT")
+        .ok()
+        .filter(|path| !path.is_empty())
+        .map(|path| cpu::Sampler::start(PathBuf::from(path), sample_interval));
+
+    let metrics = attack.execute().await?;
+
+    let cpu_samples = match sampler {
+        Some(sampler) => sampler.stop().await,
+        None => Vec::new(),
+    };
+    write_summary(
+        &metrics,
+        scenario_name,
+        &target,
+        &cpu_samples,
+        sample_interval,
+    );
 
     Ok(())
 }
