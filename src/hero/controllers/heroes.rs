@@ -529,11 +529,12 @@ async fn events(
     headers: HeaderMap,
 ) -> Result<EventSse, AppError> {
     claims.require_any_role(&state.settings.oidc_client_id, HERO_READ_ROLES)?;
-    Ok(crud_events::event_stream(
+    Ok(crud_events::event_stream_until(
         &state.events,
         HERO_EVENT_RESOURCE,
         query.subscriber_id.as_deref(),
         &headers,
+        state.shutdown.clone(),
     )
     .await?)
 }
@@ -607,6 +608,7 @@ mod tests {
                 Box::new(HeroMemoryRepository::new()),
             ))),
             rate_limiter: Arc::new(crate::rate_limit::RateLimiter::mock()),
+            shutdown: tokio_util::sync::CancellationToken::new(),
             events,
         };
         router().with_state(state)
@@ -885,6 +887,7 @@ mod tests {
                 Box::new(HeroMemoryRepository::new()),
             ))),
             rate_limiter: Arc::new(crate::rate_limit::RateLimiter::mock()),
+            shutdown: tokio_util::sync::CancellationToken::new(),
             events: Arc::new(craftainer_crud::events::EventBus::mock()),
         };
         let shared_app = router().with_state(state);
@@ -1860,6 +1863,7 @@ mod tests {
                 Box::new(HeroMemoryRepository::new()),
             ))),
             rate_limiter: Arc::new(crate::rate_limit::RateLimiter::mock()),
+            shutdown: tokio_util::sync::CancellationToken::new(),
             events: Arc::new(craftainer_crud::events::EventBus::mock()),
         };
         let shared_app = router().with_state(state);

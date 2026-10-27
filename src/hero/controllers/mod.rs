@@ -42,6 +42,7 @@ use craftainer_crud::crud::CrudService;
 use craftainer_crud::events::EventBus;
 use craftainer_observability::health::router::HasHealthRegistry;
 use craftainer_observability::health::HealthRegistry;
+use tokio_util::sync::CancellationToken;
 
 craftainer_crud::dyn_repository!(
     DynHeroRepository,
@@ -71,6 +72,10 @@ pub struct AppState {
     /// (`docs/adrs/0016`) -- MQTT-backed, or an in-memory fan-out under
     /// `Mode::Mock`.
     pub events: Arc<EventBus>,
+    /// Cancelled when the process starts shutting down (`main.rs`); every
+    /// `/events` route ends its stream on it so graceful shutdown is not held
+    /// open by an SSE client (`docs/adrs/0027`).
+    pub shutdown: CancellationToken,
 }
 
 /// The resource segment Hero's events publish under
@@ -178,6 +183,7 @@ mod tests {
                 HeroMemoryRepository::new(),
             )))),
             rate_limiter: Arc::new(RateLimiter::mock()),
+            shutdown: CancellationToken::new(),
             events: Arc::new(EventBus::mock()),
         }
     }

@@ -188,6 +188,18 @@ Behind PgBouncer in transaction mode the pooler must be >= 1.21 with
 (`connect_database` + `build_state_with_db`) and closes it once
 `axum::serve` returns.
 
+## Graceful shutdown
+
+On SIGINT or SIGTERM `main.rs` cancels `AppState.shutdown` (ending every
+open `/events` stream, which would otherwise never finish) and lets
+`axum::serve` drain accepted requests, then closes the database pool and
+flushes OTLP export. `GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS` (unset by default,
+meaning no bound; otherwise a whole number of seconds >= 1, anything else
+exits 1 at startup) caps the drain: when it elapses the server is dropped
+with a `graceful shutdown timed out` warning and the process still closes
+the pool, flushes and exits 0. Set it below the orchestrator's termination
+grace period. `docs/adrs/0027` has the reasoning.
+
 ## Migrations
 
 Pending SeaORM migrations apply automatically: `connect_database` calls

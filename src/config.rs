@@ -368,6 +368,17 @@ impl Settings {
     }
 }
 
+/// `GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS`: how long in-flight requests get
+/// after the shutdown signal before `main` stops waiting for them
+/// (`docs/adrs/0027`). `None` (unset) waits without a bound, as
+/// template-fastapi leaves uvicorn's default. Read by `main` next to
+/// `Settings::from_env` rather than held in `Settings`: it is a process
+/// concern no request handler reads. An unparsable value is an error, like
+/// every other setting.
+pub fn graceful_shutdown_timeout() -> Result<Option<Duration>, String> {
+    env_seconds("GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS")
+}
+
 fn env_or(key: &str, default: &str) -> String {
     env::var(key).unwrap_or_else(|_| default.to_string())
 }
@@ -449,8 +460,39 @@ mod tests {
             "DB_POOL_IDLE_TIMEOUT",
             "DB_CONNECT_TIMEOUT",
             "RUN_MIGRATIONS_ON_STARTUP",
+            "GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS",
         ] {
             unsafe { env::remove_var(key) };
+        }
+    }
+
+    #[test]
+    fn graceful_shutdown_timeout_is_unset_by_default_and_must_be_a_positive_whole_number() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: serialized by ENV_LOCK, like `clear_all`.
+        let key = "GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS";
+        unsafe {
+            env::remove_var(key);
+        }
+        assert_eq!(graceful_shutdown_timeout(), Ok(None));
+        unsafe {
+            env::set_var(key, "10");
+        }
+        assert_eq!(
+            graceful_shutdown_timeout(),
+            Ok(Some(Duration::from_secs(10)))
+        );
+        for bad in ["0", "-1", "1.5", "soon", ""] {
+            unsafe {
+                env::set_var(key, bad);
+            }
+            assert!(
+                graceful_shutdown_timeout().is_err(),
+                "{bad:?} must be rejected"
+            );
+        }
+        unsafe {
+            env::remove_var(key);
         }
     }
 

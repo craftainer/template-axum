@@ -40,6 +40,9 @@ path = "src/main.rs"
 # HTTP framework and async runtime -- phase 1's /health/live route.
 axum = { version = "=0.8.9", features = ["json"] }
 tokio = { version = "=1.54.1", features = ["rt-multi-thread", "macros", "signal", "time"] }
+# Shutdown signal shared with the `/events` routes (docs/adrs/0027); already in
+# the tree through craftainer-crud, same version.
+tokio-util = { version = "=0.7.20", default-features = false }
 tower = "=0.5.3"
 tower-http = { version = "=0.7.1", features = ["trace"] }
 
