@@ -4,6 +4,9 @@
 
 Accepted
 
+2026-10-26: `OCI_LICENSE` changed from `GPL-3.0-or-later` to `GPL-3.0-only`
+(LIC1: every craftainer package and template declares `GPL-3.0-only`).
+
 ## Context
 
 `template-axum` carried its own image release `Makefile`, a three-stage
@@ -49,7 +52,7 @@ template-docker's and adds axum's paths.
 
 **`image.mk` values**: `DOCKERFILE := Dockerfile`, `TARGET := runner`;
 `BUILD_ARGS` passes `APP_VERSION` and `APP_COMMIT`; `OCI_DESCRIPTION`;
-`OCI_LICENSE := GPL-3.0-or-later`; `COVERAGE_REPORT := coverage.xml`;
+`OCI_LICENSE := GPL-3.0-only`; `COVERAGE_REPORT := coverage.xml`;
 `IMAGE_SMOKE_RUN_ARGS := -e MODE=mock -e ALLOW_MOCK_MODE=1` with
 `/health/live`. `ARCHES` keeps the default `amd64 arm64`. `release-check`
 gets two prerequisites: `coverage` (`cargo llvm-cov --cobertura` into

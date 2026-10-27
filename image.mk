@@ -11,7 +11,7 @@ TARGET := runner
 BUILD_ARGS := --build-arg APP_VERSION=$(RELEASE_VERSION) --build-arg APP_COMMIT=$(shell git rev-parse HEAD)
 
 OCI_DESCRIPTION := Rust/axum REST service with generic CRUD, OIDC auth and health checks
-OCI_LICENSE := GPL-3.0-or-later
+OCI_LICENSE := GPL-3.0-only
 
 # Written to dist/ by `coverage` below (a release-check step) and attached
 # to the release; the image label points at it.
