@@ -197,6 +197,8 @@ impl Repository for HeroMemoryRepository {
         filters: &[FilterClause],
         include_archived: bool,
         only_archived: bool,
+        // Hero has no publish window (docs/adrs/0020): nothing to filter.
+        _include_unpublished: bool,
     ) -> Result<u64, RepoError> {
         let records = self
             .records
@@ -312,7 +314,12 @@ impl Repository for HeroMemoryRepository {
         Ok(true)
     }
 
-    async fn delete_many(&self, filters: &[FilterClause]) -> Result<Vec<hero::Model>, RepoError> {
+    async fn delete_many(
+        &self,
+        filters: &[FilterClause],
+        // Hero has no publish window (docs/adrs/0020): every live row is in it.
+        _include_unpublished: bool,
+    ) -> Result<Vec<hero::Model>, RepoError> {
         let mut records = self
             .records
             .lock()
@@ -482,6 +489,7 @@ mod tests {
                 }],
                 true,
                 false,
+                true,
             )
             .await
             .unwrap();
@@ -501,12 +509,12 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(only.iter().map(|h| h.id).collect::<Vec<_>>(), [alpha.id]);
-        assert_eq!(repo.count(&[], false, true).await.unwrap(), 1);
+        assert_eq!(repo.count(&[], false, true, true).await.unwrap(), 1);
         // `only_archived` wins over `include_archived`, and live rows are
         // still counted without it.
-        assert_eq!(repo.count(&[], true, true).await.unwrap(), 1);
-        assert_eq!(repo.count(&[], false, false).await.unwrap(), 1);
-        assert_eq!(repo.count(&[], true, false).await.unwrap(), 2);
+        assert_eq!(repo.count(&[], true, true, true).await.unwrap(), 1);
+        assert_eq!(repo.count(&[], false, false, true).await.unwrap(), 1);
+        assert_eq!(repo.count(&[], true, false, true).await.unwrap(), 2);
         // The live row is excluded from the trash, and still readable.
         assert!(!only.iter().any(|h| h.id == beta.id));
         assert!(repo.get(beta.id, false).await.unwrap().is_some());

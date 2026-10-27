@@ -239,13 +239,14 @@ async fn count_respects_filters_and_the_archived_visibility_rule() {
     let repository = HeroSeaOrmRepository::new(db.connection.clone());
     seed_cast(&db.connection, "alice").await;
 
-    assert_eq!(repository.count(&[], false, false).await.unwrap(), 4);
+    assert_eq!(repository.count(&[], false, false, true).await.unwrap(), 4);
     assert_eq!(
         repository
             .count(
                 &[clause("power_level", FilterOp::Gte, FilterValue::Int(5))],
                 false,
-                false
+                false,
+                true
             )
             .await
             .unwrap(),
@@ -261,12 +262,12 @@ async fn count_respects_filters_and_the_archived_visibility_rule() {
         .unwrap();
     assert!(repository.delete(doomed[0].id, "alice").await.unwrap());
 
-    assert_eq!(repository.count(&[], false, false).await.unwrap(), 3);
-    assert_eq!(repository.count(&[], true, false).await.unwrap(), 4);
+    assert_eq!(repository.count(&[], false, false, true).await.unwrap(), 3);
+    assert_eq!(repository.count(&[], true, false, true).await.unwrap(), 4);
     // `only_archived` narrows to the soft-deleted row (and wins over
     // `include_archived`), in both `count` and `list`.
-    assert_eq!(repository.count(&[], false, true).await.unwrap(), 1);
-    assert_eq!(repository.count(&[], true, true).await.unwrap(), 1);
+    assert_eq!(repository.count(&[], false, true, true).await.unwrap(), 1);
+    assert_eq!(repository.count(&[], true, true, true).await.unwrap(), 1);
     let trash = repository
         .list(ListOptions {
             only_archived: true,
@@ -362,7 +363,10 @@ async fn delete_many_archives_every_match_and_they_stop_listing() {
     seed_cast(&db.connection, "alice").await;
 
     let deleted = repository
-        .delete_many(&[clause("power_level", FilterOp::Gte, FilterValue::Int(5))])
+        .delete_many(
+            &[clause("power_level", FilterOp::Gte, FilterValue::Int(5))],
+            true,
+        )
         .await
         .unwrap();
     assert_eq!(deleted.len(), 2);
@@ -374,7 +378,10 @@ async fn delete_many_archives_every_match_and_they_stop_listing() {
     // A second bulk delete over the same filter matches nothing: the rows
     // are archived and `delete_many` only considers non-archived ones.
     let again = repository
-        .delete_many(&[clause("power_level", FilterOp::Gte, FilterValue::Int(5))])
+        .delete_many(
+            &[clause("power_level", FilterOp::Gte, FilterValue::Int(5))],
+            true,
+        )
         .await
         .unwrap();
     assert!(again.is_empty());

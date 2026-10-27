@@ -70,12 +70,12 @@ health registry returns a `Result` (duplicate names), so
 `build_health_registry` uses `expect` on its fixed, distinct names. Handlers
 extract the raw query as `Vec<(String, String)>` (the crate's parsers take
 ordered pairs) and ask the crate for the archived scope. `main` keeps the
-`LoggingGuard` alive to the end and shuts it down after the server stops, so
+`Telemetry` handle alive to the end and shuts it down after the server stops, so
 the last OTLP batch is flushed.
 
 **Logging when the exporter cannot be built.** The crate treats that as an
 error (`Error::ExporterBuild`). The app keeps its old behaviour of not
-failing to start: `main` falls back to `configure_logging_without_export()`
+failing to start: `main` falls back to `configure_telemetry_without_export()`
 and logs a warning.
 
 **Behaviour differences, each accepted.** These are the crates' corrections
@@ -146,3 +146,29 @@ successful route response.
 - Features still not wired (conditional requests, request IDs, stats cache,
   `/health/info`, OTel traces and metrics) are later items; the crates ship
   them, the app does not use them yet.
+
+## Addendum: the move to 0.3.0 of both crates
+
+The app pins `craftainer-crud =0.3.0` and `craftainer-observability =0.3.0`
+(still exact pins, with `Cargo.lock` committed). Behaviour-preserving for the
+Hero routes, with these differences:
+
+1. **Bulk `DELETE` reads `?include_unpublished=`** (default `true`, so a
+   caller that never sends it sees no change; `true`/`1`/`false`/`0`, anything
+   else is `422`). `Repository::count` and `delete_many` take the flag, and the
+   Hero repositories name it and ignore it: Hero has no publish window, so
+   every live row is in it and `false` spares nothing. A resource that gains a
+   window must apply the same visibility clause as its list read. Delete by id
+   ignores the flag.
+2. **`configure_logging*` became `configure_telemetry*`.** `main` keeps the
+   JSON stdout logs, the OTLP log export, the flush at shutdown and the
+   fail-open fallback to `configure_telemetry_without_export()`. The new call
+   also builds an OTLP tracer and meter provider when the environment asks for
+   those signals (`OTEL_EXPORTER_OTLP_ENDPOINT` or the per-signal variables),
+   so with an endpoint set, `tracing` spans such as `TraceLayer`'s are now
+   exported too. The server-span layer, request-id layer, database
+   instrumentation and `/health/info` are not wired here.
+3. **JSON log layout** follows `lib-observability-py`: `level` prints
+   `WARNING` where it printed `WARN`; `trace_id`, `span_id` and `request_id`
+   are top-level keys; credentials are redacted. A log pipeline that matches
+   on the old layout or on `WARN` needs updating.

@@ -321,6 +321,8 @@ async fn delete(
         &owner_id,
         vec![],
         state.settings.bulk_action_max_matched,
+        // by-id delete only (`Some(id)`): the bulk-only flag is moot
+        true,
     )
     .await
     {
@@ -463,6 +465,7 @@ mod tests {
             _filters: &[craftainer_crud::repositories::filtering::FilterClause],
             _include_archived: bool,
             _only_archived: bool,
+            _include_unpublished: bool,
         ) -> Result<u64, craftainer_crud::repositories::RepoError> {
             unimplemented!()
         }
@@ -513,6 +516,7 @@ mod tests {
         async fn delete_many(
             &self,
             _filters: &[craftainer_crud::repositories::filtering::FilterClause],
+            _include_unpublished: bool,
         ) -> Result<Vec<Self::Model>, craftainer_crud::repositories::RepoError> {
             unimplemented!()
         }

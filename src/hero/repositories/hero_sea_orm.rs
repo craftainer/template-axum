@@ -163,6 +163,8 @@ impl Repository for HeroSeaOrmRepository {
         filters: &[FilterClause],
         include_archived: bool,
         only_archived: bool,
+        // Hero has no publish window (docs/adrs/0020): nothing to filter.
+        _include_unpublished: bool,
     ) -> Result<u64, RepoError> {
         let mut query = archive_scope(Entity::find(), include_archived, only_archived);
         query = apply_filters(query, filters);
@@ -276,7 +278,12 @@ impl Repository for HeroSeaOrmRepository {
         Ok(true)
     }
 
-    async fn delete_many(&self, filters: &[FilterClause]) -> Result<Vec<hero::Model>, RepoError> {
+    async fn delete_many(
+        &self,
+        filters: &[FilterClause],
+        // Hero has no publish window (docs/adrs/0020): every live row is in it.
+        _include_unpublished: bool,
+    ) -> Result<Vec<hero::Model>, RepoError> {
         let mut query = Entity::find().filter(Column::ArchivedAt.is_null());
         query = apply_filters(query, filters);
         let existing = query.all(&self.db).await.map_err(backend_err)?;

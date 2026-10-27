@@ -24,8 +24,8 @@ use craftainer_crud::conditional::{not_modified, record_etag, revalidation_heade
 use craftainer_crud::controllers::crud_actions::{self, DeleteOutcome, ListOrGet, UpdateOutcome};
 use craftainer_crud::controllers::crud_events::{self, EventSse};
 use craftainer_crud::controllers::crud_query::{
-    parse_archived_scope, parse_filters, parse_include_archived, parse_sort, reject_only_archived,
-    FieldSpec,
+    parse_archived_scope, parse_bulk_delete_include_unpublished, parse_filters,
+    parse_include_archived, parse_sort, reject_only_archived, FieldSpec,
 };
 use craftainer_crud::controllers::crud_stats;
 use craftainer_crud::crud::DEFAULT_LIMIT;
@@ -244,6 +244,8 @@ async fn delete_hero(
     let filters =
         parse_filters(HERO_FIELD_SPECS, &raw_params).map_err(AppError::UnprocessableEntity)?;
     reject_only_archived(&raw_params).map_err(AppError::UnprocessableEntity)?;
+    let include_unpublished = parse_bulk_delete_include_unpublished(&raw_params)
+        .map_err(AppError::UnprocessableEntity)?;
     let owner_id = claims.subject()?.to_string();
     enforce_if_match(&state, &request_headers, query.id, &raw_params).await?;
 
@@ -253,6 +255,7 @@ async fn delete_hero(
         &owner_id,
         filters,
         state.settings.bulk_action_max_matched,
+        include_unpublished,
     )
     .await?
     {
@@ -361,8 +364,8 @@ async fn get_stats(
         parse_include_archived(&raw_params).map_err(AppError::UnprocessableEntity)?;
     let bucket = crud_stats::parse_bucket(query.bucket.as_ref())?;
 
-    let total_visible = state.hero_crud.count(&[], false, false).await?;
-    let total_all = state.hero_crud.count(&[], true, false).await?;
+    let total_visible = state.hero_crud.count(&[], false, false, true).await?;
+    let total_all = state.hero_crud.count(&[], true, false, true).await?;
     let total = if include_archived {
         total_all
     } else {
@@ -1141,6 +1144,47 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(after.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn bulk_delete_reads_include_unpublished_and_hero_has_no_publish_window() {
+        for flag in ["true", "false", "1", "0"] {
+            let shared_app = app();
+            create_hero(
+                &shared_app,
+                "alice",
+                serde_json::json!({"name": "Spectra", "powers": ["flight"], "power_level": 7}),
+            )
+            .await;
+            let response = shared_app
+                .oneshot(authed(
+                    "DELETE",
+                    &format!("/?power_level=7&include_unpublished={flag}"),
+                    "alice",
+                    &["maintainer"],
+                    serde_json::Value::Null,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "flag {flag}");
+            // Hero has no publish window, so the flag never spares a row.
+            assert_eq!(json_body(response).await["matched"], 1, "flag {flag}");
+        }
+    }
+
+    #[tokio::test]
+    async fn bulk_delete_rejects_a_malformed_include_unpublished() {
+        let response = app()
+            .oneshot(authed(
+                "DELETE",
+                "/?power_level=7&include_unpublished=maybe",
+                "alice",
+                &["maintainer"],
+                serde_json::Value::Null,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
     }
 
     // -- /stats, /predict (docs/adrs/0015, Tier C item 5). --
