@@ -114,11 +114,20 @@ pub async fn build_health_registry(
 /// `Mode::Mock`, an in-memory `tokio::sync::broadcast` fan-out inside it
 /// (NFR-0022 -- mock mode boots with zero containers). Same `Mode`-branch
 /// shape as the repository and rate-limiter choices above/below.
-pub fn build_event_bus(settings: &Settings) -> EventBus {
-    if settings.mode == Mode::Mock {
+///
+/// `subscriber_secret` (`config::subscriber_secret`, at least 32 bytes) is
+/// handed to `EventBus::with_subscriber_secret` so the subscriber ids the
+/// bus mints verify on every replica and after a restart; `None` keeps the
+/// bus's random per-process key (`docs/adrs/0020`).
+pub fn build_event_bus(settings: &Settings, subscriber_secret: Option<&[u8]>) -> EventBus {
+    let bus = if settings.mode == Mode::Mock {
         EventBus::mock()
     } else {
         EventBus::connect(&settings.mqtt_host, settings.mqtt_port)
+    };
+    match subscriber_secret {
+        Some(secret) => bus.with_subscriber_secret(secret),
+        None => bus,
     }
 }
 
@@ -178,8 +187,14 @@ pub async fn build_state_with_db(
             .expect("failed to connect to Redis for rate limiting")
     };
 
+    let subscriber_secret = config::subscriber_secret(settings.mode)
+        .unwrap_or_else(|err| panic!("invalid configuration: {err}"));
+
     AppState {
-        events: Arc::new(build_event_bus(&settings)),
+        events: Arc::new(build_event_bus(
+            &settings,
+            subscriber_secret.as_deref().map(str::as_bytes),
+        )),
         oidc: Arc::new(OidcVerifier::new(settings.clone())),
         settings,
         health_registry: Arc::new(health_registry),
@@ -276,7 +291,7 @@ mod tests {
 
     #[tokio::test]
     async fn mock_mode_builds_an_in_memory_event_bus() {
-        let bus = build_event_bus(&mock_settings());
+        let bus = build_event_bus(&mock_settings(), None);
         // The broker-backed variant would need a live Mosquitto; this one
         // fans out in-process, which is what makes MODE=mock container-free.
         let (_id, mut stream) = bus.subscribe("heroes", None).await.unwrap();
@@ -287,6 +302,21 @@ mod tests {
         ))
         .await;
         assert_eq!(stream.next_event().await.unwrap().ids, vec![1]);
+    }
+
+    #[test]
+    fn a_shared_subscriber_secret_makes_ids_verify_across_buses() {
+        let secret = b"s".repeat(32);
+        let first = build_event_bus(&mock_settings(), Some(&secret));
+        let id = first.mint_subscriber_id("heroes");
+        // A "restart" (or another replica): a new bus with the same secret.
+        let second = build_event_bus(&mock_settings(), Some(&secret));
+        assert_eq!(second.verify_subscriber_id("heroes", &id), Some(id.clone()));
+        // Without it, each bus has its own random key and rejects the id.
+        let unkeyed = build_event_bus(&mock_settings(), None);
+        assert_eq!(unkeyed.verify_subscriber_id("heroes", &id), None);
+        let other = build_event_bus(&mock_settings(), Some(&b"o".repeat(32)));
+        assert_eq!(other.verify_subscriber_id("heroes", &id), None);
     }
 
     #[tokio::test]

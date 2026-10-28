@@ -46,6 +46,13 @@ async fn main() {
             eprintln!("invalid configuration: {err}");
             std::process::exit(1);
         });
+    // Checked here so a bad or (in production) missing SUBSCRIBER_SECRET
+    // exits 1 before any connection is opened; the value is read again by
+    // `build_state_with_db` and never held in `Settings`.
+    if let Err(err) = template_axum::config::subscriber_secret(settings.mode) {
+        eprintln!("invalid configuration: {err}");
+        std::process::exit(1);
+    }
     let settings = Arc::new(settings);
 
     let db = connect_database(&settings).await;
