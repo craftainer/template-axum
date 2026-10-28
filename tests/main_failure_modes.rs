@@ -41,6 +41,74 @@ async fn an_invalid_mode_exits_with_status_1() {
     assert!(stderr.contains("invalid configuration"), "stderr: {stderr}");
 }
 
+/// Runs the binary with `env` and returns (exit code, stderr). The process
+/// must exit on its own, before any connection or bind is attempted.
+async fn run_to_exit(env: Vec<(&'static str, String)>) -> (Option<i32>, String) {
+    let output = tokio::task::spawn_blocking(move || {
+        Command::new(env!("CARGO_BIN_EXE_template-axum"))
+            // Not inherited: only what the test sets counts.
+            .env_remove("SUBSCRIBER_SECRET")
+            .envs(env)
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .output()
+            .expect("failed to spawn the template-axum binary")
+    })
+    .await
+    .unwrap();
+    (
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+/// A `MODE=production` environment that passes every other production check,
+/// so only `SUBSCRIBER_SECRET` decides the outcome.
+fn hardened_production_env() -> Vec<(&'static str, String)> {
+    [
+        ("MODE", "production"),
+        ("OIDC_AUDIENCE", "api"),
+        ("POSTGRES_PASSWORD", "a-real-secret"),
+        ("RUSTFS_ACCESS_KEY", "a-real-key"),
+        ("RUSTFS_SECRET_KEY", "a-real-secret-key"),
+        ("S3_ENDPOINT_URL", "https://s3.example.com"),
+        ("REDIS_URL", "rediss://redis.example.com:6379/0"),
+        ("OIDC_ISSUER_URL", "https://issuer.example.com/realms/api"),
+        ("POSTGRES_SSLMODE", "verify-full"),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k, v.to_string()))
+    .collect()
+}
+
+#[tokio::test]
+async fn production_without_a_subscriber_secret_exits_with_status_1() {
+    let (code, stderr) = run_to_exit(hardened_production_env()).await;
+
+    assert_eq!(code, Some(1));
+    assert!(stderr.contains("invalid configuration"), "stderr: {stderr}");
+    assert!(
+        stderr.contains("SUBSCRIBER_SECRET must be set when MODE=production"),
+        "stderr: {stderr}"
+    );
+}
+
+#[tokio::test]
+async fn a_short_subscriber_secret_exits_with_status_1_without_echoing_it() {
+    let short = "too-short-secret-value";
+    for mut env in [hardened_production_env(), vec![("MODE", "dev".to_string())]] {
+        env.push(("SUBSCRIBER_SECRET", short.to_string()));
+        let (code, stderr) = run_to_exit(env).await;
+        assert_eq!(code, Some(1));
+        assert!(stderr.contains("invalid configuration"), "stderr: {stderr}");
+        assert!(
+            stderr.contains("SUBSCRIBER_SECRET must be at least 32 characters"),
+            "stderr: {stderr}"
+        );
+        assert!(!stderr.contains(short), "the secret leaked: {stderr}");
+    }
+}
+
 #[tokio::test]
 async fn a_port_already_in_use_panics() {
     let _guard = PORT_8000_LOCK.lock().await;

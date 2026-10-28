@@ -188,6 +188,22 @@ Behind PgBouncer in transaction mode the pooler must be >= 1.21 with
 (`connect_database` + `build_state_with_db`) and closes it once
 `axum::serve` returns.
 
+## Event-stream subscriber secret
+
+`craftainer-crud` signs the subscriber ids `/events` hands out (a client can
+only hand one back). `SUBSCRIBER_SECRET` is the signing key, as in
+template-fastapi: optional, at least 32 characters, and required under
+`MODE=production` (startup exits 1 with `invalid configuration:
+SUBSCRIBER_SECRET must be set when MODE=production`). Set to something
+shorter it fails in every mode; the message never contains the value. Unset
+(dev, mock) the bus uses a random per-process key, so ids survive neither a
+restart nor a second replica; set the same value on every replica to let a
+client resume across both. `config::subscriber_secret(mode)` reads it; `main`
+checks it before opening any connection, `build_state_with_db` passes it to
+`build_event_bus(settings, secret)` (`EventBus::with_subscriber_secret`).
+It is deliberately not a `Settings` field, so no `Debug` output of the
+settings can print it. `docs/adrs/0020` records the decision.
+
 ## Graceful shutdown
 
 On SIGINT or SIGTERM `main.rs` cancels `AppState.shutdown` (ending every

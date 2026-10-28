@@ -135,9 +135,7 @@ successful route response.
   verify on another or after a restart: the client gets a fresh session and no
   replay. With one replica that only shows after a restart. Running several
   behind a load balancer needs `EventBus::with_subscriber_secret` with one
-  shared secret (at least 32 bytes), which needs an app setting (name,
-  whether production requires it) that is not designed here; it is left as
-  a follow-up.
+  shared secret. Resolved by AX16: see "Addendum: `SUBSCRIBER_SECRET`".
 - The crates add nothing to the data-model contract, so the Hero repositories
   only gained `only_archived` and the `Float` filter value.
 - `.github/scripts/check_layering.py` lost its `crud`, `events`, `health`,
@@ -172,3 +170,19 @@ Hero routes, with these differences:
    `WARNING` where it printed `WARN`; `trace_id`, `span_id` and `request_id`
    are top-level keys; credentials are redacted. A log pipeline that matches
    on the old layout or on `WARN` needs updating.
+
+## Addendum: `SUBSCRIBER_SECRET`
+
+The follow-up above is closed with the same rule as template-fastapi:
+`SUBSCRIBER_SECRET` is optional, at least 32 characters when set (a shorter
+value, including an empty one, fails startup in every mode), and required
+when `MODE=production` (startup exits 1 with `invalid configuration`).
+Unset in dev and mock, the crate's random per-process key applies. The value
+reaches `EventBus::with_subscriber_secret` through `build_event_bus`.
+
+It is read by `config::subscriber_secret(mode)` instead of being a `Settings`
+field, like `GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS` (ADR 0027): adding a field
+would break every `Settings { .. }` literal in the unit tests, and keeping
+the key out of `Settings` means its `Debug` output (and so any settings dump
+or log line) cannot contain it. Error messages name the variable and never
+echo the value.
