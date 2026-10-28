@@ -116,6 +116,11 @@ tests/perf/run-real-stack.sh template-axum:<version> --users 20 --run-time 60s
    `DB_CONNECT_TIMEOUT`, `RUN_MIGRATIONS_ON_STARTUP`) from the caller's
    environment to the app container, when set (`docs/adrs/0022`), e.g.
    `DB_POOL_SIZE=4 DB_POOL_MIN_SIZE=4 tests/perf/run-real-stack.sh ...`;
+   it also forwards the telemetry settings under test (`OTEL_EXPORTER_OTLP_ENDPOINT`,
+   `OTEL_SERVICE_NAME`, `OTEL_TRACES_SAMPLER`, `OTEL_TRACES_SAMPLER_ARG`,
+   `OTEL_LOGS_EXPORTER`), when set (`docs/adrs/0026`). The endpoint must be
+   reachable from the `keycloak_default` network, for example an OpenTelemetry
+   Collector container with a `nop` exporter attached to it;
 3. drops and recreates the `ax4h_perf` database on the shared Postgres
    (`PERF_DB` to rename it; no other database is touched);
 4. starts the image as `ax4h-perf-app` on the Keycloak network, also
