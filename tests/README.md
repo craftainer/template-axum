@@ -54,6 +54,10 @@ directory tree, so this instance's four tiers live in different places:
     for a collector (the stack has none), a startup record and the record
     logged at shutdown must reach it, and an exporter that cannot be built
     must fall back to JSON logs. Binds the fixed port 8000, like `e2e.rs`.
+  - `health_info.rs` — `GET /health/info` over the mock-mode router:
+    version and commit from `APP_VERSION`/`APP_COMMIT`, `null` when unset
+    or empty (`docs/adrs/0026`). Needs no service; it sets the process
+    environment, so it is the only test in its binary.
   - `redis_rate_limiter.rs` — `rate_limit::RateLimiter`'s real-Redis
     backend against live Redis: `RateLimiter::connect`'s success path and
     a check/increment/reject round trip. The unreachable-server failure
