@@ -7,6 +7,7 @@ use std::future::IntoFuture;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use craftainer_observability::otel::instrument_db;
 use craftainer_observability::{
     configure_telemetry, logs::configure_telemetry_without_export, Error as ObservabilityError,
     Telemetry,
@@ -56,6 +57,11 @@ async fn main() {
     let settings = Arc::new(settings);
 
     let db = connect_database(&settings).await;
+    // Pool gauges (`db.client.connections.*`) on the meter provider
+    // `configure_telemetry` set; no-ops when no metrics export is configured.
+    if let Some(db) = &db {
+        instrument_db(db.get_postgres_connection_pool());
+    }
     let state = build_state_with_db(settings, db.clone()).await;
     // Cancelled the moment the shutdown signal fires: ends every open
     // `/events` stream, which would otherwise hold the drain open forever.

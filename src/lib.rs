@@ -34,8 +34,11 @@ use craftainer_crud::events::EventBus;
 use craftainer_observability::health::checks::{
     DatabaseHealthCheck, HttpHealthCheck, MockHealthCheck, RedisHealthCheck, S3HealthCheck,
 };
+use craftainer_observability::health::info::info_router;
 use craftainer_observability::health::router::router as health_router;
 use craftainer_observability::health::HealthRegistry;
+use craftainer_observability::otel::ServerSpanLayer;
+use craftainer_observability::request_id::RequestIdLayer;
 use generic::controllers as generic_controllers;
 use hero::controllers::{self as hero_controllers, AppState};
 use hero::repositories::hero_memory::HeroMemoryRepository;
@@ -207,9 +210,16 @@ pub async fn build_state_with_db(
 /// Mount every router onto one `Router`, at the exact paths
 /// template-fastapi uses (`docs/adrs/0002`). `/mock` exists only under
 /// `Mode::Mock`.
+///
+/// Layers, outermost first: `RequestIdLayer` (validates or creates
+/// `X-Request-ID`, echoes it, opens the `request` span so every log line
+/// below carries `request_id`), `ServerSpanLayer` (one OpenTelemetry server
+/// span per request named after the matched route, none for `/health/*`;
+/// built here, so after `configure_telemetry` in `main`), `TraceLayer`
+/// (`docs/adrs/0026`).
 pub fn build_router(state: AppState) -> Router {
     let mut app = Router::new()
-        .nest("/health", health_router())
+        .nest("/health", health_router().merge(info_router()))
         .nest("/audit", generic_controllers::audit::router())
         .nest(
             "/crud/v1/heroes/v2/json",
@@ -233,7 +243,10 @@ pub fn build_router(state: AppState) -> Router {
         app = app.nest("/mock", generic_controllers::mock::router());
     }
 
-    app.with_state(state).layer(TraceLayer::new_for_http())
+    app.with_state(state)
+        .layer(TraceLayer::new_for_http())
+        .layer(ServerSpanLayer::new())
+        .layer(RequestIdLayer::new())
 }
 
 #[cfg(test)]
@@ -358,5 +371,66 @@ mod tests {
             .await
             .unwrap();
         assert_ne!(mock_route.status(), StatusCode::NOT_FOUND);
+    }
+
+    async fn get(app: &Router, path: &str, request_id: Option<&str>) -> axum::response::Response {
+        let mut request = Request::builder().uri(path);
+        if let Some(value) = request_id {
+            request = request.header("x-request-id", value);
+        }
+        app.clone()
+            .oneshot(request.body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+    }
+
+    fn request_id_of(response: &axum::response::Response) -> String {
+        response
+            .headers()
+            .get("x-request-id")
+            .expect("every response carries X-Request-ID")
+            .to_str()
+            .unwrap()
+            .to_string()
+    }
+
+    #[tokio::test]
+    async fn the_request_id_is_echoed_when_valid_and_replaced_otherwise() {
+        let app = build_router(build_state(Arc::new(mock_settings())).await);
+
+        let echoed = get(&app, "/health/live", Some("client.id_1-A")).await;
+        assert_eq!(request_id_of(&echoed), "client.id_1-A");
+
+        let generated = get(&app, "/health/live", None).await;
+        let id = request_id_of(&generated);
+        assert_eq!(id.len(), 32);
+        assert!(id.bytes().all(|b| b.is_ascii_hexdigit()));
+
+        // Not in `[A-Za-z0-9._-]`, and over 128 characters: both replaced.
+        for bad in ["has space", "semi;colon", &"a".repeat(129)] {
+            let replaced = get(&app, "/health/live", Some(bad)).await;
+            let id = request_id_of(&replaced);
+            assert_ne!(id, bad);
+            assert_eq!(id.len(), 32);
+        }
+
+        // Routes outside /health get it too, including a 404.
+        let other = get(&app, "/heroes/form", Some("abc")).await;
+        assert_eq!(request_id_of(&other), "abc");
+        let missing = get(&app, "/no/such/route", Some("abc")).await;
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+        assert_eq!(request_id_of(&missing), "abc");
+    }
+
+    #[tokio::test]
+    async fn health_info_is_mounted_next_to_the_health_checks() {
+        let app = build_router(build_state(Arc::new(mock_settings())).await);
+        let response = get(&app, "/health/info", None).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json.get("version").is_some() && json.get("commit").is_some());
     }
 }

@@ -285,6 +285,21 @@ an exporter that cannot be built falls back to JSON logs with a warning.
 server stops, which flushes the last batch (`docs/adrs/0020`,
 `tests/otlp_log_export.rs`).
 
+## Request IDs, server spans and `/health/info`
+
+`build_router` layers, outermost first, `RequestIdLayer` (validates or
+creates `X-Request-ID`, echoes it, puts `request_id` on a `request` span
+that every log line below carries), `ServerSpanLayer` (one OpenTelemetry
+server span per request named after the matched route; none for
+`/health/*`) and `TraceLayer`. `main()` calls `instrument_db` with sea-orm's
+underlying `PgPool` for the `db.client.connections.*` gauges (not in
+`Mode::Mock`). `GET /health/info` (`{"version","commit"}` from
+`APP_VERSION`/`APP_COMMIT`, `null` when unset) is `info_router()` merged
+into the `/health` nest. Sampling is the SDK's own `OTEL_TRACES_SAMPLER` /
+`OTEL_TRACES_SAMPLER_ARG`; the app has no setting for it. The reasoning,
+and the pending overhead measurement, are in `docs/adrs/0026` and
+`docs/nfrs/NFR-0032`.
+
 ## RFC 9457 error responses
 
 `problem_details::AppError` is the one error type every controller
