@@ -11,6 +11,9 @@
 //! statement even with `statement_cache_capacity(0)`, and sea-orm exposes no
 //! `persistent(false)`; see `docs/adrs/0022`.
 //!
+//! sqlx's per-statement logging is switched off (`docs/adrs/0022`
+//! addendum).
+//!
 //! Layering: this module imports only `config` (`src/README.md`).
 
 use sea_orm::sqlx::postgres::{PgConnectOptions, PgSslMode};
@@ -61,6 +64,11 @@ pub fn connect_options(settings: &Settings) -> ConnectOptions {
     if let Some(acquire) = db.connect_timeout {
         options.connect_timeout(acquire);
     }
+    // sea-orm logs every statement at INFO by default (`sqlx::query`), about
+    // 1.6 lines per request and ~99.9% of all app log lines under load.
+    // template-fastapi logs none; query visibility comes from the
+    // `instrument_db` spans when tracing is on (`docs/adrs/0022` addendum).
+    options.sqlx_logging(false);
     let sslmode = db.sslmode;
     options.map_sqlx_postgres_opts(move |pg| apply_pg_options(pg, sslmode));
     options
@@ -115,6 +123,12 @@ mod tests {
         assert_eq!(options.get_acquire_timeout(), None);
         assert_eq!(options.get_idle_timeout(), None);
         assert_eq!(options.get_max_lifetime(), None);
+    }
+
+    #[test]
+    fn sqlx_statement_logging_is_off() {
+        let options = connect_options(&settings(DbSettings::default()));
+        assert!(!options.get_sqlx_logging());
     }
 
     #[test]

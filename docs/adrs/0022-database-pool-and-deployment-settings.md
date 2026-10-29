@@ -128,3 +128,18 @@ Measured effect: not yet. Expected near zero (see Context). The perf tier's
 default-versus-configured comparison is recorded here when it has run; the
 defaults stay unchanged unless it shows a saving above the run-to-run spread
 and of at least 3% (`NFR-0031`).
+
+## Addendum (2026-10-29): sqlx statement logging is off
+
+sea-orm enables sqlx statement logging by default: every query is one
+`sqlx::query` event at INFO. The L2 load run found 99,264 of 99,271 app log
+lines in 15 s were these events (about 1.6 per request), written to stdout
+even with telemetry off and exported over OTLP when it is on.
+template-fastapi logs no statements by default.
+
+Decision (user, 2026-10-29): `db::connect_options` calls
+`sqlx_logging(false)` (sea-orm 2.0.2 `ConnectOptions::sqlx_logging`; its
+Postgres driver then calls sqlx's `disable_statement_logging`). It is not
+lowered to DEBUG and not a setting. Query visibility remains through the
+`instrument_db` spans when tracing is on (ADR 0026). `src/db.rs` has a unit
+test on `get_sqlx_logging()`.

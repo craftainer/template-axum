@@ -167,7 +167,9 @@ encrypting mode, or `OIDC_AUDIENCE` is unset
 
 `db::connect_options` turns `config::DbSettings` into sea-orm's
 `ConnectOptions`; a setting is passed on only when its variable is set, so
-an unconfigured process keeps sea-orm/sqlx's defaults. `docs/adrs/0022` and
+an unconfigured process keeps sea-orm/sqlx's defaults, except that sqlx's
+per-statement `sqlx::query` logging is always off (`sqlx_logging(false)`;
+query visibility is the `instrument_db` spans). `docs/adrs/0022` and
 `docs/nfrs/NFR-0031` give the reasoning; the variables are:
 
 | Variable | Default | Effect |
