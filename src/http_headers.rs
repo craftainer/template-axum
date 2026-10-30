@@ -31,9 +31,15 @@ const SECURITY_HEADERS: [(&str, &str); 6] = [
     ("x-content-type-options", "nosniff"),
     // Pins every origin serving this app to HTTPS for future requests;
     // browsers ignore it over plain HTTP, so it is harmless in dev.
-    ("strict-transport-security", "max-age=63072000; includeSubDomains"),
+    (
+        "strict-transport-security",
+        "max-age=63072000; includeSubDomains",
+    ),
     ("referrer-policy", "no-referrer"),
-    ("permissions-policy", "geolocation=(), microphone=(), camera=()"),
+    (
+        "permissions-policy",
+        "geolocation=(), microphone=(), camera=()",
+    ),
 ];
 
 /// Response layer (`axum::middleware::map_response`) that sets
@@ -42,9 +48,10 @@ const SECURITY_HEADERS: [(&str, &str); 6] = [
 /// reach. Overwrites a header a handler already set, like the reference.
 pub async fn security_headers(mut response: Response) -> Response {
     for (name, value) in SECURITY_HEADERS {
-        response
-            .headers_mut()
-            .insert(HeaderName::from_static(name), HeaderValue::from_static(value));
+        response.headers_mut().insert(
+            HeaderName::from_static(name),
+            HeaderValue::from_static(value),
+        );
     }
     response
 }
@@ -125,7 +132,15 @@ mod tests {
             .headers_mut()
             .insert("x-frame-options", HeaderValue::from_static("SAMEORIGIN"));
         let response = security_headers(response).await;
-        let header = |name: &str| response.headers().get(name).unwrap().to_str().unwrap().to_string();
+        let header = |name: &str| {
+            response
+                .headers()
+                .get(name)
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .to_string()
+        };
         assert_eq!(
             header("content-security-policy"),
             "default-src 'self'; frame-ancestors 'none'"

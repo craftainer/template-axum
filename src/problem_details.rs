@@ -282,7 +282,8 @@ mod tests {
             missing.headers().get("www-authenticate").unwrap(),
             "Bearer resource_metadata=\"https://api.example/m\""
         );
-        let rejected = with_challenge(AppError::InvalidToken("x".to_string()).into_response()).await;
+        let rejected =
+            with_challenge(AppError::InvalidToken("x".to_string()).into_response()).await;
         assert_eq!(
             rejected.headers().get("www-authenticate").unwrap(),
             "Bearer resource_metadata=\"https://api.example/m\", error=\"invalid_token\""

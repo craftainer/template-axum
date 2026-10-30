@@ -456,7 +456,10 @@ async fn resource_server_journey(client: &reqwest::Client) {
     let headers = response.headers().clone();
     let document: Value = response.json().await.unwrap();
     assert_eq!(document["resource"], PUBLIC_BASE_URL);
-    assert_eq!(document["authorization_servers"], json!([expected_issuer()]));
+    assert_eq!(
+        document["authorization_servers"],
+        json!([expected_issuer()])
+    );
     assert_eq!(document["bearer_methods_supported"], json!(["header"]));
     assert_eq!(document["scopes_supported"], json!(["openid"]));
     assert_eq!(document["resource_name"], "template-axum");
@@ -513,7 +516,10 @@ async fn resource_server_journey(client: &reqwest::Client) {
         .await
         .unwrap();
     assert_eq!(catalog.status(), 200);
-    assert_eq!(catalog.headers()["content-type"], "application/linkset+json");
+    assert_eq!(
+        catalog.headers()["content-type"],
+        "application/linkset+json"
+    );
     let catalog: Value = catalog.json().await.unwrap();
     assert_eq!(catalog["linkset"][0]["anchor"], PUBLIC_BASE_URL);
     assert_eq!(
@@ -532,7 +538,12 @@ async fn resource_server_journey(client: &reqwest::Client) {
     let resources = manifest["resources"].as_array().unwrap();
     let names: Vec<(&str, &str)> = resources
         .iter()
-        .map(|r| (r["name"].as_str().unwrap(), r["api_version"].as_str().unwrap()))
+        .map(|r| {
+            (
+                r["name"].as_str().unwrap(),
+                r["api_version"].as_str().unwrap(),
+            )
+        })
         .collect();
     assert_eq!(names, [("heroes", "v1"), ("heroes", "v2")]);
     assert_eq!(
@@ -558,10 +569,7 @@ async fn dev_and_mock_role_journeys_run_against_a_real_live_server() {
                 ("PUBLIC_BASE_URL", PUBLIC_BASE_URL),
                 ("SECURITY_TXT_CONTACT", "mailto:security@example.com"),
                 ("SECURITY_TXT_EXPIRES", &expires),
-                (
-                    "SECURITY_TXT_POLICY",
-                    "https://example.com/security-policy",
-                ),
+                ("SECURITY_TXT_POLICY", "https://example.com/security-policy"),
             ],
         );
         wait_until_ready(&client, "/health/ready").await;

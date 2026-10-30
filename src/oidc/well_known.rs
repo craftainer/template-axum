@@ -64,7 +64,10 @@ async fn security_txt(State(resource): State<Arc<ResourceServer>>) -> Response {
         .unwrap_or_default();
     (
         [
-            (CONTENT_TYPE, HeaderValue::from_static("text/plain; charset=utf-8")),
+            (
+                CONTENT_TYPE,
+                HeaderValue::from_static("text/plain; charset=utf-8"),
+            ),
             (CACHE_CONTROL, HeaderValue::from_static(CACHE)),
         ],
         body,

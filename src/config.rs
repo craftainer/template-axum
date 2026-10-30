@@ -545,9 +545,12 @@ impl ResourceServer {
         }
         if production {
             match &public_base_url {
-                None => problems.push("PUBLIC_BASE_URL must be set when MODE=production".to_string()),
+                None => {
+                    problems.push("PUBLIC_BASE_URL must be set when MODE=production".to_string())
+                }
                 Some(url) if !url.starts_with("https://") => {
-                    problems.push("PUBLIC_BASE_URL must use https:// when MODE=production".to_string());
+                    problems
+                        .push("PUBLIC_BASE_URL must use https:// when MODE=production".to_string());
                 }
                 Some(_) => {}
             }
@@ -587,7 +590,10 @@ impl ResourceServer {
 
     /// Absolute URL of the RFC 9728 protected-resource metadata document.
     pub fn resource_metadata_url(&self) -> String {
-        format!("{}/.well-known/oauth-protected-resource", self.public_base_url)
+        format!(
+            "{}/.well-known/oauth-protected-resource",
+            self.public_base_url
+        )
     }
 }
 
@@ -615,7 +621,10 @@ impl SecurityTxt {
             ("SECURITY_TXT_CONTACT", Some(&contact)),
             ("SECURITY_TXT_POLICY", policy.as_ref()),
             ("SECURITY_TXT_CANONICAL", canonical.as_ref()),
-            ("SECURITY_TXT_PREFERRED_LANGUAGES", preferred_languages.as_ref()),
+            (
+                "SECURITY_TXT_PREFERRED_LANGUAGES",
+                preferred_languages.as_ref(),
+            ),
         ] {
             if value.is_some_and(|v| v.trim().is_empty() || v.chars().any(char::is_control)) {
                 problems.push(format!("{key} must be a single line of text"));
@@ -625,7 +634,8 @@ impl SecurityTxt {
             .iter()
             .any(|scheme| contact.starts_with(scheme))
         {
-            problems.push("SECURITY_TXT_CONTACT must be an https:, mailto: or tel: URI".to_string());
+            problems
+                .push("SECURITY_TXT_CONTACT must be an https:, mailto: or tel: URI".to_string());
         }
         if [&policy, &canonical]
             .iter()
@@ -638,7 +648,9 @@ impl SecurityTxt {
 
         let expires = match get("SECURITY_TXT_EXPIRES") {
             None => {
-                problems.push("SECURITY_TXT_EXPIRES must be set when SECURITY_TXT_CONTACT is".to_string());
+                problems.push(
+                    "SECURITY_TXT_EXPIRES must be set when SECURITY_TXT_CONTACT is".to_string(),
+                );
                 None
             }
             Some(raw) => match chrono::DateTime::parse_from_rfc3339(&raw) {
@@ -694,7 +706,10 @@ impl SecurityTxt {
 }
 
 fn discovery_url_for(issuer: &str) -> String {
-    format!("{}/.well-known/openid-configuration", issuer.trim_end_matches('/'))
+    format!(
+        "{}/.well-known/openid-configuration",
+        issuer.trim_end_matches('/')
+    )
 }
 
 /// `scheme://host[:port]` with at most one trailing slash and nothing else.
@@ -706,7 +721,9 @@ fn is_origin(url: &str) -> bool {
         return false;
     };
     let host = rest.strip_suffix('/').unwrap_or(rest);
-    !host.is_empty() && !host.contains(['/', '?', '#', '@', ' ']) && host.chars().all(|c| !c.is_control())
+    !host.is_empty()
+        && !host.contains(['/', '?', '#', '@', ' '])
+        && host.chars().all(|c| !c.is_control())
 }
 
 fn env_or(key: &str, default: &str) -> String {
@@ -1154,10 +1171,7 @@ mod tests {
         }
     }
 
-    fn resource_server(
-        mode: Mode,
-        vars: &[(&str, &str)],
-    ) -> Result<ResourceServer, String> {
+    fn resource_server(mode: Mode, vars: &[(&str, &str)]) -> Result<ResourceServer, String> {
         let vars: std::collections::HashMap<String, String> = vars
             .iter()
             .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
@@ -1243,8 +1257,14 @@ mod tests {
     fn production_requires_a_public_https_origin_and_https_oidc_urls() {
         let err = resource_server(Mode::Production, &[]).unwrap_err();
         assert!(err.contains("PUBLIC_BASE_URL must be set"), "{err}");
-        assert!(err.contains("OIDC_ISSUER_URL/OIDC_ISSUER must use https://"), "{err}");
-        assert!(err.contains("OIDC_DISCOVERY_URL must use https://"), "{err}");
+        assert!(
+            err.contains("OIDC_ISSUER_URL/OIDC_ISSUER must use https://"),
+            "{err}"
+        );
+        assert!(
+            err.contains("OIDC_DISCOVERY_URL must use https://"),
+            "{err}"
+        );
 
         let err = resource_server(
             Mode::Production,
@@ -1256,7 +1276,10 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("PUBLIC_BASE_URL must use https://"), "{err}");
-        assert!(err.contains("OIDC_DISCOVERY_URL must use https://"), "{err}");
+        assert!(
+            err.contains("OIDC_DISCOVERY_URL must use https://"),
+            "{err}"
+        );
         assert!(!err.contains("OIDC_ISSUER"), "{err}");
 
         assert!(resource_server(
@@ -1271,10 +1294,12 @@ mod tests {
 
     #[test]
     fn security_txt_is_off_without_a_contact_and_renders_every_field() {
-        assert!(resource_server(Mode::Dev, &[("SECURITY_TXT_POLICY", "https://p.example")])
-            .unwrap()
-            .security_txt
-            .is_none());
+        assert!(
+            resource_server(Mode::Dev, &[("SECURITY_TXT_POLICY", "https://p.example")])
+                .unwrap()
+                .security_txt
+                .is_none()
+        );
 
         let expires = in_days(30);
         let rs = resource_server(
@@ -1283,7 +1308,10 @@ mod tests {
                 ("SECURITY_TXT_CONTACT", "mailto:security@example.com"),
                 ("SECURITY_TXT_EXPIRES", &expires),
                 ("SECURITY_TXT_POLICY", "https://example.com/policy"),
-                ("SECURITY_TXT_CANONICAL", "https://example.com/.well-known/security.txt"),
+                (
+                    "SECURITY_TXT_CANONICAL",
+                    "https://example.com/.well-known/security.txt",
+                ),
                 ("SECURITY_TXT_PREFERRED_LANGUAGES", "en, de"),
             ],
         )
@@ -1340,9 +1368,15 @@ mod tests {
         let expires = in_days(30);
         let expires = ("SECURITY_TXT_EXPIRES", expires.as_str());
         for (extra, needle) in [
-            (("SECURITY_TXT_CONTACT", "http://example.com"), "https:, mailto: or tel:"),
+            (
+                ("SECURITY_TXT_CONTACT", "http://example.com"),
+                "https:, mailto: or tel:",
+            ),
             (("SECURITY_TXT_CONTACT", "   "), "single line"),
-            (("SECURITY_TXT_CONTACT", "mailto:a@b\nContact: evil"), "single line"),
+            (
+                ("SECURITY_TXT_CONTACT", "mailto:a@b\nContact: evil"),
+                "single line",
+            ),
         ] {
             let err = resource_server(Mode::Dev, &[extra, expires]).unwrap_err();
             assert!(err.contains(needle), "{extra:?}: {err}");
@@ -1350,7 +1384,11 @@ mod tests {
         for key in ["SECURITY_TXT_POLICY", "SECURITY_TXT_CANONICAL"] {
             let err = resource_server(
                 Mode::Dev,
-                &[("SECURITY_TXT_CONTACT", "mailto:a@b"), expires, (key, "http://x")],
+                &[
+                    ("SECURITY_TXT_CONTACT", "mailto:a@b"),
+                    expires,
+                    (key, "http://x"),
+                ],
             )
             .unwrap_err();
             assert!(err.contains("must be https:// URLs"), "{key}: {err}");
@@ -1373,12 +1411,11 @@ mod tests {
         clear_all();
         let settings = Settings::from_env().unwrap();
         assert_eq!(settings.oidc_audience.as_deref(), Some("api"));
-        assert_eq!(
-            ResourceServer::from_env(&settings).unwrap().audience,
-            "api"
-        );
+        assert_eq!(ResourceServer::from_env(&settings).unwrap().audience, "api");
         unsafe { env::set_var("PUBLIC_BASE_URL", "not a url") };
-        assert!(Settings::from_env().unwrap_err().contains("PUBLIC_BASE_URL"));
+        assert!(Settings::from_env()
+            .unwrap_err()
+            .contains("PUBLIC_BASE_URL"));
         clear_all();
     }
 

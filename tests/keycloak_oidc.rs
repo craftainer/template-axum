@@ -109,9 +109,7 @@ async fn a_real_token_carries_the_public_issuer_the_api_audience_and_the_roles()
         aud == "api" || aud.as_array().is_some_and(|a| a.iter().any(|v| v == "api")),
         "aud must contain api, got {aud}"
     );
-    assert!(claims
-        .require_any_role("api", &["viewer"])
-        .is_ok());
+    assert!(claims.require_any_role("api", &["viewer"]).is_ok());
 }
 
 fn base64_url(bytes: &[u8]) -> String {

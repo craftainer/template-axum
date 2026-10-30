@@ -32,6 +32,10 @@ use tower_http::trace::TraceLayer;
 use config::{Mode, ResourceServer, Settings};
 use craftainer_crud::crud::CrudService;
 use craftainer_crud::events::EventBus;
+use craftainer_crud::manifest::{
+    api_catalog_router, manifest_router, Access, EventsDescriptor, Features, ManifestConfig,
+    ManifestField, ManifestRegistry, Replay, ResourceDescriptor,
+};
 use craftainer_crud::stats_cache::CachedStats;
 use craftainer_observability::health::checks::{
     DatabaseHealthCheck, HttpHealthCheck, MockHealthCheck, RedisHealthCheck, S3HealthCheck,
@@ -45,10 +49,6 @@ use generic::controllers as generic_controllers;
 use hero::controllers::{self as hero_controllers, AppState, HERO_EVENT_RESOURCE};
 use hero::repositories::hero_memory::HeroMemoryRepository;
 use hero::repositories::hero_sea_orm::HeroSeaOrmRepository;
-use craftainer_crud::manifest::{
-    api_catalog_router, manifest_router, Access, EventsDescriptor, Features, ManifestConfig,
-    ManifestField, ManifestRegistry, Replay, ResourceDescriptor,
-};
 use oidc::well_known::ManifestCallers;
 use oidc::OidcVerifier;
 use rate_limit::RateLimiter;
@@ -305,13 +305,20 @@ fn hero_descriptor(version: &str, mode: Mode) -> ResourceDescriptor {
         );
 
     let json_path = format!("/crud/v1/heroes/{version}/json");
-    let title = if v2 { "Heroes" } else { "Heroes (v1, deprecated)" };
+    let title = if v2 {
+        "Heroes"
+    } else {
+        "Heroes (v1, deprecated)"
+    };
     let mut descriptor = ResourceDescriptor::new(
         "heroes",
         title,
         version,
         json_path,
-        schema(read_properties, &["id", "owner_id", "created_at", "updated_at"]),
+        schema(
+            read_properties,
+            &["id", "owner_id", "created_at", "updated_at"],
+        ),
         body(&["name", power_key]),
         body(&[]),
     );
@@ -324,7 +331,9 @@ fn hero_descriptor(version: &str, mode: Mode) -> ResourceDescriptor {
             let field = ManifestField::from_spec(spec);
             match spec.name {
                 "name" => field.required(),
-                "id" | "owner_id" | "archived_at" | "created_at" | "updated_at" => field.read_only(),
+                "id" | "owner_id" | "archived_at" | "created_at" | "updated_at" => {
+                    field.read_only()
+                }
                 _ => field,
             }
         })
@@ -345,9 +354,18 @@ fn hero_descriptor(version: &str, mode: Mode) -> ResourceDescriptor {
     ));
     descriptor.access = Access {
         public_read: false,
-        read_roles: hero_controllers::HERO_READ_ROLES.iter().map(|r| (*r).to_string()).collect(),
-        write_roles: hero_controllers::HERO_WRITE_ROLES.iter().map(|r| (*r).to_string()).collect(),
-        delete_roles: hero_controllers::HERO_DELETE_ROLES.iter().map(|r| (*r).to_string()).collect(),
+        read_roles: hero_controllers::HERO_READ_ROLES
+            .iter()
+            .map(|r| (*r).to_string())
+            .collect(),
+        write_roles: hero_controllers::HERO_WRITE_ROLES
+            .iter()
+            .map(|r| (*r).to_string())
+            .collect(),
+        delete_roles: hero_controllers::HERO_DELETE_ROLES
+            .iter()
+            .map(|r| (*r).to_string())
+            .collect(),
     };
     descriptor
 }
@@ -431,7 +449,8 @@ pub fn build_router(state: AppState) -> Router {
         app = app.nest("/mock", generic_controllers::mock::router());
     }
 
-    let resource_metadata_url: Arc<str> = state.oidc.resource_server().resource_metadata_url().into();
+    let resource_metadata_url: Arc<str> =
+        state.oidc.resource_server().resource_metadata_url().into();
     let discovery = discovery_routers(&state);
     let well_known = oidc::well_known::router(state.oidc.resource_server().clone());
     app.with_state(state)
@@ -441,7 +460,9 @@ pub fn build_router(state: AppState) -> Router {
             resource_metadata_url,
             problem_details::add_resource_metadata,
         ))
-        .layer(axum::middleware::map_response(http_headers::security_headers))
+        .layer(axum::middleware::map_response(
+            http_headers::security_headers,
+        ))
         .layer(TraceLayer::new_for_http())
         .layer(ServerSpanLayer::new())
         .layer(RequestIdLayer::new())
@@ -706,7 +727,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(rejected.status(), StatusCode::UNAUTHORIZED);
-        assert_eq!(challenge(&rejected), format!("{bare}, error=\"invalid_token\""));
+        assert_eq!(
+            challenge(&rejected),
+            format!("{bare}, error=\"invalid_token\"")
+        );
     }
 
     #[tokio::test]
@@ -738,7 +762,10 @@ mod tests {
             assert_eq!(header("x-content-type-options"), "nosniff", "{path}");
             assert_eq!(header("x-frame-options"), "DENY", "{path}");
             assert_eq!(header("referrer-policy"), "no-referrer", "{path}");
-            assert!(header("strict-transport-security").starts_with("max-age="), "{path}");
+            assert!(
+                header("strict-transport-security").starts_with("max-age="),
+                "{path}"
+            );
         }
     }
 
@@ -746,7 +773,8 @@ mod tests {
     async fn serves_the_protected_resource_metadata_and_the_api_catalog() {
         let app = router_with_public_url().await;
 
-        let metadata = json_of(get(&app, "/.well-known/oauth-protected-resource", None).await).await;
+        let metadata =
+            json_of(get(&app, "/.well-known/oauth-protected-resource", None).await).await;
         assert_eq!(metadata["resource"], "https://api.example.com");
         assert_eq!(
             metadata["authorization_servers"],
@@ -807,7 +835,12 @@ mod tests {
         let resources = manifest["resources"].as_array().unwrap();
         let versions: Vec<(&str, &str)> = resources
             .iter()
-            .map(|r| (r["name"].as_str().unwrap(), r["api_version"].as_str().unwrap()))
+            .map(|r| {
+                (
+                    r["name"].as_str().unwrap(),
+                    r["api_version"].as_str().unwrap(),
+                )
+            })
             .collect();
         assert_eq!(versions, [("heroes", "v1"), ("heroes", "v2")]);
         let v2 = &resources[1];
@@ -817,7 +850,10 @@ mod tests {
             v2["auth"]["oidc_discovery_url"],
             "https://id.example.com/realms/r/.well-known/openid-configuration"
         );
-        assert_eq!(v2["auth"]["write_roles"], serde_json::json!(["editor", "maintainer"]));
+        assert_eq!(
+            v2["auth"]["write_roles"],
+            serde_json::json!(["editor", "maintainer"])
+        );
         assert!(v2["fields"]
             .as_array()
             .unwrap()
