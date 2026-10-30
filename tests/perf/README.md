@@ -118,8 +118,10 @@ tests/perf/run-real-stack.sh template-axum:<version> --users 20 --run-time 60s
    `DB_POOL_SIZE=4 DB_POOL_MIN_SIZE=4 tests/perf/run-real-stack.sh ...`;
    it also forwards the telemetry settings under test (`OTEL_EXPORTER_OTLP_ENDPOINT`,
    `OTEL_SERVICE_NAME`, `OTEL_TRACES_SAMPLER`, `OTEL_TRACES_SAMPLER_ARG`,
-   `OTEL_LOGS_EXPORTER`), when set (`docs/adrs/0026`). The endpoint must be
-   reachable from the `keycloak_default` network, for example an OpenTelemetry
+   `OTEL_LOGS_EXPORTER`), when set (`docs/adrs/0026`), and
+   `STATS_CACHE_TTL_SECONDS` (`docs/adrs/0024`; the cache uses the script's
+   Redis and MQTT, and the `X-Stats-Cache` response header shows whether it is
+   on). The telemetry endpoint must be reachable from the `keycloak_default` network, for example an OpenTelemetry
    Collector container with a `nop` exporter attached to it;
 3. drops and recreates the `ax4h_perf` database on the shared Postgres
    (`PERF_DB` to rename it; no other database is touched);
