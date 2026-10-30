@@ -41,9 +41,9 @@ before an A/B effect is believed.
 
 ## Source
 
-QA / CI (`../stakeholders.md`). The level-2 A/B decision of
-`docs/plans/2026-10-templates-sdks-ui.md` (RPS primary) and ADR 0018's
-AX4h addendum, which records how the harness gets there.
+QA / CI (`../stakeholders.md`).
+The level-2 A/B decision (RPS primary) and ADR 0018's AX4h addendum,
+which records how the harness gets there.
 
 ## Verification
 
