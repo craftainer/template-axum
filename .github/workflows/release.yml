@@ -62,10 +62,13 @@ jobs:
 
       - name: Compute next version
         id: version
+        env:
+          RELEASE_BUMP: ${{ inputs.bump }}
+          RELEASE_TYPE: ${{ inputs.release_type }}
         run: |
           python3 .github/scripts/compute_next_version.py \
-            --bump "${{ inputs.bump }}" \
-            --release-type "${{ inputs.release_type }}" \
+            --bump "$RELEASE_BUMP" \
+            --release-type "$RELEASE_TYPE" \
             >> "$GITHUB_OUTPUT"
 
       - name: Get release arches

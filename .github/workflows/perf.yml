@@ -86,6 +86,10 @@ jobs:
       # can sample its cpu.stat; if the runner does not expose it the
       # summary just has no cpu numbers.
       - name: Run the load test
+        env:
+          PERF_USERS: ${{ inputs.users }}
+          PERF_STARTUP_TIME: ${{ inputs.startup_time }}
+          PERF_RUN_TIME: ${{ inputs.run_time }}
         run: |
           rust_version=$(grep -m1 '^ARG RUST_VERSION=' Dockerfile | cut -d= -f2)
           debian_version=$(grep -m1 '^ARG DEBIAN_VERSION=' Dockerfile | cut -d= -f2)
@@ -105,9 +109,9 @@ jobs:
             "rust:${rust_version}-slim-${debian_version}" \
             cargo run -p template-axum-perf --release -- \
               --host http://localhost:8000 \
-              --users "${{ inputs.users }}" \
-              --startup-time "${{ inputs.startup_time }}" \
-              --run-time "${{ inputs.run_time }}" \
+              --users "$PERF_USERS" \
+              --startup-time "$PERF_STARTUP_TIME" \
+              --run-time "$PERF_RUN_TIME" \
               --report-file goose-report.html
 
       - name: Upload the goose report
