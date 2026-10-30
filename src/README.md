@@ -49,7 +49,9 @@ beyond what it's explicitly passed or reads from `config::Settings`.
 - `http_headers.rs` — `Sunset`, an `IntoResponseParts` type a handler
   combines into its return value to attach RFC 8594 `Sunset`/
   `Deprecation`/`Link` headers (`docs/adrs/0012`), applied by every
-  route in `hero::controllers::heroes_v1`/`heroes_v1_xml` (`NFR-0026`).
+  route in `hero::controllers::heroes_v1`/`heroes_v1_xml` (`NFR-0026`);
+  and `security_headers`, the response layer that sets the baseline
+  security headers on every response (`docs/adrs/0030`).
 
 ## Library and binary
 
@@ -162,8 +164,9 @@ and reads `RUSTFS_ACCESS_KEY`/`RUSTFS_SECRET_KEY` (falling back to
 reference implementation. `Mode::Production` additionally refuses to
 construct `Settings` at all if a credential is left at its local
 default, a connection scheme is plaintext, `POSTGRES_SSLMODE` is not an
-encrypting mode, or `OIDC_AUDIENCE` is unset
-— see `src/config.rs`'s own doc comments and its test suite.
+encrypting mode, `PUBLIC_BASE_URL` is unset or not `https://`, or the
+OIDC issuer/discovery URL is not `https://` — see `src/config.rs`'s own
+doc comments and its test suite.
 
 ## Database pool
 
@@ -249,12 +252,51 @@ Postgres, never through a transaction-mode pooler).
 
 ## OIDC / auth
 
-`oidc::OidcVerifier` validates bearer tokens against
-`Settings::oidc_issuer_url` via generic OIDC discovery + JWKS, with no
-Keycloak-specific code in the verification path itself — any
-Authorization Code + PKCE provider works by pointing `OIDC_ISSUER_URL`
-elsewhere. Add auth to a route by taking `oidc::AuthClaims` as a handler
-parameter; a handler with no such parameter stays public.
+`oidc::OidcVerifier` validates bearer tokens against the expected issuer
+via generic OIDC discovery + JWKS, with no Keycloak-specific code in the
+verification path itself — any Authorization Code + PKCE provider works
+by pointing `OIDC_ISSUER` (or the legacy `OIDC_ISSUER_URL`) elsewhere.
+Add auth to a route by taking `oidc::AuthClaims` as a handler parameter;
+a handler with no such parameter stays public.
+
+### Resource server (`docs/adrs/0030`, FR-0036)
+
+`config::ResourceServer` holds what the service is as an OAuth 2.0
+resource server; it is read by `ResourceServer::from_env` next to
+`Settings` (which it falls back to), validated at startup, and shared by
+the verifier and the `/.well-known/` routes. Variables, with defaults:
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `OIDC_ISSUER` | `OIDC_ISSUER_URL` | The `iss` a token must carry (exact string). With Keycloak's `KC_HOSTNAME` set this is the public `http://localhost:8080/realms/...`. |
+| `OIDC_DISCOVERY_URL` | `<issuer>/.well-known/openid-configuration` | Full discovery URL the app fetches (and the `oidc` health check calls); may be an in-network host such as `keycloak:8080`. |
+| `OIDC_ISSUER_URL` | `http://localhost:8080/realms/template-fastapi` | Legacy single variable, still honoured when the two above are unset. |
+| `OIDC_AUDIENCE` | `api` | The `aud` a token must carry. Always checked (RFC 9700 section 2.3); `exp`, `iss` and `aud` are required claims. Must not be empty. |
+| `OIDC_SCOPES_SUPPORTED` | `["openid"]` | JSON list advertised as RFC 9728 `scopes_supported` (the API authorizes by role, not scope). |
+| `PUBLIC_BASE_URL` | `http://localhost:8000` | This service's public origin (http(s), no path): the RFC 9728 `resource` and the base of the 401 challenge's `resource_metadata`, and the api-catalog anchor. Never taken from the `Host` header. Required, and `https://`, under `MODE=production`. |
+| `SECURITY_TXT_CONTACT` | unset | `https:`, `mailto:` or `tel:` URI. Setting it turns `/.well-known/security.txt` (RFC 9116) on. |
+| `SECURITY_TXT_EXPIRES` | unset | Required with a contact: RFC 3339 with a zone, in the future and at most a year (366 days) ahead. |
+| `SECURITY_TXT_POLICY`, `SECURITY_TXT_CANONICAL` | unset | Optional `https://` URLs. |
+| `SECURITY_TXT_PREFERRED_LANGUAGES` | unset | Optional, e.g. `en, de`. |
+
+Served, all unauthenticated: `GET /.well-known/oauth-protected-resource`
+(RFC 9728, `src/oidc/well_known.rs`), `GET /.well-known/security.txt`
+(only when configured), `GET /.well-known/api-catalog` (RFC 9727) and
+`GET /api/_crud/manifest` (the `craftainer-crud` manifest, filtered to
+the resources the caller's roles may read; `lib.rs`'s
+`build_manifest_registry` registers Hero v2 and v1). Every 401 carries
+`WWW-Authenticate: Bearer resource_metadata="<PUBLIC_BASE_URL>/.well-known/oauth-protected-resource"`,
+plus `, error="invalid_token"` when a token was presented and rejected
+(`AppError::InvalidToken`; a request with no bearer token is
+`AppError::Unauthorized`). `AppError` only knows the error kind; the
+`problem_details::add_resource_metadata` router layer adds the URL, so a
+401 from any source is covered. Every response, errors and the
+`/.well-known/` documents included, also carries the security headers
+`http_headers::security_headers` sets (CSP `default-src 'self';
+frame-ancestors 'none'`, `X-Frame-Options: DENY`,
+`X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`,
+`Strict-Transport-Security`, `Permissions-Policy`), the same values as
+template-fastapi.
 
 ### RBAC
 

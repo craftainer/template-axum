@@ -4,10 +4,16 @@ Provider-agnostic OIDC bearer-token validation plus Keycloak client-role
 RBAC — see `docs/adrs/0003-auth-strategy-provider-agnostic-oidc.md`.
 
 - `OidcVerifier` — fetches OIDC discovery + JWKS from
-  `Settings::oidc_issuer_url`, caches the key set for 5 minutes, and
-  verifies a bearer token's signature/issuer/expiry/audience(if
-  configured). Under `Mode::Mock`, verification is skipped entirely
-  (`FR-0017`).
+  `ResourceServer::discovery_url`, caches the key set for 5 minutes, and
+  verifies a bearer token's signature, exact issuer, expiry and
+  audience (always; `OIDC_AUDIENCE`, default `api`). A rejected token is
+  `AppError::InvalidToken`. Under `Mode::Mock`, verification is skipped
+  entirely (`FR-0017`).
+- `well_known` — the unauthenticated `/.well-known/` routes
+  (`oauth-protected-resource`, `security.txt`) and `ManifestCallers`, the
+  `CallerResolver` behind `GET /api/_crud/manifest` (`docs/adrs/0030`).
+  Here, not a top-level module, because
+  `.github/scripts/check_layering.py` has no category for a new one.
 - `Claims` — the decoded token, kept as a raw `serde_json::Value` (never
   assumes any claim beyond `sub` — `docs/nfrs/0014`).
   `Claims::require_any_role(client_id, roles)` is the Keycloak-specific

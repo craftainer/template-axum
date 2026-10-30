@@ -2,7 +2,9 @@
 
 ## Status
 
-Accepted
+Accepted; amended by [ADR 0030](0030-resource-server-metadata-security-headers-and-api-catalog.md)
+(the audience is always checked, and the expected issuer is separate from
+the discovery URL)
 
 ## Context
 

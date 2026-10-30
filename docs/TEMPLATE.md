@@ -131,7 +131,10 @@ Without a devcontainer: install the pinned Rust toolchain
 `POSTGRES_*` / `S3_ENDPOINT_URL` / `RUSTFS_ACCESS_KEY` /
 `RUSTFS_SECRET_KEY` / `REDIS_URL` / `OIDC_ISSUER_URL` /
 `OIDC_AUTHORIZATION_URL` / `OIDC_TOKEN_URL` / `OIDC_CLIENT_ID` /
-`OIDC_AUDIENCE` variables `src/config.rs` reads (or run under
+`OIDC_AUDIENCE` variables `src/config.rs` reads, plus `OIDC_ISSUER` /
+`OIDC_DISCOVERY_URL` when the token issuer is not the URL the app reaches
+the provider at, `PUBLIC_BASE_URL` (required under `MODE=production`) and
+`SECURITY_TXT_*` (see `src/README.md`'s "OIDC / auth" section) (or run under
 `MODE=mock`, `ALLOW_MOCK_MODE=1` for zero infrastructure), then
 `cargo run` the same way. Install [`prek`](https://prek.j178.dev/) and
 run `prek install` once to enable the git hooks.

@@ -190,6 +190,20 @@ pub fn oidc_token_url() -> String {
         .unwrap_or_else(|_| format!("{}/protocol/openid-connect/token", oidc_issuer_url()))
 }
 
+/// A verifier for the devcontainer's real Keycloak: the issuer tokens
+/// carry (`OIDC_ISSUER`, the public URL) and the in-network discovery URL
+/// (`OIDC_DISCOVERY_URL`) come from the environment exactly as the app
+/// reads them, with `settings.oidc_audience` (when set) taking the place
+/// of `OIDC_AUDIENCE`.
+pub fn dev_verifier(settings: Arc<Settings>) -> OidcVerifier {
+    let mut resource = template_axum::config::ResourceServer::from_env(&settings)
+        .expect("the devcontainer's OIDC_* environment must be valid");
+    if let Some(audience) = &settings.oidc_audience {
+        resource.audience = audience.clone();
+    }
+    OidcVerifier::with_resource_server(settings, Arc::new(resource))
+}
+
 /// Settings for the integration tier's `Mode::Dev` path: real Postgres/
 /// Redis/S3/MQTT/Keycloak coordinates, so a test can exercise a real
 /// backend's happy path instead of `Mode::Mock`'s fakes.

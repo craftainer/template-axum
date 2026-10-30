@@ -4,7 +4,7 @@
 //! `application/problem+json`, matching `register_problem_handlers(app)`
 //! being called once from `main.py`.
 
-use axum::http::StatusCode;
+use axum::http::{HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde::Serialize;
 
@@ -40,7 +40,12 @@ enum ProblemDetail_Detail {
 #[derive(Debug)]
 pub enum AppError {
     NotFound(String),
+    /// A request that carried no usable bearer credentials at all. Its 401
+    /// gets the bare RFC 6750 challenge (section 3.1).
     Unauthorized(String),
+    /// A bearer token that was presented and rejected (bad signature,
+    /// issuer, audience or expiry). Its 401 adds `error="invalid_token"`.
+    InvalidToken(String),
     Forbidden(String),
     UnprocessableEntity(Vec<FieldError>),
     /// An `If-Match` precondition failed (412). Produced by
@@ -62,6 +67,7 @@ pub fn configure_detail_redaction(mode: Mode) {
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
+        let rejected_token = matches!(self, AppError::InvalidToken(_));
         let (status, title, detail): (StatusCode, &'static str, ProblemDetail_Detail) = match self {
             AppError::NotFound(msg) => (
                 StatusCode::NOT_FOUND,
@@ -69,6 +75,11 @@ impl IntoResponse for AppError {
                 ProblemDetail_Detail::Text(msg),
             ),
             AppError::Unauthorized(msg) => (
+                StatusCode::UNAUTHORIZED,
+                "Unauthorized",
+                ProblemDetail_Detail::Text(msg),
+            ),
+            AppError::InvalidToken(msg) => (
                 StatusCode::UNAUTHORIZED,
                 "Unauthorized",
                 ProblemDetail_Detail::Text(msg),
@@ -121,13 +132,58 @@ impl IntoResponse for AppError {
             "application/problem+json".parse().unwrap(),
         );
         if status == StatusCode::UNAUTHORIZED {
+            // Without a configured `resource_metadata` URL (which only
+            // `add_resource_metadata` below knows); the router layer
+            // replaces this with the full challenge.
             response.headers_mut().insert(
                 axum::http::header::WWW_AUTHENTICATE,
-                "Bearer".parse().unwrap(),
+                HeaderValue::from_static(if rejected_token {
+                    "Bearer error=\"invalid_token\""
+                } else {
+                    "Bearer"
+                }),
             );
+            if rejected_token {
+                response.extensions_mut().insert(RejectedToken);
+            }
         }
         response
     }
+}
+
+/// Response extension `AppError::InvalidToken` sets, so the router layer
+/// can add `error="invalid_token"` to the challenge it builds.
+#[derive(Debug, Clone, Copy)]
+struct RejectedToken;
+
+/// The RFC 9728 challenge for a 401: `Bearer resource_metadata="<url>"`,
+/// plus `error="invalid_token"` for a rejected token. `url` comes from
+/// configuration, never from the request.
+fn bearer_challenge(resource_metadata_url: &str, rejected_token: bool) -> Option<HeaderValue> {
+    let mut challenge = format!("Bearer resource_metadata=\"{resource_metadata_url}\"");
+    if rejected_token {
+        challenge.push_str(", error=\"invalid_token\"");
+    }
+    HeaderValue::from_str(&challenge).ok()
+}
+
+/// Router layer (`axum::middleware::map_response_with_state`): points every
+/// 401's `WWW-Authenticate` at the RFC 9728 metadata document. Applied to
+/// the whole router, so a 401 from any source is covered, not only the
+/// ones `AppError` builds.
+pub async fn add_resource_metadata(
+    axum::extract::State(resource_metadata_url): axum::extract::State<std::sync::Arc<str>>,
+    mut response: Response,
+) -> Response {
+    if response.status() == StatusCode::UNAUTHORIZED {
+        let rejected = response.extensions().get::<RejectedToken>().is_some();
+        if let Some(challenge) = bearer_challenge(&resource_metadata_url, rejected) {
+            response
+                .headers_mut()
+                .insert(axum::http::header::WWW_AUTHENTICATE, challenge);
+        }
+    }
+    response
 }
 
 impl From<CrudError> for AppError {
@@ -196,6 +252,58 @@ mod tests {
                 .unwrap(),
             "Bearer"
         );
+    }
+
+    #[tokio::test]
+    async fn invalid_token_is_a_401_that_names_the_error() {
+        let response = AppError::InvalidToken("bad".to_string()).into_response();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            response.headers().get("www-authenticate").unwrap(),
+            "Bearer error=\"invalid_token\""
+        );
+        let body = body_json(response).await;
+        assert_eq!(body["title"], "Unauthorized");
+        assert_eq!(body["detail"], "bad");
+    }
+
+    async fn with_challenge(response: Response) -> Response {
+        add_resource_metadata(
+            axum::extract::State(std::sync::Arc::from("https://api.example/m")),
+            response,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn the_layer_adds_the_configured_resource_metadata_to_every_401() {
+        let missing = with_challenge(AppError::Unauthorized("x".to_string()).into_response()).await;
+        assert_eq!(
+            missing.headers().get("www-authenticate").unwrap(),
+            "Bearer resource_metadata=\"https://api.example/m\""
+        );
+        let rejected = with_challenge(AppError::InvalidToken("x".to_string()).into_response()).await;
+        assert_eq!(
+            rejected.headers().get("www-authenticate").unwrap(),
+            "Bearer resource_metadata=\"https://api.example/m\", error=\"invalid_token\""
+        );
+        // A 401 nobody built with AppError (no header at all) gets one too.
+        let bare = with_challenge(StatusCode::UNAUTHORIZED.into_response()).await;
+        assert_eq!(
+            bare.headers().get("www-authenticate").unwrap(),
+            "Bearer resource_metadata=\"https://api.example/m\""
+        );
+    }
+
+    #[tokio::test]
+    async fn the_layer_leaves_other_statuses_alone() {
+        let forbidden = with_challenge(AppError::Forbidden("x".to_string()).into_response()).await;
+        assert!(forbidden.headers().get("www-authenticate").is_none());
+    }
+
+    #[test]
+    fn a_challenge_that_cannot_be_a_header_value_is_dropped() {
+        assert!(bearer_challenge("https://api.example/\n", false).is_none());
     }
 
     #[tokio::test]

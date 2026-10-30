@@ -14,8 +14,10 @@ use serde::Deserialize;
 use serde_json::Value;
 use tokio::sync::RwLock;
 
-use crate::config::{Mode, Settings};
+use crate::config::{Mode, ResourceServer, Settings};
 use crate::problem_details::AppError;
+
+pub mod well_known;
 
 const JWKS_CACHE_TTL: Duration = Duration::from_secs(300);
 /// Fixed HS256 key `POST /mock/token` signs with -- never verified against
@@ -38,6 +40,7 @@ struct JwksCache {
 /// mock vs. real verification.
 pub struct OidcVerifier {
     settings: Arc<Settings>,
+    resource: Arc<ResourceServer>,
     http: reqwest::Client,
     jwks: RwLock<Option<JwksCache>>,
 }
@@ -90,12 +93,27 @@ impl Claims {
 }
 
 impl OidcVerifier {
+    /// A verifier for the issuer, audience and discovery URL `settings`
+    /// alone implies (`ResourceServer::from_settings`); the wiring uses
+    /// `with_resource_server` with what the environment says instead.
     pub fn new(settings: Arc<Settings>) -> Self {
+        let resource = Arc::new(ResourceServer::from_settings(&settings));
+        Self::with_resource_server(settings, resource)
+    }
+
+    pub fn with_resource_server(settings: Arc<Settings>, resource: Arc<ResourceServer>) -> Self {
         Self {
             settings,
+            resource,
             http: reqwest::Client::new(),
             jwks: RwLock::new(None),
         }
+    }
+
+    /// The issuer/audience/public-URL configuration this verifier checks
+    /// against, shared with the `/.well-known/` documents.
+    pub fn resource_server(&self) -> &Arc<ResourceServer> {
+        &self.resource
     }
 
     async fn jwks(&self) -> Result<jsonwebtoken::jwk::JwkSet, AppError> {
@@ -108,15 +126,12 @@ impl OidcVerifier {
             }
         }
 
-        let discovery_url = format!(
-            "{}/.well-known/openid-configuration",
-            self.settings.oidc_issuer_url.trim_end_matches('/')
-        );
+        let discovery_url = &self.resource.discovery_url;
         let unavailable =
             || AppError::ServiceUnavailable("Authentication service unavailable".to_string());
         let discovery: OidcDiscoveryDocument = self
             .http
-            .get(&discovery_url)
+            .get(discovery_url)
             .send()
             .await
             .map_err(|_| unavailable())?
@@ -146,10 +161,11 @@ impl OidcVerifier {
 
     /// Decode + verify a bearer token. `Mode::Mock` trusts the claims
     /// as-is with no signature check (FR-0017); otherwise verifies
-    /// signature/issuer/audience(if configured)/expiry against the cached
-    /// JWKS (FR-0013).
+    /// signature, expiry, the exact issuer and the audience against the
+    /// cached JWKS (FR-0013). The audience is always checked (RFC 9700
+    /// section 2.3) and `exp`, `iss` and `aud` must be present.
     pub async fn decode_bearer_token(&self, token: &str) -> Result<Claims, AppError> {
-        let invalid = || AppError::Unauthorized("Invalid or expired token".to_string());
+        let invalid = || AppError::InvalidToken("Invalid or expired token".to_string());
 
         if self.settings.mode == Mode::Mock {
             return decode_without_verification(token)
@@ -164,12 +180,9 @@ impl OidcVerifier {
         let decoding_key = jsonwebtoken::DecodingKey::from_jwk(jwk).map_err(|_| invalid())?;
 
         let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::RS256);
-        validation.set_issuer(&[self.settings.oidc_issuer_url.as_str()]);
-        if let Some(audience) = &self.settings.oidc_audience {
-            validation.set_audience(&[audience.as_str()]);
-        } else {
-            validation.validate_aud = false;
-        }
+        validation.set_issuer(&[self.resource.issuer.as_str()]);
+        validation.set_audience(&[self.resource.audience.as_str()]);
+        validation.set_required_spec_claims(&["exp", "iss", "aud"]);
 
         let data = jsonwebtoken::decode::<Value>(token, &decoding_key, &validation)
             .map_err(|_| invalid())?;
@@ -226,7 +239,7 @@ where
 
 fn unauthorized(uri: &axum::http::Uri) -> AppError {
     tracing::warn!(path = %uri.path(), "missing bearer token");
-    AppError::Unauthorized("Invalid or expired token".to_string())
+    AppError::Unauthorized("Not authenticated".to_string())
 }
 
 #[cfg(test)]
@@ -415,7 +428,7 @@ mod tests {
     async fn mock_mode_rejects_a_malformed_token() {
         let verifier = OidcVerifier::new(Arc::new(mock_settings()));
         let err = verifier.decode_bearer_token("not-a-jwt").await.unwrap_err();
-        assert!(matches!(err, AppError::Unauthorized(_)));
+        assert!(matches!(err, AppError::InvalidToken(_)));
     }
 
     // -- AuthClaims extractor --

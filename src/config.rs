@@ -269,10 +269,16 @@ impl Settings {
                 "http://localhost:8080/realms/template-fastapi/protocol/openid-connect/token",
             ),
             oidc_client_id: env_or("OIDC_CLIENT_ID", "api"),
-            oidc_audience: env::var("OIDC_AUDIENCE").ok(),
+            // Always checked (RFC 9700 section 2.3): unset means `api`, and
+            // `ResourceServer::from_env` rejects an empty value.
+            oidc_audience: Some(env_or("OIDC_AUDIENCE", DEFAULT_AUDIENCE)),
         };
 
         settings.validate()?;
+        // Fail fast on the resource-server settings (`PUBLIC_BASE_URL`,
+        // `SECURITY_TXT_*`, `OIDC_ISSUER`, ...) too; the wiring reads them
+        // again via `ResourceServer::from_env`.
+        ResourceServer::from_env(&settings)?;
         Ok(settings)
     }
 
@@ -315,10 +321,6 @@ impl Settings {
             return Ok(());
         }
 
-        if self.oidc_audience.is_none() {
-            return Err("OIDC_AUDIENCE must be set when MODE=production".to_string());
-        }
-
         let defaults: [(&str, &str, &str); 3] = [
             ("POSTGRES_PASSWORD", &self.postgres_password, "app"),
             (
@@ -357,8 +359,11 @@ impl Settings {
         if !self.redis_url.starts_with("rediss://") {
             insecure.push("REDIS_URL must use rediss://");
         }
-        if !self.oidc_issuer_url.starts_with("https://") {
-            insecure.push("OIDC_ISSUER_URL must use https://");
+        if !env::var("OIDC_ISSUER")
+            .unwrap_or_else(|_| self.oidc_issuer_url.clone())
+            .starts_with("https://")
+        {
+            insecure.push("OIDC_ISSUER_URL/OIDC_ISSUER must use https://");
         }
         if !insecure.is_empty() {
             return Err(format!("{} when MODE=production", insecure.join("; ")));
@@ -416,6 +421,293 @@ pub fn subscriber_secret(mode: Mode) -> Result<Option<String>, String> {
 /// The shortest `SUBSCRIBER_SECRET`, in characters (`config.py`'s
 /// `min_length`); also at least `craftainer_crud`'s 32-byte minimum.
 const MIN_SUBSCRIBER_SECRET_CHARS: usize = 32;
+
+/// The audience a bearer token must carry when `OIDC_AUDIENCE` is unset;
+/// the bundled realm's `api` and `bff` clients both add it.
+const DEFAULT_AUDIENCE: &str = "api";
+
+/// Longest `Expires` a `security.txt` may carry (RFC 9116 section 2.5.5
+/// advises under a year; a leap year's 366 days is the accepted bound).
+const SECURITY_TXT_MAX_AHEAD_DAYS: i64 = 366;
+
+/// An RFC 9116 `security.txt` (`SECURITY_TXT_*`), served at
+/// `/.well-known/security.txt` only when a contact is configured.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SecurityTxt {
+    pub contact: String,
+    pub expires: chrono::DateTime<chrono::Utc>,
+    pub policy: Option<String>,
+    pub preferred_languages: Option<String>,
+    pub canonical: Option<String>,
+}
+
+/// What this service is as an OAuth 2.0 resource server (RFC 9728): which
+/// issuer's tokens it accepts, for which audience, where it lives publicly
+/// and how to report a vulnerability. Read from the environment next to
+/// `Settings` (not inside it) by `ResourceServer::from_env`.
+///
+/// The expected issuer (the `iss` a token must carry, and the RFC 9728
+/// authorization server) is a different thing from the URL this service
+/// reaches the provider at: with Keycloak's `KC_HOSTNAME` set, tokens
+/// carry the public `http://localhost:8080/realms/...` while discovery is
+/// fetched from `http://keycloak:8080/...` inside the compose network.
+/// `OIDC_ISSUER` is the former, `OIDC_DISCOVERY_URL` (a full
+/// `.../.well-known/openid-configuration` URL) the latter; each falls back
+/// to `OIDC_ISSUER_URL` (the original single variable), so an instance
+/// that sets only that behaves as before.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResourceServer {
+    /// Resource name advertised in the RFC 9728 document (`APP_NAME`).
+    pub name: String,
+    /// The `iss` a token must carry, compared as an exact string.
+    pub issuer: String,
+    /// Where the provider's discovery document is fetched (may be internal).
+    pub discovery_url: String,
+    /// The `aud` a token must carry. Never optional.
+    pub audience: String,
+    /// `scopes_supported` in the RFC 9728 document (`OIDC_SCOPES_SUPPORTED`,
+    /// a JSON list). The API authorizes by role, not scope.
+    pub scopes_supported: Vec<String>,
+    /// This service's public origin without a trailing slash: the RFC 9728
+    /// `resource` and the base of `resource_metadata`. From configuration,
+    /// never from the request's `Host` header, which a client controls.
+    pub public_base_url: String,
+    pub security_txt: Option<SecurityTxt>,
+}
+
+impl ResourceServer {
+    /// Origin used when `PUBLIC_BASE_URL` is unset (anything but production).
+    pub const DEFAULT_PUBLIC_BASE_URL: &'static str = "http://localhost:8000";
+
+    /// Defaults derived from `settings` alone: no resource-server variable
+    /// is read, so the result cannot depend on the process environment.
+    pub fn from_settings(settings: &Settings) -> Self {
+        Self {
+            name: settings.app_name.clone(),
+            issuer: settings.oidc_issuer_url.clone(),
+            discovery_url: discovery_url_for(&settings.oidc_issuer_url),
+            audience: settings
+                .oidc_audience
+                .clone()
+                .unwrap_or_else(|| DEFAULT_AUDIENCE.to_string()),
+            scopes_supported: vec!["openid".to_string()],
+            public_base_url: Self::DEFAULT_PUBLIC_BASE_URL.to_string(),
+            security_txt: None,
+        }
+    }
+
+    /// Read and validate the resource-server settings from the process
+    /// environment (`settings` supplies the legacy `OIDC_ISSUER_URL`).
+    pub fn from_env(settings: &Settings) -> Result<Self, String> {
+        Self::from_lookup(settings, |key| env::var(key).ok())
+    }
+
+    /// `from_env` over an arbitrary variable source, so tests don't touch
+    /// the process environment.
+    pub fn from_lookup(
+        settings: &Settings,
+        get: impl Fn(&str) -> Option<String>,
+    ) -> Result<Self, String> {
+        let production = settings.mode == Mode::Production;
+        let mut problems: Vec<String> = Vec::new();
+
+        let issuer = get("OIDC_ISSUER").unwrap_or_else(|| settings.oidc_issuer_url.clone());
+        let discovery_url = get("OIDC_DISCOVERY_URL").unwrap_or_else(|| discovery_url_for(&issuer));
+        if production {
+            if !issuer.starts_with("https://") {
+                problems.push("OIDC_ISSUER_URL/OIDC_ISSUER must use https://".to_string());
+            }
+            if !discovery_url.starts_with("https://") {
+                problems.push("OIDC_DISCOVERY_URL must use https://".to_string());
+            }
+        }
+
+        let audience = get("OIDC_AUDIENCE")
+            .or_else(|| settings.oidc_audience.clone())
+            .unwrap_or_else(|| DEFAULT_AUDIENCE.to_string());
+        if audience.is_empty() {
+            problems.push("OIDC_AUDIENCE must not be empty".to_string());
+        }
+
+        let scopes_supported = match get("OIDC_SCOPES_SUPPORTED") {
+            None => vec!["openid".to_string()],
+            Some(raw) => serde_json::from_str::<Vec<String>>(&raw).unwrap_or_else(|_| {
+                problems.push("OIDC_SCOPES_SUPPORTED must be a JSON list of strings".to_string());
+                Vec::new()
+            }),
+        };
+
+        let public_base_url = get("PUBLIC_BASE_URL");
+        if let Some(url) = &public_base_url {
+            if !is_origin(url) {
+                problems.push("PUBLIC_BASE_URL must be an http(s) origin with no path".to_string());
+            }
+        }
+        if production {
+            match &public_base_url {
+                None => problems.push("PUBLIC_BASE_URL must be set when MODE=production".to_string()),
+                Some(url) if !url.starts_with("https://") => {
+                    problems.push("PUBLIC_BASE_URL must use https:// when MODE=production".to_string());
+                }
+                Some(_) => {}
+            }
+        }
+
+        let security_txt = match SecurityTxt::from_lookup(&get, chrono::Utc::now()) {
+            Ok(file) => file,
+            Err(mut found) => {
+                problems.append(&mut found);
+                None
+            }
+        };
+
+        if !problems.is_empty() {
+            return Err(problems.join("; "));
+        }
+        Ok(Self {
+            name: settings.app_name.clone(),
+            issuer,
+            discovery_url,
+            audience,
+            scopes_supported,
+            public_base_url: public_base_url
+                .unwrap_or_else(|| Self::DEFAULT_PUBLIC_BASE_URL.to_string())
+                .trim_end_matches('/')
+                .to_string(),
+            security_txt,
+        })
+    }
+
+    /// The public issuer's discovery URL (what a client can reach), as the
+    /// manifest advertises it; `discovery_url` is where *this* service
+    /// fetches it, which may be a compose-internal host.
+    pub fn public_discovery_url(&self) -> String {
+        discovery_url_for(&self.issuer)
+    }
+
+    /// Absolute URL of the RFC 9728 protected-resource metadata document.
+    pub fn resource_metadata_url(&self) -> String {
+        format!("{}/.well-known/oauth-protected-resource", self.public_base_url)
+    }
+}
+
+impl SecurityTxt {
+    /// `None` when `SECURITY_TXT_CONTACT` is unset; with a contact set,
+    /// `SECURITY_TXT_EXPIRES` is required (RFC 3339 with a zone, in the
+    /// future and at most a year ahead: an RFC 9116 file without `Expires`
+    /// is not compliant, and one expiring far out defeats the field).
+    /// Values go into a text file line by line, so control characters and
+    /// blanks are rejected.
+    fn from_lookup(
+        get: &impl Fn(&str) -> Option<String>,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Option<Self>, Vec<String>> {
+        let contact = get("SECURITY_TXT_CONTACT");
+        let Some(contact) = contact else {
+            return Ok(None);
+        };
+        let policy = get("SECURITY_TXT_POLICY");
+        let canonical = get("SECURITY_TXT_CANONICAL");
+        let preferred_languages = get("SECURITY_TXT_PREFERRED_LANGUAGES");
+
+        let mut problems = Vec::new();
+        for (key, value) in [
+            ("SECURITY_TXT_CONTACT", Some(&contact)),
+            ("SECURITY_TXT_POLICY", policy.as_ref()),
+            ("SECURITY_TXT_CANONICAL", canonical.as_ref()),
+            ("SECURITY_TXT_PREFERRED_LANGUAGES", preferred_languages.as_ref()),
+        ] {
+            if value.is_some_and(|v| v.trim().is_empty() || v.chars().any(char::is_control)) {
+                problems.push(format!("{key} must be a single line of text"));
+            }
+        }
+        if !["https://", "mailto:", "tel:"]
+            .iter()
+            .any(|scheme| contact.starts_with(scheme))
+        {
+            problems.push("SECURITY_TXT_CONTACT must be an https:, mailto: or tel: URI".to_string());
+        }
+        if [&policy, &canonical]
+            .iter()
+            .any(|v| v.as_ref().is_some_and(|v| !v.starts_with("https://")))
+        {
+            problems.push(
+                "SECURITY_TXT_POLICY and SECURITY_TXT_CANONICAL must be https:// URLs".to_string(),
+            );
+        }
+
+        let expires = match get("SECURITY_TXT_EXPIRES") {
+            None => {
+                problems.push("SECURITY_TXT_EXPIRES must be set when SECURITY_TXT_CONTACT is".to_string());
+                None
+            }
+            Some(raw) => match chrono::DateTime::parse_from_rfc3339(&raw) {
+                Err(_) => {
+                    problems.push(
+                        "SECURITY_TXT_EXPIRES must be an RFC 3339 timestamp with a time zone"
+                            .to_string(),
+                    );
+                    None
+                }
+                Ok(at) => {
+                    let at = at.with_timezone(&chrono::Utc);
+                    if at <= now || at > now + chrono::Duration::days(SECURITY_TXT_MAX_AHEAD_DAYS) {
+                        problems.push(
+                            "SECURITY_TXT_EXPIRES must be in the future and at most one year ahead"
+                                .to_string(),
+                        );
+                    }
+                    Some(at)
+                }
+            },
+        };
+
+        match expires {
+            Some(expires) if problems.is_empty() => Ok(Some(Self {
+                contact,
+                expires,
+                policy,
+                preferred_languages,
+                canonical,
+            })),
+            _ => Err(problems),
+        }
+    }
+
+    /// The RFC 9116 file body.
+    pub fn render(&self) -> String {
+        let mut lines = vec![
+            format!("Contact: {}", self.contact),
+            format!("Expires: {}", self.expires.format("%Y-%m-%dT%H:%M:%SZ")),
+        ];
+        for (field, value) in [
+            ("Preferred-Languages", &self.preferred_languages),
+            ("Policy", &self.policy),
+            ("Canonical", &self.canonical),
+        ] {
+            if let Some(value) = value {
+                lines.push(format!("{field}: {value}"));
+            }
+        }
+        lines.join("\n") + "\n"
+    }
+}
+
+fn discovery_url_for(issuer: &str) -> String {
+    format!("{}/.well-known/openid-configuration", issuer.trim_end_matches('/'))
+}
+
+/// `scheme://host[:port]` with at most one trailing slash and nothing else.
+fn is_origin(url: &str) -> bool {
+    let Some(rest) = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+    else {
+        return false;
+    };
+    let host = rest.strip_suffix('/').unwrap_or(rest);
+    !host.is_empty() && !host.contains(['/', '?', '#', '@', ' ']) && host.chars().all(|c| !c.is_control())
+}
 
 fn env_or(key: &str, default: &str) -> String {
     env::var(key).unwrap_or_else(|_| default.to_string())
@@ -489,7 +781,16 @@ mod tests {
             "RATE_LIMIT_HERO_WRITE_PER_MINUTE",
             "BULK_ACTION_MAX_MATCHED",
             "OIDC_ISSUER_URL",
+            "OIDC_ISSUER",
+            "OIDC_DISCOVERY_URL",
             "OIDC_AUDIENCE",
+            "OIDC_SCOPES_SUPPORTED",
+            "PUBLIC_BASE_URL",
+            "SECURITY_TXT_CONTACT",
+            "SECURITY_TXT_EXPIRES",
+            "SECURITY_TXT_POLICY",
+            "SECURITY_TXT_CANONICAL",
+            "SECURITY_TXT_PREFERRED_LANGUAGES",
             "DATABASE_URL",
             "POSTGRES_SSLMODE",
             "DB_POOL_SIZE",
@@ -632,14 +933,10 @@ mod tests {
     }
 
     #[test]
-    fn production_rejects_default_credentials_and_missing_audience() {
+    fn production_rejects_default_credentials() {
         let _guard = ENV_LOCK.lock().unwrap();
         clear_all();
         unsafe { env::set_var("MODE", "production") };
-        let err = Settings::from_env().expect_err("defaults must be rejected in production");
-        assert!(err.contains("OIDC_AUDIENCE"));
-
-        unsafe { env::set_var("OIDC_AUDIENCE", "api") };
         let err = Settings::from_env().expect_err("default credentials must be rejected");
         assert!(err.contains("POSTGRES_PASSWORD"));
         clear_all();
@@ -676,6 +973,7 @@ mod tests {
         unsafe { env::set_var("S3_ENDPOINT_URL", "https://s3.example.com") };
         unsafe { env::set_var("REDIS_URL", "rediss://redis.example.com:6379/0") };
         unsafe { env::set_var("OIDC_ISSUER_URL", "https://issuer.example.com/realms/api") };
+        unsafe { env::set_var("PUBLIC_BASE_URL", "https://api.example.com") };
         unsafe { env::set_var("POSTGRES_SSLMODE", "verify-full") };
         assert!(Settings::from_env().is_ok());
         clear_all();
@@ -693,6 +991,7 @@ mod tests {
         unsafe { env::set_var("S3_ENDPOINT_URL", "https://s3.example.com") };
         unsafe { env::set_var("REDIS_URL", "rediss://redis.example.com:6379/0") };
         unsafe { env::set_var("OIDC_ISSUER_URL", "https://issuer.example.com/realms/api") };
+        unsafe { env::set_var("PUBLIC_BASE_URL", "https://api.example.com") };
         for weak in ["disable", "allow", "prefer"] {
             unsafe { env::set_var("POSTGRES_SSLMODE", weak) };
             let err = Settings::from_env().expect_err("a weak sslmode must be rejected");
@@ -717,6 +1016,7 @@ mod tests {
         unsafe { env::set_var("S3_ENDPOINT_URL", "https://s3.example.com") };
         unsafe { env::set_var("REDIS_URL", "rediss://redis.example.com:6379/0") };
         unsafe { env::set_var("OIDC_ISSUER_URL", "https://issuer.example.com/realms/api") };
+        unsafe { env::set_var("PUBLIC_BASE_URL", "https://api.example.com") };
         unsafe {
             env::set_var(
                 "DATABASE_URL",
@@ -819,6 +1119,286 @@ mod tests {
         let err = Settings::from_env().expect_err("min > max must be rejected");
         assert!(err.contains("DB_POOL_MIN_SIZE"));
         unsafe { env::set_var("DB_POOL_MIN_SIZE", "4") };
+        assert!(Settings::from_env().is_ok());
+        clear_all();
+    }
+
+    // -- ResourceServer: read through `from_lookup` over a map, so the
+    // devcontainer's own OIDC_*/PUBLIC_BASE_URL exports never reach them.
+
+    fn settings_in(mode: Mode) -> Settings {
+        Settings {
+            app_name: "template-axum".to_string(),
+            mode,
+            allow_mock_mode: true,
+            postgres_user: "app".to_string(),
+            postgres_password: "app".to_string(),
+            postgres_db: "app".to_string(),
+            postgres_host: "localhost".to_string(),
+            postgres_port: 5432,
+            db: Default::default(),
+            s3_endpoint_url: "http://localhost:9000".to_string(),
+            s3_access_key: "rustfsadmin".to_string(),
+            s3_secret_key: "rustfsadmin".to_string(),
+            redis_url: "redis://localhost:6379/0".to_string(),
+            mqtt_host: "localhost".to_string(),
+            mqtt_port: 1883,
+            rate_limit_mock_token_per_minute: 10,
+            rate_limit_hero_write_per_minute: 20,
+            bulk_action_max_matched: 1000,
+            oidc_issuer_url: "http://keycloak:8080/realms/r".to_string(),
+            oidc_authorization_url: "http://localhost:8080/auth".to_string(),
+            oidc_token_url: "http://localhost:8080/token".to_string(),
+            oidc_client_id: "api".to_string(),
+            oidc_audience: None,
+        }
+    }
+
+    fn resource_server(
+        mode: Mode,
+        vars: &[(&str, &str)],
+    ) -> Result<ResourceServer, String> {
+        let vars: std::collections::HashMap<String, String> = vars
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect();
+        ResourceServer::from_lookup(&settings_in(mode), |key| vars.get(key).cloned())
+    }
+
+    fn in_days(days: i64) -> String {
+        (chrono::Utc::now() + chrono::Duration::days(days)).to_rfc3339()
+    }
+
+    #[test]
+    fn resource_server_defaults_fall_back_to_the_legacy_issuer_url() {
+        let rs = resource_server(Mode::Dev, &[]).unwrap();
+        assert_eq!(rs.issuer, "http://keycloak:8080/realms/r");
+        assert_eq!(
+            rs.discovery_url,
+            "http://keycloak:8080/realms/r/.well-known/openid-configuration"
+        );
+        assert_eq!(rs.audience, "api");
+        assert_eq!(rs.scopes_supported, ["openid"]);
+        assert_eq!(rs.public_base_url, "http://localhost:8000");
+        assert_eq!(
+            rs.resource_metadata_url(),
+            "http://localhost:8000/.well-known/oauth-protected-resource"
+        );
+        assert!(rs.security_txt.is_none());
+        assert_eq!(rs, ResourceServer::from_settings(&settings_in(Mode::Dev)));
+    }
+
+    #[test]
+    fn oidc_issuer_and_discovery_url_are_independent_of_each_other() {
+        let rs = resource_server(
+            Mode::Dev,
+            &[
+                ("OIDC_ISSUER", "http://localhost:8080/realms/r/"),
+                (
+                    "OIDC_DISCOVERY_URL",
+                    "http://keycloak:8080/realms/r/.well-known/openid-configuration",
+                ),
+                ("OIDC_AUDIENCE", "other"),
+                ("OIDC_SCOPES_SUPPORTED", r#"["openid","profile"]"#),
+                ("PUBLIC_BASE_URL", "https://api.example.com/"),
+            ],
+        )
+        .unwrap();
+        // Used verbatim: `iss` is an exact-string comparison.
+        assert_eq!(rs.issuer, "http://localhost:8080/realms/r/");
+        assert_eq!(
+            rs.discovery_url,
+            "http://keycloak:8080/realms/r/.well-known/openid-configuration"
+        );
+        assert_eq!(rs.audience, "other");
+        assert_eq!(rs.scopes_supported, ["openid", "profile"]);
+        assert_eq!(rs.public_base_url, "https://api.example.com");
+
+        // OIDC_ISSUER alone also moves the derived discovery URL.
+        let rs = resource_server(Mode::Dev, &[("OIDC_ISSUER", "http://i.example/r/")]).unwrap();
+        assert_eq!(
+            rs.discovery_url,
+            "http://i.example/r/.well-known/openid-configuration"
+        );
+    }
+
+    #[test]
+    fn resource_server_rejects_bad_audience_scopes_and_public_base_url() {
+        for (key, bad) in [
+            ("OIDC_AUDIENCE", ""),
+            ("OIDC_SCOPES_SUPPORTED", "openid"),
+            ("PUBLIC_BASE_URL", "ftp://api.example.com"),
+            ("PUBLIC_BASE_URL", "https://api.example.com/base"),
+            ("PUBLIC_BASE_URL", "https://api.example.com?x=1"),
+            ("PUBLIC_BASE_URL", "https://"),
+            ("PUBLIC_BASE_URL", "api.example.com"),
+        ] {
+            let err = resource_server(Mode::Dev, &[(key, bad)])
+                .expect_err(&format!("{key}={bad:?} must be rejected"));
+            assert!(err.contains(key), "{key}={bad:?}: {err}");
+        }
+    }
+
+    #[test]
+    fn production_requires_a_public_https_origin_and_https_oidc_urls() {
+        let err = resource_server(Mode::Production, &[]).unwrap_err();
+        assert!(err.contains("PUBLIC_BASE_URL must be set"), "{err}");
+        assert!(err.contains("OIDC_ISSUER_URL/OIDC_ISSUER must use https://"), "{err}");
+        assert!(err.contains("OIDC_DISCOVERY_URL must use https://"), "{err}");
+
+        let err = resource_server(
+            Mode::Production,
+            &[
+                ("PUBLIC_BASE_URL", "http://api.example.com"),
+                ("OIDC_ISSUER", "https://i.example/r"),
+                ("OIDC_DISCOVERY_URL", "http://keycloak/x"),
+            ],
+        )
+        .unwrap_err();
+        assert!(err.contains("PUBLIC_BASE_URL must use https://"), "{err}");
+        assert!(err.contains("OIDC_DISCOVERY_URL must use https://"), "{err}");
+        assert!(!err.contains("OIDC_ISSUER"), "{err}");
+
+        assert!(resource_server(
+            Mode::Production,
+            &[
+                ("PUBLIC_BASE_URL", "https://api.example.com"),
+                ("OIDC_ISSUER", "https://i.example/r"),
+            ],
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn security_txt_is_off_without_a_contact_and_renders_every_field() {
+        assert!(resource_server(Mode::Dev, &[("SECURITY_TXT_POLICY", "https://p.example")])
+            .unwrap()
+            .security_txt
+            .is_none());
+
+        let expires = in_days(30);
+        let rs = resource_server(
+            Mode::Dev,
+            &[
+                ("SECURITY_TXT_CONTACT", "mailto:security@example.com"),
+                ("SECURITY_TXT_EXPIRES", &expires),
+                ("SECURITY_TXT_POLICY", "https://example.com/policy"),
+                ("SECURITY_TXT_CANONICAL", "https://example.com/.well-known/security.txt"),
+                ("SECURITY_TXT_PREFERRED_LANGUAGES", "en, de"),
+            ],
+        )
+        .unwrap();
+        let body = rs.security_txt.unwrap().render();
+        let lines: Vec<&str> = body.lines().collect();
+        assert_eq!(lines[0], "Contact: mailto:security@example.com");
+        assert!(lines[1].starts_with("Expires: ") && lines[1].ends_with('Z'));
+        assert_eq!(lines[2], "Preferred-Languages: en, de");
+        assert_eq!(lines[3], "Policy: https://example.com/policy");
+        assert_eq!(
+            lines[4],
+            "Canonical: https://example.com/.well-known/security.txt"
+        );
+        assert!(body.ends_with('\n'));
+
+        // Only the required fields: nothing optional is invented.
+        let rs = resource_server(
+            Mode::Dev,
+            &[
+                ("SECURITY_TXT_CONTACT", "https://example.com/report"),
+                ("SECURITY_TXT_EXPIRES", &expires),
+            ],
+        )
+        .unwrap();
+        assert_eq!(rs.security_txt.unwrap().render().lines().count(), 2);
+    }
+
+    #[test]
+    fn security_txt_rejects_a_missing_unzoned_past_or_distant_expires() {
+        let contact = ("SECURITY_TXT_CONTACT", "tel:+15555550100");
+        let err = resource_server(Mode::Dev, &[contact]).unwrap_err();
+        assert!(err.contains("SECURITY_TXT_EXPIRES must be set"), "{err}");
+
+        for (bad, needle) in [
+            ("2099-01-01T00:00:00", "RFC 3339"),
+            ("tomorrow", "RFC 3339"),
+            (in_days(-1).as_str(), "in the future"),
+            (in_days(400).as_str(), "at most one year"),
+        ] {
+            let err = resource_server(Mode::Dev, &[contact, ("SECURITY_TXT_EXPIRES", bad)])
+                .expect_err(bad);
+            assert!(err.contains(needle), "{bad}: {err}");
+        }
+        // A bound just inside a year passes, in any zone.
+        let near = (chrono::Utc::now() + chrono::Duration::days(364))
+            .with_timezone(&chrono::FixedOffset::east_opt(7200).unwrap())
+            .to_rfc3339();
+        assert!(resource_server(Mode::Dev, &[contact, ("SECURITY_TXT_EXPIRES", &near)]).is_ok());
+    }
+
+    #[test]
+    fn security_txt_rejects_a_bad_contact_url_or_multiline_values() {
+        let expires = in_days(30);
+        let expires = ("SECURITY_TXT_EXPIRES", expires.as_str());
+        for (extra, needle) in [
+            (("SECURITY_TXT_CONTACT", "http://example.com"), "https:, mailto: or tel:"),
+            (("SECURITY_TXT_CONTACT", "   "), "single line"),
+            (("SECURITY_TXT_CONTACT", "mailto:a@b\nContact: evil"), "single line"),
+        ] {
+            let err = resource_server(Mode::Dev, &[extra, expires]).unwrap_err();
+            assert!(err.contains(needle), "{extra:?}: {err}");
+        }
+        for key in ["SECURITY_TXT_POLICY", "SECURITY_TXT_CANONICAL"] {
+            let err = resource_server(
+                Mode::Dev,
+                &[("SECURITY_TXT_CONTACT", "mailto:a@b"), expires, (key, "http://x")],
+            )
+            .unwrap_err();
+            assert!(err.contains("must be https:// URLs"), "{key}: {err}");
+        }
+        let err = resource_server(
+            Mode::Dev,
+            &[
+                ("SECURITY_TXT_CONTACT", "mailto:a@b"),
+                expires,
+                ("SECURITY_TXT_PREFERRED_LANGUAGES", "en\r\nPolicy: x"),
+            ],
+        )
+        .unwrap_err();
+        assert!(err.contains("SECURITY_TXT_PREFERRED_LANGUAGES"), "{err}");
+    }
+
+    #[test]
+    fn settings_from_env_defaults_the_audience_and_validates_the_resource_server() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_all();
+        let settings = Settings::from_env().unwrap();
+        assert_eq!(settings.oidc_audience.as_deref(), Some("api"));
+        assert_eq!(
+            ResourceServer::from_env(&settings).unwrap().audience,
+            "api"
+        );
+        unsafe { env::set_var("PUBLIC_BASE_URL", "not a url") };
+        assert!(Settings::from_env().unwrap_err().contains("PUBLIC_BASE_URL"));
+        clear_all();
+    }
+
+    #[test]
+    fn production_checks_the_public_oidc_issuer_not_only_the_legacy_one() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_all();
+        unsafe { env::set_var("MODE", "production") };
+        unsafe { env::set_var("POSTGRES_PASSWORD", "a-real-secret") };
+        unsafe { env::set_var("RUSTFS_ACCESS_KEY", "a-real-key") };
+        unsafe { env::set_var("RUSTFS_SECRET_KEY", "a-real-secret-key") };
+        unsafe { env::set_var("S3_ENDPOINT_URL", "https://s3.example.com") };
+        unsafe { env::set_var("REDIS_URL", "rediss://redis.example.com:6379/0") };
+        unsafe { env::set_var("POSTGRES_SSLMODE", "verify-full") };
+        unsafe { env::set_var("PUBLIC_BASE_URL", "https://api.example.com") };
+        unsafe { env::set_var("OIDC_ISSUER_URL", "https://issuer.example.com/realms/api") };
+        unsafe { env::set_var("OIDC_ISSUER", "http://localhost:8080/realms/api") };
+        let err = Settings::from_env().expect_err("a plaintext public issuer must be rejected");
+        assert!(err.contains("OIDC_ISSUER"), "{err}");
+        unsafe { env::set_var("OIDC_ISSUER", "https://issuer.example.com/realms/api") };
         assert!(Settings::from_env().is_ok());
         clear_all();
     }

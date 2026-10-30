@@ -29,7 +29,7 @@ use axum::Router;
 use sea_orm_migration::MigratorTrait;
 use tower_http::trace::TraceLayer;
 
-use config::{Mode, Settings};
+use config::{Mode, ResourceServer, Settings};
 use craftainer_crud::crud::CrudService;
 use craftainer_crud::events::EventBus;
 use craftainer_crud::stats_cache::CachedStats;
@@ -45,6 +45,11 @@ use generic::controllers as generic_controllers;
 use hero::controllers::{self as hero_controllers, AppState, HERO_EVENT_RESOURCE};
 use hero::repositories::hero_memory::HeroMemoryRepository;
 use hero::repositories::hero_sea_orm::HeroSeaOrmRepository;
+use craftainer_crud::manifest::{
+    api_catalog_router, manifest_router, Access, EventsDescriptor, Features, ManifestConfig,
+    ManifestField, ManifestRegistry, Replay, ResourceDescriptor,
+};
+use oidc::well_known::ManifestCallers;
 use oidc::OidcVerifier;
 use rate_limit::RateLimiter;
 use tokio_util::sync::CancellationToken;
@@ -105,14 +110,19 @@ pub async fn build_health_registry(
     registry
         .register(Box::new(HttpHealthCheck::new(
             "oidc",
-            format!(
-                "{}/.well-known/openid-configuration",
-                settings.oidc_issuer_url.trim_end_matches('/')
-            ),
+            resource_server(settings).discovery_url,
         )))
         .expect(DISTINCT);
 
     registry
+}
+
+/// The resource-server settings (`OIDC_ISSUER`, `OIDC_DISCOVERY_URL`,
+/// `OIDC_AUDIENCE`, `PUBLIC_BASE_URL`, `SECURITY_TXT_*`; `docs/adrs/0030`).
+/// `main` has already validated them through `Settings::from_env`, so a
+/// failure here is a programming error or a test's bad environment.
+fn resource_server(settings: &Settings) -> ResourceServer {
+    ResourceServer::from_env(settings).unwrap_or_else(|err| panic!("invalid configuration: {err}"))
 }
 
 /// The CRUD event bus (`docs/adrs/0016`): a real MQTT publisher outside
@@ -210,7 +220,10 @@ pub async fn build_state_with_db(
             &settings,
             subscriber_secret.as_deref().map(str::as_bytes),
         )),
-        oidc: Arc::new(OidcVerifier::new(settings.clone())),
+        oidc: Arc::new(OidcVerifier::with_resource_server(
+            settings.clone(),
+            Arc::new(resource_server(&settings)),
+        )),
         settings,
         health_registry: Arc::new(health_registry),
         hero_crud: Arc::new(CrudService::new(hero_repository)),
@@ -239,6 +252,147 @@ pub fn spawn_stats_cache_invalidation(
     })
 }
 
+fn schema(properties: serde_json::Value, required: &[&str]) -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": properties,
+        "required": required,
+    })
+}
+
+/// One Hero version's manifest descriptor (`craftainer_crud::manifest`),
+/// filterable fields from the same `HERO_FIELD_SPECS` the routes parse
+/// with. `powers` (v2) / `superpower` (v1) is not a scalar field, so it
+/// has no filter entry (`docs/adrs/0013`).
+fn hero_descriptor(version: &str, mode: Mode) -> ResourceDescriptor {
+    let v2 = version == "v2";
+    let power = if v2 {
+        serde_json::json!({"powers": {"type": "array", "items": {"type": "string", "minLength": 1, "maxLength": 200}, "minItems": 1}})
+    } else {
+        serde_json::json!({"superpower": {"type": "string", "minLength": 1, "maxLength": 200}})
+    };
+    let power_key = if v2 { "powers" } else { "superpower" };
+    let body = |required: &[&str]| {
+        let mut properties = serde_json::json!({
+            "name": {"type": "string", "minLength": 1, "maxLength": 200},
+            "power_level": {"type": ["integer", "null"]},
+        });
+        properties
+            .as_object_mut()
+            .expect("an object literal")
+            .extend(power.as_object().expect("an object literal").clone());
+        schema(properties, required)
+    };
+    let mut read_properties = serde_json::json!({
+        "id": {"type": "integer"},
+        "name": {"type": ["string", "null"]},
+        "power_level": {"type": ["integer", "null"]},
+        "owner_id": {"type": "string"},
+        "archived_at": {"type": ["string", "null"], "format": "date-time"},
+        "created_at": {"type": "string", "format": "date-time"},
+        "updated_at": {"type": "string", "format": "date-time"},
+    });
+    read_properties
+        .as_object_mut()
+        .expect("an object literal")
+        .insert(
+            power_key.to_string(),
+            if v2 {
+                serde_json::json!({"type": ["array", "null"], "items": {"type": "string"}})
+            } else {
+                serde_json::json!({"type": ["string", "null"]})
+            },
+        );
+
+    let json_path = format!("/crud/v1/heroes/{version}/json");
+    let title = if v2 { "Heroes" } else { "Heroes (v1, deprecated)" };
+    let mut descriptor = ResourceDescriptor::new(
+        "heroes",
+        title,
+        version,
+        json_path,
+        schema(read_properties, &["id", "owner_id", "created_at", "updated_at"]),
+        body(&["name", power_key]),
+        body(&[]),
+    );
+    descriptor
+        .formats
+        .insert("xml".to_string(), format!("/crud/v1/heroes/{version}/xml"));
+    descriptor.fields = hero_controllers::heroes::HERO_FIELD_SPECS
+        .iter()
+        .map(|spec| {
+            let field = ManifestField::from_spec(spec);
+            match spec.name {
+                "name" => field.required(),
+                "id" | "owner_id" | "archived_at" | "created_at" | "updated_at" => field.read_only(),
+                _ => field,
+            }
+        })
+        .collect();
+    descriptor.features = Features {
+        stats: v2,
+        predict: v2,
+        conditional_requests: true,
+        ..Features::default()
+    };
+    descriptor.events = Some(EventsDescriptor::new(
+        HERO_EVENT_RESOURCE,
+        if mode == Mode::Mock {
+            Replay::None
+        } else {
+            Replay::Persistent
+        },
+    ));
+    descriptor.access = Access {
+        public_read: false,
+        read_roles: hero_controllers::HERO_READ_ROLES.iter().map(|r| (*r).to_string()).collect(),
+        write_roles: hero_controllers::HERO_WRITE_ROLES.iter().map(|r| (*r).to_string()).collect(),
+        delete_roles: hero_controllers::HERO_DELETE_ROLES.iter().map(|r| (*r).to_string()).collect(),
+    };
+    descriptor
+}
+
+/// The registry behind `GET /api/_crud/manifest`: Hero v2 and the
+/// deprecated v1 compat view (`docs/adrs/0030`, FR-0036).
+pub fn build_manifest_registry(mode: Mode) -> ManifestRegistry {
+    let registry = ManifestRegistry::new();
+    for version in ["v2", "v1"] {
+        registry
+            .register(hero_descriptor(version, mode))
+            .expect("hero versions are distinct");
+    }
+    registry
+}
+
+/// `GET /api/_crud/manifest` (filtered to what the caller may read) and
+/// the RFC 9727 `GET /.well-known/api-catalog` pointing at it. The
+/// catalog's anchor is the configured `PUBLIC_BASE_URL`, not the request's
+/// `Host` header, which a client controls; there is no OpenAPI document to
+/// advertise.
+fn discovery_routers(state: &AppState) -> Router {
+    let resource = state.oidc.resource_server();
+    let mut config = ManifestConfig::new(
+        state.settings.app_name.clone(),
+        std::env::var("APP_VERSION").unwrap_or_else(|_| env!("CARGO_PKG_VERSION").to_string()),
+    );
+    config.oidc_discovery_url = Some(resource.public_discovery_url());
+    config.stats_ttl = config::stats_cache_ttl()
+        .ok()
+        .flatten()
+        .map(|ttl| ttl.as_secs());
+    config.bulk_max_matched = state.settings.bulk_action_max_matched;
+    manifest_router(
+        build_manifest_registry(state.settings.mode),
+        config,
+        ManifestCallers(state.oidc.clone()),
+    )
+    .merge(api_catalog_router(
+        "/api/_crud/manifest",
+        None,
+        Some(resource.public_base_url.clone()),
+    ))
+}
+
 /// Mount every router onto one `Router`, at the exact paths
 /// template-fastapi uses (`docs/adrs/0002`). `/mock` exists only under
 /// `Mode::Mock`.
@@ -248,7 +402,9 @@ pub fn spawn_stats_cache_invalidation(
 /// below carries `request_id`), `ServerSpanLayer` (one OpenTelemetry server
 /// span per request named after the matched route, none for `/health/*`;
 /// built here, so after `configure_telemetry` in `main`), `TraceLayer`
-/// (`docs/adrs/0026`).
+/// (`docs/adrs/0026`). Inside those, on every response: the RFC 9728
+/// `WWW-Authenticate` challenge on a 401 and the baseline security headers
+/// (`docs/adrs/0030`).
 pub fn build_router(state: AppState) -> Router {
     let mut app = Router::new()
         .nest("/health", health_router().merge(info_router()))
@@ -275,7 +431,17 @@ pub fn build_router(state: AppState) -> Router {
         app = app.nest("/mock", generic_controllers::mock::router());
     }
 
+    let resource_metadata_url: Arc<str> = state.oidc.resource_server().resource_metadata_url().into();
+    let discovery = discovery_routers(&state);
+    let well_known = oidc::well_known::router(state.oidc.resource_server().clone());
     app.with_state(state)
+        .merge(discovery)
+        .merge(well_known)
+        .layer(axum::middleware::map_response_with_state(
+            resource_metadata_url,
+            problem_details::add_resource_metadata,
+        ))
+        .layer(axum::middleware::map_response(http_headers::security_headers))
         .layer(TraceLayer::new_for_http())
         .layer(ServerSpanLayer::new())
         .layer(RequestIdLayer::new())
@@ -476,5 +642,186 @@ mod tests {
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert!(json.get("version").is_some() && json.get("commit").is_some());
+    }
+
+    /// A mock-mode router whose resource-server settings are fixed, not
+    /// read from the (devcontainer's) environment.
+    async fn router_with_public_url() -> Router {
+        let settings = Arc::new(mock_settings());
+        let mut state = build_state(settings.clone()).await;
+        let mut resource = ResourceServer::from_settings(&settings);
+        resource.public_base_url = "https://api.example.com".to_string();
+        resource.issuer = "https://id.example.com/realms/r".to_string();
+        state.oidc = Arc::new(OidcVerifier::with_resource_server(
+            settings,
+            Arc::new(resource),
+        ));
+        build_router(state)
+    }
+
+    async fn json_of(response: axum::response::Response) -> serde_json::Value {
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&body).unwrap()
+    }
+
+    #[tokio::test]
+    async fn every_401_points_at_the_configured_resource_metadata_and_never_the_host_header() {
+        let app = router_with_public_url().await;
+        let challenge = |response: &axum::response::Response| {
+            response
+                .headers()
+                .get("www-authenticate")
+                .expect("every 401 carries WWW-Authenticate")
+                .to_str()
+                .unwrap()
+                .to_string()
+        };
+        let bare = "Bearer resource_metadata=\"https://api.example.com/.well-known/oauth-protected-resource\"";
+
+        let missing = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/audit")
+                    .header("host", "evil.example")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(challenge(&missing), bare);
+
+        let rejected = app
+            .oneshot(
+                Request::builder()
+                    .uri("/audit")
+                    .header("authorization", "Bearer not-a-jwt")
+                    .header("host", "evil.example")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(rejected.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(challenge(&rejected), format!("{bare}, error=\"invalid_token\""));
+    }
+
+    #[tokio::test]
+    async fn the_well_known_documents_and_error_responses_carry_the_security_headers() {
+        let app = router_with_public_url().await;
+        for path in [
+            "/.well-known/oauth-protected-resource",
+            "/.well-known/api-catalog",
+            "/api/_crud/manifest",
+            "/health/live",
+            "/audit",
+            "/no/such/route",
+        ] {
+            let response = get(&app, path, None).await;
+            let header = |name: &str| {
+                response
+                    .headers()
+                    .get(name)
+                    .unwrap_or_else(|| panic!("{path} lacks {name}"))
+                    .to_str()
+                    .unwrap()
+                    .to_string()
+            };
+            assert_eq!(
+                header("content-security-policy"),
+                "default-src 'self'; frame-ancestors 'none'",
+                "{path}"
+            );
+            assert_eq!(header("x-content-type-options"), "nosniff", "{path}");
+            assert_eq!(header("x-frame-options"), "DENY", "{path}");
+            assert_eq!(header("referrer-policy"), "no-referrer", "{path}");
+            assert!(header("strict-transport-security").starts_with("max-age="), "{path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn serves_the_protected_resource_metadata_and_the_api_catalog() {
+        let app = router_with_public_url().await;
+
+        let metadata = json_of(get(&app, "/.well-known/oauth-protected-resource", None).await).await;
+        assert_eq!(metadata["resource"], "https://api.example.com");
+        assert_eq!(
+            metadata["authorization_servers"],
+            serde_json::json!(["https://id.example.com/realms/r"])
+        );
+
+        // No SECURITY_TXT_CONTACT: nothing is served at all.
+        let security_txt = get(&app, "/.well-known/security.txt", None).await;
+        assert_eq!(security_txt.status(), StatusCode::NOT_FOUND);
+
+        let catalog = get(&app, "/.well-known/api-catalog", None).await;
+        assert_eq!(catalog.status(), StatusCode::OK);
+        assert_eq!(
+            catalog.headers().get("content-type").unwrap(),
+            "application/linkset+json"
+        );
+        let linkset = json_of(catalog).await;
+        let entry = &linkset["linkset"][0];
+        // The anchor is configured, not reflected from the request.
+        assert_eq!(entry["anchor"], "https://api.example.com");
+        assert_eq!(entry["describedby"][0]["href"], "/api/_crud/manifest");
+        assert!(entry.get("service-desc").is_none());
+    }
+
+    #[tokio::test]
+    async fn the_manifest_lists_heroes_only_to_a_caller_who_may_read_them() {
+        let app = router_with_public_url().await;
+
+        let anonymous = get(&app, "/api/_crud/manifest", None).await;
+        assert_eq!(anonymous.status(), StatusCode::OK);
+        assert!(anonymous.headers().get("etag").is_some());
+        let manifest = json_of(anonymous).await;
+        assert_eq!(manifest["resources"], serde_json::json!([]));
+
+        let token = {
+            use base64::Engine;
+            let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+                serde_json::json!({
+                    "sub": "a",
+                    "resource_access": {"api": {"roles": ["viewer"]}}
+                })
+                .to_string(),
+            );
+            format!("h.{payload}.s")
+        };
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/_crud/manifest")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let manifest = json_of(response).await;
+        let resources = manifest["resources"].as_array().unwrap();
+        let versions: Vec<(&str, &str)> = resources
+            .iter()
+            .map(|r| (r["name"].as_str().unwrap(), r["api_version"].as_str().unwrap()))
+            .collect();
+        assert_eq!(versions, [("heroes", "v1"), ("heroes", "v2")]);
+        let v2 = &resources[1];
+        assert_eq!(v2["base_path"], "/crud/v1/heroes/v2/json");
+        assert_eq!(v2["capabilities"]["stats"], true);
+        assert_eq!(
+            v2["auth"]["oidc_discovery_url"],
+            "https://id.example.com/realms/r/.well-known/openid-configuration"
+        );
+        assert_eq!(v2["auth"]["write_roles"], serde_json::json!(["editor", "maintainer"]));
+        assert!(v2["fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["name"] == "power_level"));
     }
 }

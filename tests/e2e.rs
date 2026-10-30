@@ -418,15 +418,155 @@ async fn hero_and_audit_role_journey(client: &reqwest::Client, backend: Backend)
     );
 }
 
+/// The origin the dev journey publishes itself at (`PUBLIC_BASE_URL`).
+const PUBLIC_BASE_URL: &str = "http://localhost:8000";
+
+/// The `iss` the real Keycloak tokens carry and the RFC 9728 document
+/// advertises: `OIDC_ISSUER` (the devcontainer's `keycloak.env`), else the
+/// legacy `OIDC_ISSUER_URL`, exactly the process-under-test's own rule.
+fn expected_issuer() -> String {
+    std::env::var("OIDC_ISSUER")
+        .or_else(|_| std::env::var("OIDC_ISSUER_URL"))
+        .unwrap_or_else(|_| "http://keycloak:8080/realms/template-axum".to_string())
+}
+
+async fn get_json(client: &reqwest::Client, path: &str, token: Option<&str>) -> (u16, Value) {
+    let mut request = client.get(format!("{BASE_URL}{path}"));
+    if let Some(token) = token {
+        request = request.bearer_auth(token);
+    }
+    let response = request.send().await.unwrap();
+    let status = response.status().as_u16();
+    (status, response.json().await.unwrap())
+}
+
+/// The resource-server surface over a real socket against real Keycloak
+/// tokens: RFC 9728 metadata, the `WWW-Authenticate` challenge on 401s
+/// (the header FastAPI's first cut silently dropped), `security.txt`, the
+/// security headers, the api-catalog and the role-filtered manifest.
+async fn resource_server_journey(client: &reqwest::Client) {
+    let metadata_url = format!("{PUBLIC_BASE_URL}/.well-known/oauth-protected-resource");
+
+    let response = client
+        .get(format!("{BASE_URL}/.well-known/oauth-protected-resource"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let headers = response.headers().clone();
+    let document: Value = response.json().await.unwrap();
+    assert_eq!(document["resource"], PUBLIC_BASE_URL);
+    assert_eq!(document["authorization_servers"], json!([expected_issuer()]));
+    assert_eq!(document["bearer_methods_supported"], json!(["header"]));
+    assert_eq!(document["scopes_supported"], json!(["openid"]));
+    assert_eq!(document["resource_name"], "template-axum");
+    // The well-known documents get the security headers too.
+    assert_eq!(headers["x-content-type-options"], "nosniff");
+    assert_eq!(headers["x-frame-options"], "DENY");
+    assert_eq!(
+        headers["content-security-policy"],
+        "default-src 'self'; frame-ancestors 'none'"
+    );
+
+    // Every 401 carries the challenge, built from configuration even when
+    // the request claims another host.
+    let missing = client
+        .get(format!("{BASE_URL}/audit"))
+        .header("host", "evil.example")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), 401);
+    assert_eq!(
+        missing.headers()["www-authenticate"],
+        format!("Bearer resource_metadata=\"{metadata_url}\"").as_str()
+    );
+    assert_eq!(missing.headers()["x-content-type-options"], "nosniff");
+    let rejected = client
+        .get(format!("{BASE_URL}/audit"))
+        .bearer_auth("not.a.jwt")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(rejected.status(), 401);
+    assert_eq!(
+        rejected.headers()["www-authenticate"],
+        format!("Bearer resource_metadata=\"{metadata_url}\", error=\"invalid_token\"").as_str()
+    );
+
+    // security.txt, configured by the spawn environment.
+    let security_txt = client
+        .get(format!("{BASE_URL}/.well-known/security.txt"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(security_txt.status(), 200);
+    let text = security_txt.text().await.unwrap();
+    assert!(text.starts_with("Contact: mailto:security@example.com\nExpires: "));
+    assert!(text.contains("\nPolicy: https://example.com/security-policy\n"));
+
+    // api-catalog (RFC 9727), anchored at the configured origin.
+    let catalog = client
+        .get(format!("{BASE_URL}/.well-known/api-catalog"))
+        .header("host", "evil.example")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(catalog.status(), 200);
+    assert_eq!(catalog.headers()["content-type"], "application/linkset+json");
+    let catalog: Value = catalog.json().await.unwrap();
+    assert_eq!(catalog["linkset"][0]["anchor"], PUBLIC_BASE_URL);
+    assert_eq!(
+        catalog["linkset"][0]["describedby"][0]["href"],
+        "/api/_crud/manifest"
+    );
+
+    // The manifest: nothing for an anonymous caller, the hero versions
+    // (with the public issuer's discovery URL) for a reader.
+    let (status, anonymous) = get_json(client, "/api/_crud/manifest", None).await;
+    assert_eq!(status, 200);
+    assert_eq!(anonymous["resources"], json!([]));
+    let viewer = keycloak_token(client, "viewer").await;
+    let (status, manifest) = get_json(client, "/api/_crud/manifest", Some(&viewer)).await;
+    assert_eq!(status, 200);
+    let resources = manifest["resources"].as_array().unwrap();
+    let names: Vec<(&str, &str)> = resources
+        .iter()
+        .map(|r| (r["name"].as_str().unwrap(), r["api_version"].as_str().unwrap()))
+        .collect();
+    assert_eq!(names, [("heroes", "v1"), ("heroes", "v2")]);
+    assert_eq!(
+        resources[1]["auth"]["oidc_discovery_url"],
+        format!("{}/.well-known/openid-configuration", expected_issuer())
+    );
+    // A token from a user with no hero role sees an empty manifest.
+    let security = keycloak_token(client, "security").await;
+    let (_, none) = get_json(client, "/api/_crud/manifest", Some(&security)).await;
+    assert_eq!(none["resources"], json!([]));
+}
+
 #[tokio::test]
 async fn dev_and_mock_role_journeys_run_against_a_real_live_server() {
     let client = reqwest::Client::new();
 
     // -- MODE=dev: real Postgres/Redis/S3/MQTT/Keycloak, real tokens. --
     {
-        let _app = AppProcess::spawn("dev", &[]);
+        let expires = (chrono::Utc::now() + chrono::Duration::days(30)).to_rfc3339();
+        let _app = AppProcess::spawn(
+            "dev",
+            &[
+                ("PUBLIC_BASE_URL", PUBLIC_BASE_URL),
+                ("SECURITY_TXT_CONTACT", "mailto:security@example.com"),
+                ("SECURITY_TXT_EXPIRES", &expires),
+                (
+                    "SECURITY_TXT_POLICY",
+                    "https://example.com/security-policy",
+                ),
+            ],
+        );
         wait_until_ready(&client, "/health/ready").await;
         hero_and_audit_role_journey(&client, Backend::Dev).await;
+        resource_server_journey(&client).await;
     }
 
     // -- MODE=mock: zero containers, tokens minted by the app itself. --

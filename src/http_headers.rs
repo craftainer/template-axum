@@ -1,7 +1,8 @@
-//! RFC 8594 `Sunset`/`Deprecation` response headers -- port of the
-//! `sunset()` half of `app/http_headers.py` (the security-headers
-//! middleware half of that module is out of scope for this item; see
-//! `docs/nfrs/NFR-0002-deprecation-sunset-headers.md`'s port below).
+//! RFC 8594 `Sunset`/`Deprecation` response headers and the baseline
+//! security response headers -- port of `app/http_headers.py`'s
+//! `sunset()` and `add_security_headers()` (`docs/adrs/0030` for the
+//! latter; `docs/nfrs/NFR-0002-deprecation-sunset-headers.md` for the
+//! former).
 //!
 //! Applied by every route in `controllers::heroes_v1`/`heroes_v1_xml`
 //! (NFR-0026, `docs/adrs/0012`, `docs/adrs/0017`) -- the deprecated Hero
@@ -9,8 +10,44 @@
 
 use axum::http::header::{HeaderValue, LINK};
 use axum::http::HeaderName;
-use axum::response::{IntoResponseParts, ResponseParts};
+use axum::response::{IntoResponseParts, Response, ResponseParts};
 use chrono::{DateTime, Utc};
+
+/// Every served HTML page loads its only script from the same origin
+/// (`<script src="{own_base}/components.js">`, never inline) and defines
+/// no other resource type, so a locked-down `default-src` covers it
+/// without an `unsafe-inline`/`unsafe-eval` carve-out. `frame-ancestors
+/// 'none'` is CSP's own `X-Frame-Options: DENY`, set alongside it below
+/// for the older header's wider browser support. The same policy
+/// template-fastapi serves (it relaxes it only for FastAPI's own
+/// `/docs` and `/redoc`, which this app has no equivalent of).
+const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; frame-ancestors 'none'";
+
+/// Headers `security_headers` sets on every response, in the exact
+/// values template-fastapi's middleware uses.
+const SECURITY_HEADERS: [(&str, &str); 6] = [
+    ("content-security-policy", CONTENT_SECURITY_POLICY),
+    ("x-frame-options", "DENY"),
+    ("x-content-type-options", "nosniff"),
+    // Pins every origin serving this app to HTTPS for future requests;
+    // browsers ignore it over plain HTTP, so it is harmless in dev.
+    ("strict-transport-security", "max-age=63072000; includeSubDomains"),
+    ("referrer-policy", "no-referrer"),
+    ("permissions-policy", "geolocation=(), microphone=(), camera=()"),
+];
+
+/// Response layer (`axum::middleware::map_response`) that sets
+/// `SECURITY_HEADERS` on every response -- error responses and the
+/// `/.well-known/` documents included, which no route-level opt-in would
+/// reach. Overwrites a header a handler already set, like the reference.
+pub async fn security_headers(mut response: Response) -> Response {
+    for (name, value) in SECURITY_HEADERS {
+        response
+            .headers_mut()
+            .insert(HeaderName::from_static(name), HeaderValue::from_static(value));
+    }
+    response
+}
 
 static DEPRECATION: HeaderName = HeaderName::from_static("deprecation");
 static SUNSET: HeaderName = HeaderName::from_static("sunset");
@@ -78,6 +115,31 @@ mod tests {
         assert_eq!(
             response.headers().get("sunset").unwrap(),
             "Fri, 01 Jan 2027 00:00:00 GMT"
+        );
+    }
+
+    #[tokio::test]
+    async fn security_headers_cover_every_response_and_overwrite_a_handlers_own() {
+        let mut response = (axum::http::StatusCode::NOT_FOUND, "nope").into_response();
+        response
+            .headers_mut()
+            .insert("x-frame-options", HeaderValue::from_static("SAMEORIGIN"));
+        let response = security_headers(response).await;
+        let header = |name: &str| response.headers().get(name).unwrap().to_str().unwrap().to_string();
+        assert_eq!(
+            header("content-security-policy"),
+            "default-src 'self'; frame-ancestors 'none'"
+        );
+        assert_eq!(header("x-frame-options"), "DENY");
+        assert_eq!(header("x-content-type-options"), "nosniff");
+        assert_eq!(
+            header("strict-transport-security"),
+            "max-age=63072000; includeSubDomains"
+        );
+        assert_eq!(header("referrer-policy"), "no-referrer");
+        assert_eq!(
+            header("permissions-policy"),
+            "geolocation=(), microphone=(), camera=()"
         );
     }
 
