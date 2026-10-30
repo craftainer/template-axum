@@ -22,7 +22,8 @@
 # App settings under test: any of DB_POOL_SIZE, DB_POOL_MIN_SIZE,
 # DB_POOL_RECYCLE, DB_POOL_IDLE_TIMEOUT, DB_CONNECT_TIMEOUT and
 # RUN_MIGRATIONS_ON_STARTUP that is set in the caller's environment is passed to the app
-# container (docs/adrs/0022); unset ones leave the app's defaults.
+# container (docs/adrs/0022); unset ones leave the app's defaults. So do the
+# OTEL_* settings (docs/adrs/0026) and STATS_CACHE_TTL_SECONDS (docs/adrs/0024).
 set -euo pipefail
 
 image=${1:?usage: $0 <image> [goose args...]}
@@ -91,7 +92,7 @@ app_env=()
 for var in DB_POOL_SIZE DB_POOL_MIN_SIZE DB_POOL_RECYCLE \
   DB_POOL_IDLE_TIMEOUT DB_CONNECT_TIMEOUT RUN_MIGRATIONS_ON_STARTUP \
   OTEL_EXPORTER_OTLP_ENDPOINT OTEL_SERVICE_NAME OTEL_TRACES_SAMPLER \
-  OTEL_TRACES_SAMPLER_ARG OTEL_LOGS_EXPORTER; do
+  OTEL_TRACES_SAMPLER_ARG OTEL_LOGS_EXPORTER STATS_CACHE_TTL_SECONDS; do
   if [ -n "${!var:-}" ]; then
     app_env+=(-e "$var=${!var}")
   fi
