@@ -49,7 +49,12 @@ We will wire, in `build_router` and `main.rs`, and add no setting of our own:
   `OTEL_TRACES_SAMPLER` and `OTEL_TRACES_SAMPLER_ARG` itself; unset means
   `parentbased_always_on`. The documented default for operators is
   `OTEL_TRACES_SAMPLER=parentbased_traceidratio`,
-  `OTEL_TRACES_SAMPLER_ARG=0.1` with l### Overhead budget
+  `OTEL_TRACES_SAMPLER_ARG=0.1`, with log export on (user decision
+  2026-10-30; see "Overhead budget"). As in template-fastapi, probes stay
+  out of traces and the behaviour with `OTEL_EXPORTER_OTLP_ENDPOINT` unset
+  is unchanged.
+
+### Overhead budget
 
 Measured on `main` at `a7e0500` (image `template-axum:l2-a7e0500`, id
 `sha256:b59276c43890…`, which includes #23: sqlx statement logging off),
@@ -98,10 +103,6 @@ noisiest arm).
 Decision (2026-10-30, user): accept the 8 to 12% throughput cost of
 telemetry on as the overhead budget; no span-layer investigation.
 Telemetry stays opt-in (off by default).
-
-lse)` or a higher level, then re-measure
-the table with the TL and Z arms; a code change, so it needs its own work
-item. The recommended default is not yet decided.
 
 ## Consequences
 
