@@ -174,6 +174,7 @@ pub fn state_for(db: DatabaseConnection, events: EventBus) -> AppState {
             HeroSeaOrmRepository::new(db),
         )))),
         rate_limiter: Arc::new(RateLimiter::mock()),
+        hero_stats: craftainer_crud::stats_cache::CachedStats::uncached("heroes"),
         events: Arc::new(events),
         shutdown: tokio_util::sync::CancellationToken::new(),
     }

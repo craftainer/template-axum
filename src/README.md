@@ -38,6 +38,8 @@ beyond what it's explicitly passed or reads from `config::Settings`.
   logging (`craftainer_observability::logs`, keeping the guard to the end
   so the OTLP export is flushed), reads settings and calls `lib.rs`'s
   wiring; see "Structured logging" below.
+- `cache.rs` — `RedisStatsCache`, Hero's shared `/stats`/`/predict` cache,
+  and the event-driven invalidation task; see "Stats cache" below.
 - `problem_details.rs` — the single `AppError` type and its RFC 9457
   `IntoResponse` impl; see "RFC 9457 error responses" below.
 - `rate_limit.rs` — `RateLimiter`, the Redis-backed (in-memory under
@@ -206,6 +208,19 @@ checks it before opening any connection, `build_state_with_db` passes it to
 It is deliberately not a `Settings` field, so no `Debug` output of the
 settings can print it. `docs/adrs/0020` records the decision.
 
+## Stats cache
+
+`GET /crud/v1/heroes/v2/json/stats` and `/predict` can be served from a
+shared cache (`docs/adrs/0024`). It is **off unless
+`STATS_CACHE_TTL_SECONDS` is set** (a whole number of seconds >= 1, how long
+an entry lives; anything else exits 1 at startup). With it set, the cache is
+Redis (`REDIS_URL`) outside `Mode::Mock` and in-process inside it, a response
+carries `X-Stats-Cache: hit|miss`, and a lifespan task drops the cached
+entries on every Hero create/update/delete event (and on every resubscribe).
+Entries are namespaced by `APP_VERSION`. A Redis failure after startup is
+logged and treated as a miss; it never fails a request. To compare cache on
+and off, run the same workload with the variable unset and set.
+
 ## Graceful shutdown
 
 On SIGINT or SIGTERM `main.rs` cancels `AppState.shutdown` (ending every
@@ -298,9 +313,12 @@ underlying `PgPool` for the `db.client.connections.*` gauges (not in
 `Mode::Mock`). `GET /health/info` (`{"version","commit"}` from
 `APP_VERSION`/`APP_COMMIT`, `null` when unset) is `info_router()` merged
 into the `/health` nest. Sampling is the SDK's own `OTEL_TRACES_SAMPLER` /
-`OTEL_TRACES_SAMPLER_ARG`; the app has no setting for it. The reasoning,
-and the pending overhead measurement, are in `docs/adrs/0026` and
-`docs/nfrs/NFR-0032`.
+`OTEL_TRACES_SAMPLER_ARG`; the app has no setting for it. The documented
+operator default is `OTEL_TRACES_SAMPLER=parentbased_traceidratio` with
+`OTEL_TRACES_SAMPLER_ARG=0.1` and log export on (decided 2026-10-30);
+telemetry is opt-in. The overhead budget (about 10% less throughput at the
+1 vCPU / 2 GB reference with export on) is in `docs/adrs/0026`
+("Overhead budget"), with the reasoning, and in `docs/nfrs/NFR-0032`.
 
 ## RFC 9457 error responses
 

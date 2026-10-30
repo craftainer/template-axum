@@ -63,6 +63,13 @@ directory tree, so this instance's four tiers live in different places:
     a check/increment/reject round trip. The unreachable-server failure
     path and the in-memory `Backend::Mock` half stay in `src/rate_limit.
     rs`'s own colocated unit tests, which need no live service.
+  - `redis_stats_cache.rs` — `cache::RedisStatsCache` and Hero's cached
+    `/stats`/`/predict` against live Redis (and, for one test, MQTT):
+    hit/miss, per-query entries, invalidation (across versions, past one
+    SCAN batch, on a write event, through the broker), TTL expiry, and a
+    simulated outage (a TCP proxy to Redis that the test cuts) that must
+    degrade to a miss with no 5xx. Each test uses its own key prefix and
+    removes its keys.
   - `keycloak_oidc.rs` — `oidc::OidcVerifier`'s real (non-`Mode::Mock`)
     verification path against live Keycloak: discovery + JWKS fetch (and
     its cache), a real signed token round trip, and the malformed-token/

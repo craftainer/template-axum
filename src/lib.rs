@@ -12,6 +12,7 @@
 //! (docs/adrs/0020); the wiring functions below are the only thing above
 //! `controllers`, and `main.rs` does nothing but call them.
 
+pub mod cache;
 pub mod config;
 pub mod db;
 pub mod generic;
@@ -31,6 +32,7 @@ use tower_http::trace::TraceLayer;
 use config::{Mode, Settings};
 use craftainer_crud::crud::CrudService;
 use craftainer_crud::events::EventBus;
+use craftainer_crud::stats_cache::CachedStats;
 use craftainer_observability::health::checks::{
     DatabaseHealthCheck, HttpHealthCheck, MockHealthCheck, RedisHealthCheck, S3HealthCheck,
 };
@@ -40,7 +42,7 @@ use craftainer_observability::health::HealthRegistry;
 use craftainer_observability::otel::ServerSpanLayer;
 use craftainer_observability::request_id::RequestIdLayer;
 use generic::controllers as generic_controllers;
-use hero::controllers::{self as hero_controllers, AppState};
+use hero::controllers::{self as hero_controllers, AppState, HERO_EVENT_RESOURCE};
 use hero::repositories::hero_memory::HeroMemoryRepository;
 use hero::repositories::hero_sea_orm::HeroSeaOrmRepository;
 use oidc::OidcVerifier;
@@ -190,6 +192,16 @@ pub async fn build_state_with_db(
             .expect("failed to connect to Redis for rate limiting")
     };
 
+    let stats_ttl =
+        config::stats_cache_ttl().unwrap_or_else(|err| panic!("invalid configuration: {err}"));
+    let hero_stats = match cache::build_stats_cache(settings.mode, &settings.redis_url, stats_ttl)
+        .await
+        .expect("failed to connect to Redis for the stats cache")
+    {
+        Some(cache) => CachedStats::new(cache, HERO_EVENT_RESOURCE),
+        None => CachedStats::uncached(HERO_EVENT_RESOURCE),
+    };
+
     let subscriber_secret = config::subscriber_secret(settings.mode)
         .unwrap_or_else(|err| panic!("invalid configuration: {err}"));
 
@@ -203,8 +215,28 @@ pub async fn build_state_with_db(
         health_registry: Arc::new(health_registry),
         hero_crud: Arc::new(CrudService::new(hero_repository)),
         rate_limiter: Arc::new(rate_limiter),
+        hero_stats,
         shutdown: CancellationToken::new(),
     }
+}
+
+/// Start the task that drops Hero's cached `/stats`/`/predict` bodies on
+/// every CRUD event (`docs/adrs/0024`). `None` when the cache is off
+/// (`enabled` false, i.e. `STATS_CACHE_TTL_SECONDS` unset). The task ends
+/// when `state.shutdown` is cancelled; the caller awaits the handle.
+pub fn spawn_stats_cache_invalidation(
+    state: &AppState,
+    enabled: bool,
+) -> Option<tokio::task::JoinHandle<()>> {
+    enabled.then(|| {
+        tokio::spawn(cache::run_invalidation(
+            state.hero_stats.clone(),
+            state.events.clone(),
+            HERO_EVENT_RESOURCE,
+            cache::INVALIDATION_RETRY,
+            state.shutdown.clone(),
+        ))
+    })
 }
 
 /// Mount every router onto one `Router`, at the exact paths
@@ -330,6 +362,18 @@ mod tests {
         assert_eq!(unkeyed.verify_subscriber_id("heroes", &id), None);
         let other = build_event_bus(&mock_settings(), Some(&b"o".repeat(32)));
         assert_eq!(other.verify_subscriber_id("heroes", &id), None);
+    }
+
+    #[tokio::test]
+    async fn the_invalidation_task_starts_only_when_the_cache_is_on_and_stops_on_shutdown() {
+        let state = build_state(Arc::new(mock_settings())).await;
+        assert!(spawn_stats_cache_invalidation(&state, false).is_none());
+        let task = spawn_stats_cache_invalidation(&state, true).expect("enabled starts the task");
+        state.shutdown.cancel();
+        tokio::time::timeout(std::time::Duration::from_secs(5), task)
+            .await
+            .expect("cancelling shutdown ends the task")
+            .unwrap();
     }
 
     #[tokio::test]

@@ -13,7 +13,10 @@ use craftainer_observability::{
     Telemetry,
 };
 use template_axum::config::Settings;
-use template_axum::{build_router, build_state_with_db, connect_database, problem_details};
+use template_axum::{
+    build_router, build_state_with_db, connect_database, problem_details,
+    spawn_stats_cache_invalidation,
+};
 
 /// Installs JSON logging (plus OTLP export when the environment asks for
 /// it). An exporter that can't be built isn't fatal: carry on with JSON
@@ -54,6 +57,12 @@ async fn main() {
         eprintln!("invalid configuration: {err}");
         std::process::exit(1);
     }
+    let stats_cache_enabled = template_axum::config::stats_cache_ttl()
+        .unwrap_or_else(|err| {
+            eprintln!("invalid configuration: {err}");
+            std::process::exit(1);
+        })
+        .is_some();
     let settings = Arc::new(settings);
 
     let db = connect_database(&settings).await;
@@ -66,6 +75,7 @@ async fn main() {
     // Cancelled the moment the shutdown signal fires: ends every open
     // `/events` stream, which would otherwise hold the drain open forever.
     let shutdown = state.shutdown.clone();
+    let invalidation = spawn_stats_cache_invalidation(&state, stats_cache_enabled);
     let app = build_router(state);
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:8000")
@@ -108,6 +118,12 @@ async fn main() {
             Ok(())
         }
     };
+
+    // The signal path cancelled `shutdown` already; a server error did not.
+    shutdown.cancel();
+    if let Some(task) = invalidation {
+        let _ = task.await;
+    }
 
     // Closing any clone closes the shared sqlx pool: waits for in-use
     // connections to be returned, then ends every connection cleanly.

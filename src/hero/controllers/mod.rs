@@ -40,6 +40,7 @@ use craftainer_crud::controllers::crud_actions::ListOrGet;
 use craftainer_crud::controllers::crud_query::parse_include_archived;
 use craftainer_crud::crud::CrudService;
 use craftainer_crud::events::EventBus;
+use craftainer_crud::stats_cache::CachedStats;
 use craftainer_observability::health::router::HasHealthRegistry;
 use craftainer_observability::health::HealthRegistry;
 use tokio_util::sync::CancellationToken;
@@ -68,6 +69,9 @@ pub struct AppState {
     pub health_registry: Arc<HealthRegistry>,
     pub hero_crud: Arc<CrudService<DynHeroRepository>>,
     pub rate_limiter: Arc<RateLimiter>,
+    /// Hero's view of the shared `/stats`/`/predict` cache, or an uncached
+    /// one when `STATS_CACHE_TTL_SECONDS` is unset (`docs/adrs/0024`).
+    pub hero_stats: CachedStats,
     /// CRUD event publish/subscribe backing `GET <prefix>/events`
     /// (`docs/adrs/0016`) -- MQTT-backed, or an in-memory fan-out under
     /// `Mode::Mock`.
@@ -183,6 +187,7 @@ mod tests {
                 HeroMemoryRepository::new(),
             )))),
             rate_limiter: Arc::new(RateLimiter::mock()),
+            hero_stats: CachedStats::uncached(HERO_EVENT_RESOURCE),
             shutdown: CancellationToken::new(),
             events: Arc::new(EventBus::mock()),
         }
