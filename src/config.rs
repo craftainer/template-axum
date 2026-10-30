@@ -379,6 +379,15 @@ pub fn graceful_shutdown_timeout() -> Result<Option<Duration>, String> {
     env_seconds("GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS")
 }
 
+/// `STATS_CACHE_TTL_SECONDS`: how long a cached `/stats` or `/predict`
+/// response lives (`docs/adrs/0024`). Unset (the default) turns the shared
+/// cache off; a set value must be a whole number >= 1, as in
+/// template-fastapi. Standalone, like `graceful_shutdown_timeout`: only the
+/// wiring reads it, no request handler.
+pub fn stats_cache_ttl() -> Result<Option<Duration>, String> {
+    env_seconds("STATS_CACHE_TTL_SECONDS")
+}
+
 /// `SUBSCRIBER_SECRET`: the key `craftainer_crud`'s event bus signs the
 /// subscriber ids it mints with (`docs/adrs/0020`). Mirrors
 /// template-fastapi's `subscriber_secret`: unset is allowed (the bus then
@@ -524,6 +533,22 @@ mod tests {
         unsafe {
             env::remove_var(key);
         }
+    }
+
+    #[test]
+    fn stats_cache_ttl_is_off_by_default_and_must_be_a_positive_whole_number() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let key = "STATS_CACHE_TTL_SECONDS";
+        // SAFETY: serialized by ENV_LOCK, like `clear_all`.
+        unsafe { env::remove_var(key) };
+        assert_eq!(stats_cache_ttl(), Ok(None));
+        unsafe { env::set_var(key, "30") };
+        assert_eq!(stats_cache_ttl(), Ok(Some(Duration::from_secs(30))));
+        for bad in ["0", "-1", "1.5", "soon", ""] {
+            unsafe { env::set_var(key, bad) };
+            assert!(stats_cache_ttl().is_err(), "{bad:?} must be rejected");
+        }
+        unsafe { env::remove_var(key) };
     }
 
     #[test]

@@ -4,6 +4,7 @@
 //! Owner-scoped per ADR 0011 (reads open, writes/deletes restricted to the
 //! caller's own `sub`); soft-deleted per ADR 0012.
 
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
 
 use axum::extract::{ConnectInfo, Query, State};
@@ -30,6 +31,7 @@ use craftainer_crud::controllers::crud_query::{
 use craftainer_crud::controllers::crud_stats;
 use craftainer_crud::crud::DEFAULT_LIMIT;
 use craftainer_crud::events::EventAction;
+use craftainer_crud::stats_cache::{cache_key, CacheError, CacheScope, CacheState};
 use craftainer_crud::views::stats::{
     CategoricalValueCount, LifecycleStats, NumericFieldStat, Prediction, ResourceStats,
     SeriesPoint, TimeBucketCount,
@@ -344,6 +346,73 @@ fn time_series(records: &[hero::Model], bucket: crud_stats::TimeBucket) -> Vec<T
         .collect()
 }
 
+/// What a cached read can fail with: the route's own error, or the cache's
+/// (`CachedStats::get_or_build` needs `From<CacheError>`; `AppError` lives
+/// outside this module, so a local sum type carries both).
+enum CachedReadError {
+    App(AppError),
+    Cache(CacheError),
+}
+
+impl From<AppError> for CachedReadError {
+    fn from(err: AppError) -> Self {
+        Self::App(err)
+    }
+}
+
+impl From<craftainer_crud::repositories::RepoError> for CachedReadError {
+    fn from(err: craftainer_crud::repositories::RepoError) -> Self {
+        Self::App(err.into())
+    }
+}
+
+impl From<CacheError> for CachedReadError {
+    fn from(err: CacheError) -> Self {
+        Self::Cache(err)
+    }
+}
+
+impl From<CachedReadError> for AppError {
+    fn from(err: CachedReadError) -> Self {
+        match err {
+            CachedReadError::App(err) => err,
+            CachedReadError::Cache(err) => craftainer_crud::error::CrudError::from(err).into(),
+        }
+    }
+}
+
+/// Serve a stats-shaped body through Hero's cache (`docs/adrs/0024`): the
+/// key covers the route `kind`, the response `schema` and the normalised
+/// `params`; reads are open to every read role, so the scope is `Shared`.
+/// `X-Stats-Cache: hit|miss` is added when a cache is configured.
+async fn cached_json<F, Fut>(
+    state: &AppState,
+    kind: &str,
+    schema: &str,
+    params: BTreeMap<String, serde_json::Value>,
+    build: F,
+) -> Result<Response, AppError>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<serde_json::Value, CachedReadError>>,
+{
+    let key = cache_key(kind, schema, &CacheScope::Shared, &params);
+    let (body, cache_state) = state.hero_stats.get_or_build(&key, build).await?;
+    let mut response = Json(body).into_response();
+    if cache_state != CacheState::Bypass {
+        response.headers_mut().insert(
+            "x-stats-cache",
+            header::HeaderValue::from_static(cache_state.as_str()),
+        );
+    }
+    Ok(response)
+}
+
+fn to_value<T: serde::Serialize>(body: &T) -> Result<serde_json::Value, CachedReadError> {
+    serde_json::to_value(body)
+        .map_err(|err| CachedReadError::App(AppError::Internal(err.to_string())))
+}
+
 #[derive(serde::Deserialize)]
 struct StatsQuery {
     bucket: Option<String>,
@@ -357,62 +426,75 @@ async fn get_stats(
     AuthClaims(claims): AuthClaims,
     Query(query): Query<StatsQuery>,
     Query(raw_params): Query<Vec<(String, String)>>,
-) -> Result<Json<ResourceStats>, AppError> {
+) -> Result<Response, AppError> {
     claims.require_any_role(&state.settings.oidc_client_id, HERO_READ_ROLES)?;
     reject_only_archived(&raw_params).map_err(AppError::UnprocessableEntity)?;
     let include_archived =
         parse_include_archived(&raw_params).map_err(AppError::UnprocessableEntity)?;
     let bucket = crud_stats::parse_bucket(query.bucket.as_ref())?;
 
-    let total_visible = state.hero_crud.count(&[], false, false, true).await?;
-    let total_all = state.hero_crud.count(&[], true, false, true).await?;
-    let total = if include_archived {
-        total_all
-    } else {
-        total_visible
-    };
+    let params = BTreeMap::from([
+        (
+            "include_archived".to_string(),
+            serde_json::json!(include_archived),
+        ),
+        (
+            "bucket".to_string(),
+            serde_json::json!(bucket.map(|b| b.as_str())),
+        ),
+    ]);
+    cached_json(&state, "stats", "ResourceStats", params, || async {
+        let total_visible = state.hero_crud.count(&[], false, false, true).await?;
+        let total_all = state.hero_crud.count(&[], true, false, true).await?;
+        let total = if include_archived {
+            total_all
+        } else {
+            total_visible
+        };
 
-    let records = state
-        .hero_crud
-        .list(
-            0,
-            crud_stats::MAX_HISTORY_RECORDS,
-            include_archived,
-            false,
-            vec![],
-            vec![],
-        )
-        .await?;
+        let records = state
+            .hero_crud
+            .list(
+                0,
+                crud_stats::MAX_HISTORY_RECORDS,
+                include_archived,
+                false,
+                vec![],
+                vec![],
+            )
+            .await?;
 
-    let numeric = crud_stats::numeric_fields(HERO_FIELD_SPECS)
-        .into_iter()
-        .map(|field| {
-            let values: Vec<f64> = records
-                .iter()
-                .filter_map(|r| numeric_value(r, field))
-                .collect();
-            numeric_stat(field, &values)
+        let numeric = crud_stats::numeric_fields(HERO_FIELD_SPECS)
+            .into_iter()
+            .map(|field| {
+                let values: Vec<f64> = records
+                    .iter()
+                    .filter_map(|r| numeric_value(r, field))
+                    .collect();
+                numeric_stat(field, &values)
+            })
+            .collect();
+        // Hero has no boolean/enum field, so crud_stats::categorical_fields
+        // (HERO_FIELD_SPECS has no FieldSpec::boolean entries) is always
+        // empty here -- kept generic rather than hardcoded so a future
+        // resource with one gets a value distribution for free.
+        let categorical: Vec<CategoricalValueCount> = crud_stats::categorical_counts(
+            &records,
+            &crud_stats::categorical_fields(HERO_FIELD_SPECS),
+            boolean_value,
+        );
+
+        to_value(&ResourceStats {
+            total,
+            numeric,
+            categorical,
+            time_series: bucket.map(|bucket| time_series(&records, bucket)),
+            lifecycle: LifecycleStats {
+                archived: total_all - total_visible,
+            },
         })
-        .collect();
-    // Hero has no boolean/enum field, so crud_stats::categorical_fields
-    // (HERO_FIELD_SPECS has no FieldSpec::boolean entries) is always
-    // empty here -- kept generic rather than hardcoded so a future
-    // resource with one gets a value distribution for free.
-    let categorical: Vec<CategoricalValueCount> = crud_stats::categorical_counts(
-        &records,
-        &crud_stats::categorical_fields(HERO_FIELD_SPECS),
-        boolean_value,
-    );
-
-    Ok(Json(ResourceStats {
-        total,
-        numeric,
-        categorical,
-        time_series: bucket.map(|bucket| time_series(&records, bucket)),
-        lifecycle: LifecycleStats {
-            archived: total_all - total_visible,
-        },
-    }))
+    })
+    .await
 }
 
 #[derive(serde::Deserialize)]
@@ -430,80 +512,88 @@ async fn get_prediction(
     State(state): State<AppState>,
     AuthClaims(claims): AuthClaims,
     Query(query): Query<PredictQuery>,
-) -> Result<Json<Prediction>, AppError> {
+) -> Result<Response, AppError> {
     claims.require_any_role(&state.settings.oidc_client_id, HERO_READ_ROLES)?;
     let bucket =
         crud_stats::parse_bucket(query.bucket.as_ref())?.unwrap_or(crud_stats::TimeBucket::Day);
     let field = crud_stats::parse_predict_field(HERO_FIELD_SPECS, query.field.as_ref())?;
     let periods = crud_stats::parse_periods(query.periods.as_ref())?;
 
-    let records = state
-        .hero_crud
-        .list(
-            0,
-            crud_stats::MAX_HISTORY_RECORDS,
-            false,
-            false,
-            vec![],
-            vec![],
-        )
-        .await?;
+    let params = BTreeMap::from([
+        ("bucket".to_string(), serde_json::json!(bucket.as_str())),
+        ("field".to_string(), serde_json::json!(field)),
+        ("periods".to_string(), serde_json::json!(periods)),
+    ]);
+    cached_json(&state, "predict", "Prediction", params, || async {
+        let records = state
+            .hero_crud
+            .list(
+                0,
+                crud_stats::MAX_HISTORY_RECORDS,
+                false,
+                false,
+                vec![],
+                vec![],
+            )
+            .await?;
 
-    let series: Vec<crud_stats::BucketValue> = match field {
-        None => time_series(&records, bucket)
-            .into_iter()
-            .map(|point| crud_stats::BucketValue {
-                bucket_start: point.bucket_start,
-                value: point.count as f64,
-            })
-            .collect(),
-        Some(field_name) => {
-            let mut sums: std::collections::BTreeMap<chrono::NaiveDateTime, f64> =
-                std::collections::BTreeMap::new();
-            for record in &records {
-                if let Some(value) = numeric_value(record, field_name) {
-                    let start = crud_stats::bucket_start(bucket, record.created_at);
-                    *sums.entry(start).or_insert(0.0) += value;
-                }
-            }
-            sums.into_iter()
-                .map(|(bucket_start, value)| crud_stats::BucketValue {
-                    bucket_start,
-                    value,
+        let series: Vec<crud_stats::BucketValue> = match field {
+            None => time_series(&records, bucket)
+                .into_iter()
+                .map(|point| crud_stats::BucketValue {
+                    bucket_start: point.bucket_start,
+                    value: point.count as f64,
                 })
-                .collect()
-        }
-    };
+                .collect(),
+            Some(field_name) => {
+                let mut sums: std::collections::BTreeMap<chrono::NaiveDateTime, f64> =
+                    std::collections::BTreeMap::new();
+                for record in &records {
+                    if let Some(value) = numeric_value(record, field_name) {
+                        let start = crud_stats::bucket_start(bucket, record.created_at);
+                        *sums.entry(start).or_insert(0.0) += value;
+                    }
+                }
+                sums.into_iter()
+                    .map(|(bucket_start, value)| crud_stats::BucketValue {
+                        bucket_start,
+                        value,
+                    })
+                    .collect()
+            }
+        };
 
-    let predictions = crud_stats::forecast(&series, periods, bucket).map_err(|err| {
-        AppError::UnprocessableEntity(vec![craftainer_crud::views::FieldError::new(
-            "periods",
-            format!(
-                "need at least 2 time buckets of history to forecast a trend, got {}",
-                err.have
-            ),
-        )])
-    })?;
-    let last_known = series
-        .last()
-        .expect("forecast() already rejects fewer than 2 buckets");
+        let predictions = crud_stats::forecast(&series, periods, bucket).map_err(|err| {
+            AppError::UnprocessableEntity(vec![craftainer_crud::views::FieldError::new(
+                "periods",
+                format!(
+                    "need at least 2 time buckets of history to forecast a trend, got {}",
+                    err.have
+                ),
+            )])
+        })?;
+        let last_known = series
+            .last()
+            .expect("forecast() already rejects fewer than 2 buckets");
 
-    Ok(Json(Prediction {
-        field,
-        bucket: bucket.as_str(),
-        method: "linear_regression",
-        last_known: SeriesPoint {
-            bucket_start: last_known.bucket_start,
-            value: last_known.value,
-        },
-        predictions: predictions
-            .into_iter()
-            .map(|p| SeriesPoint {
-                bucket_start: p.bucket_start,
-                value: p.value,
-            })
-            .collect(),
-    }))
+        to_value(&Prediction {
+            field,
+            bucket: bucket.as_str(),
+            method: "linear_regression",
+            last_known: SeriesPoint {
+                bucket_start: last_known.bucket_start,
+                value: last_known.value,
+            },
+            predictions: predictions
+                .into_iter()
+                .map(|p| SeriesPoint {
+                    bucket_start: p.bucket_start,
+                    value: p.value,
+                })
+                .collect(),
+        })
+    })
+    .await
 }
 
 #[derive(serde::Deserialize)]
@@ -599,8 +689,12 @@ mod tests {
     }
 
     fn app_with_bus(events: Arc<craftainer_crud::events::EventBus>) -> Router {
+        router().with_state(app_state(events))
+    }
+
+    fn app_state(events: Arc<craftainer_crud::events::EventBus>) -> AppState {
         let settings = Arc::new(mock_settings());
-        let state = AppState {
+        AppState {
             oidc: Arc::new(OidcVerifier::new(settings.clone())),
             settings,
             health_registry: Arc::new(HealthRegistry::new()),
@@ -608,10 +702,10 @@ mod tests {
                 Box::new(HeroMemoryRepository::new()),
             ))),
             rate_limiter: Arc::new(crate::rate_limit::RateLimiter::mock()),
+            hero_stats: craftainer_crud::stats_cache::CachedStats::uncached("heroes"),
             shutdown: tokio_util::sync::CancellationToken::new(),
             events,
-        };
-        router().with_state(state)
+        }
     }
 
     fn token(sub: &str, roles: &[&str]) -> String {
@@ -887,6 +981,7 @@ mod tests {
                 Box::new(HeroMemoryRepository::new()),
             ))),
             rate_limiter: Arc::new(crate::rate_limit::RateLimiter::mock()),
+            hero_stats: craftainer_crud::stats_cache::CachedStats::uncached("heroes"),
             shutdown: tokio_util::sync::CancellationToken::new(),
             events: Arc::new(craftainer_crud::events::EventBus::mock()),
         };
@@ -1231,6 +1326,71 @@ mod tests {
         assert_eq!(power_level["average"], 3.0);
         assert!(body["categorical"].as_array().unwrap().is_empty());
         assert_eq!(body["lifecycle"]["archived"], 0);
+    }
+
+    fn cached_app() -> Router {
+        let mut state = app_state(Arc::new(craftainer_crud::events::EventBus::mock()));
+        state.hero_stats = craftainer_crud::stats_cache::CachedStats::new(
+            Arc::new(craftainer_crud::stats_cache::MemoryStatsCache::new()),
+            "heroes",
+        );
+        router().with_state(state)
+    }
+
+    async fn stats_cache_header(app: &Router, uri: &str) -> Option<String> {
+        let response = app
+            .clone()
+            .oneshot(authed(
+                "GET",
+                uri,
+                "alice",
+                &["viewer"],
+                serde_json::Value::Null,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        response
+            .headers()
+            .get("x-stats-cache")
+            .map(|v| v.to_str().unwrap().to_string())
+    }
+
+    #[tokio::test]
+    async fn stats_and_predict_report_miss_then_hit_when_a_cache_is_configured() {
+        let app = cached_app();
+        create_hero(
+            &app,
+            "alice",
+            serde_json::json!({"name": "A", "powers": ["x"]}),
+        )
+        .await;
+        assert_eq!(
+            stats_cache_header(&app, "/stats").await.as_deref(),
+            Some("miss")
+        );
+        assert_eq!(
+            stats_cache_header(&app, "/stats").await.as_deref(),
+            Some("hit")
+        );
+        assert_eq!(
+            stats_cache_header(&app, "/stats?bucket=day")
+                .await
+                .as_deref(),
+            Some("miss")
+        );
+        assert_eq!(
+            stats_cache_header(&app, "/stats?bucket=day")
+                .await
+                .as_deref(),
+            Some("hit")
+        );
+    }
+
+    #[tokio::test]
+    async fn stats_carry_no_cache_header_without_a_cache() {
+        let app = app();
+        assert_eq!(stats_cache_header(&app, "/stats").await, None);
     }
 
     #[tokio::test]
@@ -1863,6 +2023,7 @@ mod tests {
                 Box::new(HeroMemoryRepository::new()),
             ))),
             rate_limiter: Arc::new(crate::rate_limit::RateLimiter::mock()),
+            hero_stats: craftainer_crud::stats_cache::CachedStats::uncached("heroes"),
             shutdown: tokio_util::sync::CancellationToken::new(),
             events: Arc::new(craftainer_crud::events::EventBus::mock()),
         };

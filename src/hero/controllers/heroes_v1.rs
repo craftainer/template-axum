@@ -317,6 +317,7 @@ mod tests {
                 Box::new(HeroMemoryRepository::new()),
             ))),
             rate_limiter: Arc::new(crate::rate_limit::RateLimiter::mock()),
+            hero_stats: craftainer_crud::stats_cache::CachedStats::uncached("heroes"),
             shutdown: tokio_util::sync::CancellationToken::new(),
             events: Arc::new(craftainer_crud::events::EventBus::mock()),
         };
