@@ -228,8 +228,9 @@ pub fn dev_settings(oidc_audience: Option<String>) -> Arc<Settings> {
     })
 }
 
-/// Real Keycloak Resource Owner Password Credentials grant -- the `api`
-/// client is public with `directAccessGrantsEnabled` (`realm-export.json`),
+/// Real Keycloak Resource Owner Password Credentials grant -- the dev-only
+/// `test-cli` client is public with `directAccessGrantsEnabled` (the `api`
+/// client has no direct grants; `realm-export.json`),
 /// and every test user's password equals its username
 /// (`.devcontainer/stack/keycloak/README.md`).
 pub async fn keycloak_token(client: &reqwest::Client, username: &str) -> String {
@@ -237,7 +238,7 @@ pub async fn keycloak_token(client: &reqwest::Client, username: &str) -> String 
         .post(oidc_token_url())
         .form(&[
             ("grant_type", "password"),
-            ("client_id", "api"),
+            ("client_id", "test-cli"),
             ("username", username),
             ("password", username),
         ])

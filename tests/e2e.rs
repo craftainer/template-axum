@@ -102,20 +102,20 @@ async fn mock_token(client: &reqwest::Client, sub: &str, roles: &[&str]) -> Stri
     body["access_token"].as_str().unwrap().to_string()
 }
 
-/// Real Keycloak Resource Owner Password Credentials grant -- the `api`
-/// client is public with `directAccessGrantsEnabled` (`realm-export.json`),
+/// Real Keycloak Resource Owner Password Credentials grant -- the dev-only
+/// `test-cli` client is public with `directAccessGrantsEnabled` (the `api`
+/// client has no direct grants; `realm-export.json`),
 /// and every test user's password equals its username
 /// (`.devcontainer/stack/keycloak/README.md`).
 async fn keycloak_token(client: &reqwest::Client, username: &str) -> String {
     let token_url = std::env::var("OIDC_TOKEN_URL").unwrap_or_else(|_| {
         "http://keycloak:8080/realms/template-axum/protocol/openid-connect/token".to_string()
     });
-    let client_id = std::env::var("OIDC_CLIENT_ID").unwrap_or_else(|_| "api".to_string());
     let response = client
         .post(token_url)
         .form(&[
             ("grant_type", "password"),
-            ("client_id", client_id.as_str()),
+            ("client_id", "test-cli"),
             ("username", username),
             ("password", username),
         ])

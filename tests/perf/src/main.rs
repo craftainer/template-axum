@@ -54,7 +54,7 @@ fn env_or(key: &str, default: &str) -> String {
 }
 
 /// Real mode: fetch a Keycloak access token with the OIDC password grant
-/// (`directAccessGrantsEnabled` on the stack's public `api` client). Goes
+/// (`directAccessGrantsEnabled` on the stack's dev-only public `test-cli` client). Goes
 /// through `user.client` directly because the token endpoint is not on the
 /// goose `--host`.
 async fn fetch_real_token(user: &mut GooseUser) -> TransactionResult {
@@ -64,7 +64,7 @@ async fn fetch_real_token(user: &mut GooseUser) -> TransactionResult {
     );
     let form = [
         ("grant_type", "password".to_string()),
-        ("client_id", env_or("PERF_CLIENT_ID", "api")),
+        ("client_id", env_or("PERF_CLIENT_ID", "test-cli")),
         ("username", env_or("PERF_USERNAME", "maintainer")),
         ("password", env_or("PERF_PASSWORD", "maintainer")),
     ];

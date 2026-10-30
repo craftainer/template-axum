@@ -143,7 +143,7 @@ tests/perf/run-real-stack.sh template-axum:<version> --users 20 --run-time 60s
 
 Do not pass `--scenarios`; the script selects it. Settings read from the
 environment by the goose client: `PERF_TOKEN_URL`, `PERF_CLIENT_ID`,
-`PERF_USERNAME`, `PERF_PASSWORD` (defaults match the stack's realm). Not
+`PERF_USERNAME`, `PERF_PASSWORD` (defaults match the stack's realm; the client is `test-cli`). Not
 run in CI: `perf.yml` stays on mock mode, because the GitHub runner has no
 Keycloak/Postgres stack to point at.
 

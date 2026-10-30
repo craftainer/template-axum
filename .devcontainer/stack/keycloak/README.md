@@ -10,7 +10,36 @@ exist immediately — no manual admin-console setup required.
 - Host (from other containers): `keycloak`
 - Port (container-internal): `8080`
 - Realm: `template-axum`
-- Client ID: `api` (public client, no client secret)
+- Clients (all in `realm-export.json`):
+  - `api` - public, the resource server whose client roles the backend
+    checks (`resource_access.api.roles`). template-axum has no Swagger/OpenAPI
+    UI and no browser OAuth flow, so the tightest setting applies: standard
+    flow off (no redirect URIs or web origins at all), no direct grants, no
+    implicit, no service account; PKCE S256 is still required should a
+    flow ever be enabled.
+  - `bff` - confidential (`client-secret`), auth-code + PKCE for a
+    backend-for-frontend; redirect URIs `http://localhost:5173/bff/callback`
+    and `http://localhost:8081/bff/callback`, post-logout URIs the two
+    origins (`##`-separated in the attribute), back-channel logout to
+    `http://host.docker.internal:8787/bff/backchannel-logout`, refresh
+    tokens on, token exchange off. Its secret is **dev-only**:
+    `BFF_CLIENT_SECRET` in `keycloak.env`, substituted into the import as
+    `${BFF_CLIENT_SECRET}`.
+  - `test-cli` - **dev-only**, public, password grant only (no browser
+    flow). Tests and perf scripts (`tests/common/mod.rs`, `tests/e2e.rs`,
+    `tests/perf/`) mint tokens with it; never create an equivalent outside
+    local dev.
+  All three add `api` to access tokens' `aud` (audience mapper). Roles reach
+  tokens through the default `roles` scope (full scope allowed), so every
+  client yields the same `resource_access.api.roles` that `src/oidc/` reads.
+- Realm: refresh tokens rotate (`revokeRefreshToken`, `refreshTokenMaxReuse: 0`);
+  SSO session idle 1800 s, max 36000 s.
+- Hostname: `KC_HOSTNAME=http://localhost:8080` plus
+  `KC_HOSTNAME_BACKCHANNEL_DYNAMIC=true` (see `compose.yml`), so `iss` is
+  always `http://localhost:8080/realms/template-axum`, even for tokens
+  minted via `http://keycloak:8080`, while discovery and back-channel calls
+  still work on the internal name. `extra_hosts` maps `host.docker.internal`
+  for back-channel logout calls to a host-side BFF.
 - Admin console user / password: `admin` / `admin`
 - Test users / password (same as username): `viewer`, `editor`, `security`,
   `maintainer`, `detective` — all with the same `offline_access` /
@@ -18,7 +47,7 @@ exist immediately — no manual admin-console setup required.
   matching their username (`clientRoles` in `realm-export.json`) —
   what each role grants is up to the app's own routes (see phase 2's
   OIDC/RBAC integration).
-- Issuer URL (from other containers): `http://keycloak:8080/realms/template-axum`
+- Issuer (`iss` claim): `http://localhost:8080/realms/template-axum`; discovery/token/JWKS from other containers: `http://keycloak:8080/realms/template-axum`
 - Admin credentials and the `OIDC_*` URLs: defined in `keycloak.env`, next to this file
 
 Unlike the other stack services, Keycloak's port is listed in
