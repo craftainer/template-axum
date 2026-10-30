@@ -365,6 +365,18 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_invalidation_task_starts_only_when_the_cache_is_on_and_stops_on_shutdown() {
+        let state = build_state(Arc::new(mock_settings())).await;
+        assert!(spawn_stats_cache_invalidation(&state, false).is_none());
+        let task = spawn_stats_cache_invalidation(&state, true).expect("enabled starts the task");
+        state.shutdown.cancel();
+        tokio::time::timeout(std::time::Duration::from_secs(5), task)
+            .await
+            .expect("cancelling shutdown ends the task")
+            .unwrap();
+    }
+
+    #[tokio::test]
     async fn mock_mode_state_and_router_serve_every_mounted_prefix() {
         let state = build_state(Arc::new(mock_settings())).await;
         let app = build_router(state);
