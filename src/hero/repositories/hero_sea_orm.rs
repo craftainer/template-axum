@@ -112,10 +112,7 @@ fn archive_scope(
     }
 }
 
-fn apply_filters(
-    mut query: sea_orm::Select<Entity>,
-    filters: &[FilterClause],
-) -> sea_orm::Select<Entity> {
+fn apply_filters<Q: QueryFilter>(mut query: Q, filters: &[FilterClause]) -> Q {
     for clause in filters {
         query = query.filter(Condition::all().add(condition_for(clause)));
     }
@@ -200,29 +197,18 @@ impl Repository for HeroSeaOrmRepository {
         owner_id: &str,
         data: HeroUpdate,
     ) -> Result<Option<hero::Model>, RepoError> {
-        let existing = Entity::find_by_id(id)
+        // One `UPDATE ... WHERE id AND owner AND live RETURNING *` (docs/adrs/
+        // 0028): ownership and visibility are decided by the statement that
+        // writes, so a concurrent delete cannot slip between a read and a write.
+        let rows = Entity::update_many()
+            .set(update_values(data, Utc::now().naive_utc()))
+            .filter(Column::Id.eq(id))
             .filter(Column::OwnerId.eq(owner_id))
             .filter(Column::ArchivedAt.is_null())
-            .one(&self.db)
+            .exec_with_returning(&self.db)
             .await
             .map_err(backend_err)?;
-        let Some(existing) = existing else {
-            return Ok(None);
-        };
-
-        let mut active: ActiveModel = existing.into();
-        if let Some(name) = data.name {
-            active.name = Set(Some(name));
-        }
-        if let Some(powers) = data.powers {
-            active.powers = Set(Some(powers));
-        }
-        if data.power_level.is_some() {
-            active.power_level = Set(data.power_level);
-        }
-        active.updated_at = Set(Utc::now().naive_utc());
-
-        active.update(&self.db).await.map(Some).map_err(backend_err)
+        Ok(rows.into_iter().next())
     }
 
     async fn update_many(
@@ -230,52 +216,26 @@ impl Repository for HeroSeaOrmRepository {
         filters: &[FilterClause],
         data: HeroUpdate,
     ) -> Result<Vec<hero::Model>, RepoError> {
-        let mut query = Entity::find().filter(Column::ArchivedAt.is_null());
-        query = apply_filters(query, filters);
-        let existing = query.all(&self.db).await.map_err(backend_err)?;
-
-        // HeroUpdate isn't Clone (a plain request DTO); destructure once so
-        // each row's ActiveModel gets its own clone of the owned fields.
-        let HeroUpdate {
-            name,
-            powers,
-            power_level,
-        } = data;
-        let now = Utc::now().naive_utc();
-        let mut updated = Vec::with_capacity(existing.len());
-        for row in existing {
-            let mut active: ActiveModel = row.into();
-            if let Some(name) = name.clone() {
-                active.name = Set(Some(name));
-            }
-            if let Some(powers) = powers.clone() {
-                active.powers = Set(Some(powers));
-            }
-            if power_level.is_some() {
-                active.power_level = Set(power_level);
-            }
-            active.updated_at = Set(now);
-            updated.push(active.update(&self.db).await.map_err(backend_err)?);
-        }
-        Ok(updated)
+        let query = Entity::update_many()
+            .set(update_values(data, Utc::now().naive_utc()))
+            .filter(Column::ArchivedAt.is_null());
+        let rows = apply_filters(query, filters)
+            .exec_with_returning(&self.db)
+            .await
+            .map_err(backend_err)?;
+        Ok(by_id(rows))
     }
 
     async fn delete(&self, id: i32, owner_id: &str) -> Result<bool, RepoError> {
-        let existing = Entity::find_by_id(id)
+        let rows = Entity::update_many()
+            .set(archive_values(Utc::now().naive_utc()))
+            .filter(Column::Id.eq(id))
             .filter(Column::OwnerId.eq(owner_id))
             .filter(Column::ArchivedAt.is_null())
-            .one(&self.db)
+            .exec_with_returning(&self.db)
             .await
             .map_err(backend_err)?;
-        let Some(existing) = existing else {
-            return Ok(false);
-        };
-
-        let mut active: ActiveModel = existing.into();
-        active.archived_at = Set(Some(Utc::now().naive_utc()));
-        active.updated_at = Set(Utc::now().naive_utc());
-        active.update(&self.db).await.map_err(backend_err)?;
-        Ok(true)
+        Ok(!rows.is_empty())
     }
 
     async fn delete_many(
@@ -284,20 +244,50 @@ impl Repository for HeroSeaOrmRepository {
         // Hero has no publish window (docs/adrs/0020): every live row is in it.
         _include_unpublished: bool,
     ) -> Result<Vec<hero::Model>, RepoError> {
-        let mut query = Entity::find().filter(Column::ArchivedAt.is_null());
-        query = apply_filters(query, filters);
-        let existing = query.all(&self.db).await.map_err(backend_err)?;
-
-        let now = Utc::now().naive_utc();
-        let mut deleted = Vec::with_capacity(existing.len());
-        for row in existing {
-            let mut active: ActiveModel = row.into();
-            active.archived_at = Set(Some(now));
-            active.updated_at = Set(now);
-            deleted.push(active.update(&self.db).await.map_err(backend_err)?);
-        }
-        Ok(deleted)
+        let query = Entity::update_many()
+            .set(archive_values(Utc::now().naive_utc()))
+            .filter(Column::ArchivedAt.is_null());
+        let rows = apply_filters(query, filters)
+            .exec_with_returning(&self.db)
+            .await
+            .map_err(backend_err)?;
+        Ok(by_id(rows))
     }
+}
+
+/// The `SET` list of an update: only the fields the request carries, plus
+/// `updated_at` (the ETag input, `docs/adrs/0023`).
+fn update_values(data: HeroUpdate, now: chrono::NaiveDateTime) -> ActiveModel {
+    let mut active = ActiveModel {
+        updated_at: Set(now),
+        ..Default::default()
+    };
+    if let Some(name) = data.name {
+        active.name = Set(Some(name));
+    }
+    if let Some(powers) = data.powers {
+        active.powers = Set(Some(powers));
+    }
+    if data.power_level.is_some() {
+        active.power_level = Set(data.power_level);
+    }
+    active
+}
+
+/// The `SET` list of a soft delete (`docs/adrs/0008`).
+fn archive_values(now: chrono::NaiveDateTime) -> ActiveModel {
+    ActiveModel {
+        archived_at: Set(Some(now)),
+        updated_at: Set(now),
+        ..Default::default()
+    }
+}
+
+/// `RETURNING` order is unspecified; the per-row loops this replaces
+/// returned rows in primary-key order in practice, so keep that.
+fn by_id(mut rows: Vec<hero::Model>) -> Vec<hero::Model> {
+    rows.sort_by_key(|row| row.id);
+    rows
 }
 
 #[cfg(test)]

@@ -31,6 +31,10 @@ directory tree, so this instance's four tiers live in different places:
     case folding, `__in` membership, NULL ordering, the archived-row
     visibility rule, bulk update/delete round trips), where the
     colocated unit tests stop at the SQL text SeaORM renders.
+  - `postgres_hero_round_trips.rs` — how many statements Hero's writes send
+    (`docs/adrs/0028`): `update`/`delete`/`update_many`/`delete_many` are one
+    each, counted with sea-orm's metric callback, plus a concurrent
+    update/delete race.
   - `postgres_stats_predict.rs` — `/stats` and `/predict` over HTTP
     against live Postgres, including the multi-bucket `/predict` happy
     path that needs backdated `created_at` values.
