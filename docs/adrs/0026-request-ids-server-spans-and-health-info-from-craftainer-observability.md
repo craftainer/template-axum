@@ -47,98 +47,62 @@ We will wire, in `build_router` and `main.rs`, and add no setting of our own:
   all signals.
 - **Sampling.** No knob in the app. The OpenTelemetry SDK reads
   `OTEL_TRACES_SAMPLER` and `OTEL_TRACES_SAMPLER_ARG` itself; unset means
-  `parentbased_always_on`. As in template-fastapi, probes stay out of
-  traces and the behaviour with `OTEL_EXPORTER_OTLP_ENDPOINT` unset is
-  unchanged.
+  `parentbased_always_on`. The documented default for operators is
+  `OTEL_TRACES_SAMPLER=parentbased_traceidratio`,
+  `OTEL_TRACES_SAMPLER_ARG=0.1`, with log export on (user decision
+  2026-10-30; see "Overhead budget"). As in template-fastapi, probes stay
+  out of traces and the behaviour with `OTEL_EXPORTER_OTLP_ENDPOINT` unset
+  is unchanged.
 
 ### Overhead budget
 
-Measured on `a342b04` (image `template-axum:l2-a342b04`, id
-`sha256:fdf446b9bc12`, fat LTO, `Dockerfile` `runner` target), 2026-10-28,
-with the L2 harness (`NFR-0030`): 20 users, 60 s (plus 20 s warm-up), the
-default 1 vCPU / 2 GB caps, real stack (`tests/perf/run-real-stack.sh`),
-0 errors in every run. Telemetry went to an OpenTelemetry Collector
-`otel/opentelemetry-collector:0.162.0` (core distribution; digest
-`sha256:310a800ad69ee430e7c541796852a242c9c7db97aaad4daa5ccf843c525fbdb2`)
-running uncapped on the same Docker network, with an `otlp` receiver, the
-`batch` processor and the `nop` exporter for traces, metrics and logs; this
-mirrors template-fastapi's table (`nop` exporter against a perf-only
-collector), which used 25 users and 300 s, so absolute numbers are not
-comparable across the two services. The Collector was started for the runs
-only and is not part of the devcontainer stack. All export arms set
-`OTEL_EXPORTER_OTLP_ENDPOINT=http://l2-otel-collector:4318` and
-`OTEL_SERVICE_NAME`.
+Measured on `main` at `a7e0500` (image `template-axum:l2-a7e0500`, id
+`sha256:b59276c43890…`, which includes #23: sqlx statement logging off),
+2026-10-29/30, with the L2 harness (`NFR-0030`):
+`tests/perf/run-real-stack.sh <image> --users 20 --run-time 60s`, default
+1 vCPU / 2 GB caps, real stack. Telemetry went to a throwaway
+`otel/opentelemetry-collector:0.162.0` with an OTLP receiver and `nop`
+exporters (as in template-fastapi's table), started for the runs only and
+not part of the devcontainer stack. Five runs per arm in randomised order
+(seed 20261029), plus drift checks of the unset arm at the start and end.
+Acceptance rule: the median difference must exceed the larger of the two
+arms' spreads and be at least 3%.
 
-Five arms, five runs each, in a randomised order (fixed seed) with an extra
-run of the unset arm at the very start and very end. Medians, with the range
-over the runs in brackets; overhead is against the unset median:
+| Arm | Setting | median req/s | spread | vs U | CPU ms/request | p95 / p99 (ms) |
+| --- | --- | --- | --- | --- | --- | --- |
+| U | no `OTEL_*` | 2412.0 | 50.5 | - | 0.413 | 20 / 23 |
+| F | `parentbased_always_on` (100%) | 2114.7 | 201.1 | -12.3% | 0.473 | 23 / 27 |
+| T | `parentbased_traceidratio`, arg 0.1 | 2167.1 | 59.7 | -10.2% | 0.461 | 22 / 26 |
+| TL | T plus `OTEL_LOGS_EXPORTER=none` | 2220.0 | 51.9 | -8.0% | 0.450 | 22 / 25 |
 
-| Arm | Setting | req/s | CPU ms/request | p50 / p95 / p98 / p99 (ms) |
-| --- | --- | --- | --- | --- |
-| U | telemetry unset (7 runs) | 2300.6 (2279-2339) | 0.430 (0.425-0.434) | 7 / 21 / 23 / 24 |
-| F | traces 100% | 1975.5 (1897-2000), -14.1% | 0.506 (0.499-0.526), +17.7% | 8 / 24 / 27 / 29 |
-| T | traces 10% | 2042.1 (1974-2059), -11.2% | 0.489 (0.485-0.502), +13.7% | 8 / 24 / 26 / 27 |
-| TL | traces 10%, `OTEL_LOGS_EXPORTER=none` | 2104.6 (1963-2121), -8.5% | 0.473 (0.469-0.505), +10.0% | 8 / 23 / 25 / 26 |
-| Z | export on, `OTEL_TRACES_SAMPLER=always_off` | 2057.1 (1991-2063), -10.6% | 0.485 (0.483-0.499), +12.8% | 8 / 23 / 26 / 27 |
+F, T and TL against U are real by the rule. F against T (+2.5%) and TL
+against T (+2.4%) are within noise. The drift between the first and last
+unset checks (U02 to U9) was +1.9%, within the spread; the very first run
+(U0) was affected by host swap and is excluded.
 
-Traces at 100% and 10% use `OTEL_TRACES_SAMPLER=parentbased_traceidratio`
-with `OTEL_TRACES_SAMPLER_ARG` 1.0 and 0.1. The first and last unset runs
-were 2338.8 and 2300.6 req/s (-1.6%), inside the unset spread (2279-2339),
-so the table is not drift-limited. Host swap was in use throughout (about
-3 GB), but swap-in during runs was small (350 to 5000 pages) and not
-correlated with the arm. Latency percentiles move by 1 to 5 ms, close to
-the harness's 1 ms resolution; only throughput and CPU per request are
-read as the result. The Collector's counters per run (the app flushes
-metrics once per run, which is why 8 metric points are seen for every
-exporting arm):
+Volume: about 2.1 to 2.4 spans per request at 100%, about a tenth of that
+at 0.1. Log records: 7 startup lines per run, none per request (since #23
+there are no per-request log events and sqlx statement logging is off).
 
-| Arm | Spans per run (median) | Log records per run (median) | Log records per request |
-| --- | --- | --- | --- |
-| F | 281,824 | 191,350 | about 1.6 |
-| T | 28,994 | 199,003 | about 1.6 |
-| TL | 29,514 | 0 | 0 |
-| Z | 0 | 200,519 | about 1.6 |
+Conclusion: the cost is the tracing/OpenTelemetry layer itself, not the
+exported volume. Sampling at 10% and log export on or off do not change it
+beyond noise.
 
-(Counts include the 20 s warm-up and the seeding, which the request count
-excludes, so the per-request figure is an upper bound of roughly 1.2 to
-1.6.)
+Superseded: the earlier table measured on `a342b04` (#22) showed -8.5% to
+-14.1% throughput and about 1.6 log records per request. Those numbers were
+dominated by sqlx statement events at INFO, which #23 removed; do not use
+them.
 
-What the numbers say:
+Decision (2026-10-30, user): the documented default sampling is
+`OTEL_TRACES_SAMPLER=parentbased_traceidratio`,
+`OTEL_TRACES_SAMPLER_ARG=0.1`, with log export on; the same as
+template-fastapi ADR 0021. Rejected: 10% with logs off (the gain is within
+noise and it differs from fastapi), and 100% (ten times the spans and the
+noisiest arm).
 
-- Turning export on costs 9 to 14% of throughput and 10 to 18% more CPU per
-  request, outside the unset spread in every arm.
-- Sampling matters less than expected. 100% against 10% adds about 3
-  points of throughput loss and 4 points of CPU per request, which is
-  inside the run-to-run ranges of the two arms (they overlap). The
-  `always_off` arm (Z), with no spans at all, is as costly as 10% sampling
-  (+12.8% against +13.7%), so a large part of the cost is not span
-  creation or sampling.
-- Log export is the other large component. Switching it off at 10% sampling
-  (TL against T) recovers about 3.7 points of CPU per request and 3 points
-  of throughput; the ranges overlap, so this is indicative only.
-- Not measured: an arm with no log export and no spans, so the fixed cost
-  of the metrics, request-ID and server-span layers alone is unknown, and
-  the capacity (maximum users) sweep fastapi reports.
-- Log volume is about 1.6 records per request (at most 200,000 per run),
-  about 75 times the record rate of template-fastapi's table, which
-  reports about 9.8k per 300 s run. The records are all `sqlx::query`
-  statement events at INFO (sea-orm's default `sqlx_logging`, one per
-  query, one to two per request, none for `/health/*`), written to stdout as
-  JSON in every arm and, with an endpoint, also exported over OTLP. The
-  `TraceLayer` request and response events are at DEBUG and are not
-  emitted at the default `info` filter.
-
-Lean on the default, for the maintainers to decide: recommend
-`OTEL_TRACES_SAMPLER=parentbased_traceidratio` with
-`OTEL_TRACES_SAMPLER_ARG=0.1` as the template's documented starting point.
-The reason is the lower trace volume and the (statistically weak) gain over
-100%, not a measured capacity difference. The measured gap to telemetry
-unset is mostly the log export of statement events and the always-on layers.
-Follow-up for the maintainers to consider, not done here: stop exporting
-(or emitting) `sqlx::query` events at INFO, for example through
-`ConnectOptions::sqlx_logging(false)` or a higher level, then re-measure
-the table with the TL and Z arms; a code change, so it needs its own work
-item. The recommended default is not yet decided.
+Decision (2026-10-30, user): accept the 8 to 12% throughput cost of
+telemetry on as the overhead budget; no span-layer investigation.
+Telemetry stays opt-in (off by default).
 
 ## Consequences
 
@@ -149,6 +113,6 @@ observable; deployments can show which build is running.
 Harder: every response gains a header; `/health/info` discloses the version
 and commit (the crate keeps it opt-in for that reason, and the template
 opts in), so a deployment that dislikes this must drop the merge in
-`build_router`; telemetry costs CPU once an endpoint is configured, which
-the overhead table above bounds (about 10 to 18% more CPU per request
-at the reference budget with export on).
+`build_router`; telemetry costs throughput once an endpoint is configured, which
+the overhead table above bounds (8 to 12% less throughput at the reference
+budget with export on); that is the accepted overhead budget.
