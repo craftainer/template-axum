@@ -1328,6 +1328,19 @@ mod tests {
         assert_eq!(body["lifecycle"]["archived"], 0);
     }
 
+    #[test]
+    fn cached_read_errors_map_back_to_app_errors() {
+        let app: AppError = CachedReadError::from(AppError::NotFound("x".into())).into();
+        assert!(matches!(app, AppError::NotFound(_)));
+        let repo: AppError = CachedReadError::from(
+            craftainer_crud::repositories::RepoError::Backend("boom".into()),
+        )
+        .into();
+        assert!(matches!(repo, AppError::Internal(_)));
+        let cache: AppError = CachedReadError::from(CacheError::new("down")).into();
+        assert!(matches!(cache, AppError::Internal(m) if m.contains("down")));
+    }
+
     fn cached_app() -> Router {
         let mut state = app_state(Arc::new(craftainer_crud::events::EventBus::mock()));
         state.hero_stats = craftainer_crud::stats_cache::CachedStats::new(

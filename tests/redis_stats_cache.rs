@@ -19,7 +19,8 @@ use craftainer_crud::events::{CrudEvent, EventAction, EventBus};
 use craftainer_crud::stats_cache::{CachedStats, StatsCache};
 use craftainer_observability::health::HealthRegistry;
 use serde_json::{json, Value};
-use template_axum::cache::{run_invalidation, RedisStatsCache};
+use template_axum::cache::{build_stats_cache, run_invalidation, RedisStatsCache};
+use template_axum::config::Mode;
 use template_axum::hero::controllers::{heroes, AppState, DynHeroRepository, HERO_EVENT_RESOURCE};
 use template_axum::hero::repositories::hero_memory::HeroMemoryRepository;
 use template_axum::oidc::OidcVerifier;
@@ -425,4 +426,42 @@ async fn a_redis_outage_degrades_to_a_miss_and_never_fails_a_request() {
         assert_eq!(body["total"], 1);
     }
     cleanup(&prefix).await;
+}
+
+#[tokio::test]
+async fn build_stats_cache_connects_to_redis_outside_mock_mode() {
+    let cache = build_stats_cache(Mode::Dev, &redis_url(), Some(TTL))
+        .await
+        .expect("Redis must be running")
+        .expect("a TTL turns the cache on");
+    let resource = format!("it-build-{}", common::unique_suffix());
+    cache.set(&resource, "k", json!(7)).await.unwrap();
+    assert_eq!(cache.get(&resource, "k").await.unwrap(), Some(json!(7)));
+    cache.invalidate(&resource).await.unwrap();
+    assert_eq!(cache.get(&resource, "k").await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn the_invalidation_task_retries_while_the_broker_is_unreachable() {
+    let stats = CachedStats::uncached(HERO_EVENT_RESOURCE);
+    // Nothing listens on port 1: every subscribe fails.
+    let events = Arc::new(EventBus::connect("127.0.0.1", 1));
+    let shutdown = CancellationToken::new();
+    let task = tokio::spawn(run_invalidation(
+        stats,
+        events,
+        HERO_EVENT_RESOURCE,
+        Duration::from_millis(50),
+        shutdown.clone(),
+    ));
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert!(
+        !task.is_finished(),
+        "a failing subscribe is retried, not fatal"
+    );
+    shutdown.cancel();
+    tokio::time::timeout(Duration::from_secs(5), task)
+        .await
+        .expect("cancelling ends the task")
+        .unwrap();
 }

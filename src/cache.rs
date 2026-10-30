@@ -42,8 +42,11 @@ pub const INVALIDATION_RETRY: Duration = Duration::from_secs(5);
 
 /// `APP_VERSION` if set and non-empty, else `"unknown"`.
 pub fn app_version() -> String {
-    std::env::var("APP_VERSION")
-        .ok()
+    version_or_unknown(std::env::var("APP_VERSION").ok())
+}
+
+fn version_or_unknown(version: Option<String>) -> String {
+    version
         .filter(|version| !version.is_empty())
         .unwrap_or_else(|| "unknown".to_string())
 }
@@ -253,6 +256,31 @@ async fn invalidate_logged(stats: &CachedStats) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_unset_or_empty_app_version_is_unknown() {
+        assert_eq!(version_or_unknown(None), "unknown");
+        assert_eq!(version_or_unknown(Some(String::new())), "unknown");
+        assert_eq!(version_or_unknown(Some("1.2.3".into())), "1.2.3");
+    }
+
+    #[tokio::test]
+    async fn the_cache_is_off_without_a_ttl_and_in_memory_under_mock() {
+        let off = build_stats_cache(Mode::Mock, "redis://unused", None).await;
+        assert!(off.unwrap().is_none());
+        let cache = build_stats_cache(Mode::Mock, "redis://unused", Some(Duration::from_secs(5)))
+            .await
+            .unwrap()
+            .expect("a TTL turns the cache on");
+        cache
+            .set("heroes", "k", serde_json::json!(1))
+            .await
+            .unwrap();
+        assert_eq!(
+            cache.get("heroes", "k").await.unwrap(),
+            Some(serde_json::json!(1))
+        );
+    }
 
     #[test]
     fn glob_escape_escapes_redis_pattern_metacharacters() {
