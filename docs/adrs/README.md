@@ -18,7 +18,6 @@ those belong in each directory's own `README.md` instead).
 - Record a decision that reverses an earlier one as a new ADR that says
   so in its Context, and update the old ADR's Status to
   `Superseded by NNNN` — never edit an accepted ADR's Decision itself.
-- An ADR becomes Accepted when its implementation merges.
 
 ## Don't
 
