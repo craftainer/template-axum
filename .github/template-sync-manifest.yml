@@ -124,6 +124,8 @@ ignore:
   # scripts. Instance-owned from the moment it's instantiated.
   - Cargo.toml
   - Cargo.lock
+  # The instance's own time-boxed osv-scanner advisory ignores.
+  - osv-scanner.toml
   - src/
   - tests/
   - .cargo/

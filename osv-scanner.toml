@@ -1,0 +1,7 @@
+# osv-scanner config, picked up automatically from the repo root. Each entry
+# is time-boxed: it expires on ignoreUntil and the advisory fails the scan again.
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0214"
+ignoreUntil = 2026-12-31T00:00:00Z
+reason = "Unmaintained notice, no fix available; only via goose 0.18.1 in tests/perf (dev-only load-test client, not in the app image). Re-check on expiry."

@@ -73,8 +73,8 @@ redis = { version = "=1.7.0", features = ["tokio-comp", "connection-manager", "s
 # lands the real S3 wiring for the ADR this belongs in.
 # "sigv4a" (multi-region access point signing) deliberately off: unused, and
 # it pulls p256 0.11 / crypto-bigint 0.4.9 (RUSTSEC-2026-0387).
-aws-sdk-s3 = { version = "=1.112.0", default-features = false, features = ["default-https-client", "rt-tokio", "behavior-version-latest"] }
-aws-config = "=1.8.11"
+aws-sdk-s3 = { version = "=1.154.0", default-features = false, features = ["default-https-client", "rt-tokio", "behavior-version-latest"] }
+aws-config = "=1.13.0"
 
 # No OIDC/OAuth2 client crates (openidconnect/oauth2) yet: they were pinned
 # but never used, and openidconnect's non-optional p256/p384 0.13 chain
