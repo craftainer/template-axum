@@ -38,7 +38,10 @@ d'audience" and fiche n°16 on analytics), and how this template meets it:
   template; a deployment schedules it.
 - **Opt-out and signals respected.** `Sec-GPC: 1` and `DNT: 1` stop tracking for the request
   (`ANALYTICS_RESPECT_GPC`, default true), and `ANALYTICS_CONSENT=opt-in` requires an
-  explicit consent signal (`Analytics-Consent: 1`) instead of assuming it.
+  explicit consent signal (`Analytics-Consent: 1`) instead of assuming it. The library
+  defaults are `ANALYTICS_CONSENT=implied` and `ANALYTICS_RESPECT_GPC=true`; the template
+  sets both explicitly in `.devcontainer/stack/umami/analytics.env`, so a library default
+  change cannot silently change the privacy posture.
 - **No third-party sharing.** Umami is self-hosted in the deployment; the data is not
   passed to a third party for its own purposes.
 

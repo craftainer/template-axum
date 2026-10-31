@@ -14,6 +14,10 @@ The system shall record a `hero.created` event when a hero is created and a
 `ANALYTICS_CONSENT=opt-in`, shall not record one for a request without
 `Analytics-Consent: 1`. Analytics shall never slow down, block or fail a request.
 
+Scope: only the v2 JSON create and single-id delete handlers emit events. Bulk delete
+and the v1, XML and web handlers are not counted (a deliberate sample scope, not an
+omission).
+
 ## Source
 
 Product and privacy: the plan in
