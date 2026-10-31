@@ -53,6 +53,8 @@ replace:
   - .devcontainer/stack/
   # Listed one by one, not as a glob: .github/workflows/README.md is merge.
   - .github/workflows/checks.yml
+  # The two -apply workflows were folded into their fix/build workflows
+  # (an `apply` job); the lines stay as tombstones so a sync removes them.
   - .github/workflows/moderate-bug-fix-apply.yml
   - .github/workflows/moderate-bug-fix.yml
   - .github/workflows/moderate-bug-triage.yml
@@ -114,6 +116,7 @@ replace:
   - scripts/post-create.d/10-cargo-build.sh
   - scripts/runner-setup.d/10-ca-certificates.sh
   - scripts/image-scan.sh
+  - scripts/image-dast.sh
   - scripts/skopeo.sh
   - scripts/test-image-scripts.sh
 
@@ -122,6 +125,8 @@ ignore:
   # scripts. Instance-owned from the moment it's instantiated.
   - Cargo.toml
   - Cargo.lock
+  # The instance's own time-boxed osv-scanner advisory ignores.
+  - osv-scanner.toml
   - src/
   - tests/
   - .cargo/
@@ -138,6 +143,10 @@ ignore:
   # The skeletons shipped here are examples to replace, never synced.
   - Dockerfile
   - image.mk
+
+  # The instance's ZAP baseline rule levels (seeded with a commented header;
+  # an instance adds its own FAIL/IGNORE lines, with a reason each).
+  - .zap/rules.tsv
 
   # Product/domain knowledge and working plans: instance-owned from the
   # moment it's instantiated.
@@ -182,6 +191,10 @@ merge:
   - .github/CONTENTS.md
   - .github/renovate.json
   - .pre-commit-config.yaml
+  # Base's gitleaks config: the useDefault extension is base's, the
+  # [[allowlists]] entries are each instance's own (no include mechanism
+  # to split them), so a three-way merge, like .pre-commit-config.yaml.
+  - .gitleaks.toml
   - .mcp.json
   - .gitignore
   - scripts/README.md
