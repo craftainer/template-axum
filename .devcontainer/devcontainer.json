@@ -13,7 +13,7 @@
       "dockerDashComposeVersion": "v2"
     }
   },
-  "forwardPorts": [8000, "keycloak:8080"],
+  "forwardPorts": [8000, "keycloak:8080", "umami:3000"],
   "portsAttributes": {
     "8000": {
       "label": "axum (myapp)",
@@ -21,6 +21,10 @@
     },
     "keycloak:8080": {
       "label": "Keycloak",
+      "onAutoForward": "notify"
+    },
+    "umami:3000": {
+      "label": "Umami",
       "onAutoForward": "notify"
     }
   },

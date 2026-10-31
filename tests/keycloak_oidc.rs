@@ -15,13 +15,13 @@ use template_axum::oidc::OidcVerifier;
 use template_axum::problem_details::AppError;
 
 mod common;
-use common::{dev_settings, keycloak_token, oidc_issuer_url};
+use common::{dev_settings, dev_verifier, keycloak_token, oidc_issuer_url};
 
 #[tokio::test]
 async fn decodes_and_caches_a_real_keycloak_token() {
     let http = reqwest::Client::new();
     let token = keycloak_token(&http, "viewer").await;
-    let verifier = OidcVerifier::new(dev_settings(None));
+    let verifier = dev_verifier(dev_settings(None));
 
     // First call fetches discovery + JWKS; second reuses the cache
     // (jwks()'s `fetched_at.elapsed() < JWKS_CACHE_TTL` branch).
@@ -41,12 +41,12 @@ async fn decodes_and_caches_a_real_keycloak_token() {
 
 #[tokio::test]
 async fn rejects_a_malformed_token() {
-    let verifier = OidcVerifier::new(dev_settings(None));
+    let verifier = dev_verifier(dev_settings(None));
     let err = verifier
         .decode_bearer_token("not-a-jwt")
         .await
         .expect_err("a malformed token must be rejected");
-    assert!(matches!(err, AppError::Unauthorized(_)));
+    assert!(matches!(err, AppError::InvalidToken(_)));
 }
 
 #[tokio::test]
@@ -58,24 +58,58 @@ async fn rejects_a_token_with_an_unrecognized_kid() {
     let payload = base64_url(br#"{"sub":"nobody"}"#);
     let token = format!("{header}.{payload}.sig");
 
-    let verifier = OidcVerifier::new(dev_settings(None));
+    let verifier = dev_verifier(dev_settings(None));
     let err = verifier
         .decode_bearer_token(&token)
         .await
         .expect_err("an unrecognized kid must be rejected");
-    assert!(matches!(err, AppError::Unauthorized(_)));
+    assert!(matches!(err, AppError::InvalidToken(_)));
 }
 
 #[tokio::test]
 async fn rejects_a_real_token_against_the_wrong_audience() {
     let http = reqwest::Client::new();
     let token = keycloak_token(&http, "viewer").await;
-    let verifier = OidcVerifier::new(dev_settings(Some("not-the-real-audience".to_string())));
+    let verifier = dev_verifier(dev_settings(Some("not-the-real-audience".to_string())));
     let err = verifier
         .decode_bearer_token(&token)
         .await
         .expect_err("a token for a different audience must be rejected");
-    assert!(matches!(err, AppError::Unauthorized(_)));
+    assert!(matches!(err, AppError::InvalidToken(_)));
+}
+
+#[tokio::test]
+async fn rejects_a_real_token_whose_issuer_is_not_the_expected_one() {
+    let http = reqwest::Client::new();
+    let token = keycloak_token(&http, "viewer").await;
+    let settings = dev_settings(None);
+    let mut resource = template_axum::config::ResourceServer::from_env(&settings).unwrap();
+    // Only the expected `iss` differs: discovery and JWKS still resolve.
+    resource.issuer = format!("{}-other", resource.issuer);
+    let verifier = OidcVerifier::with_resource_server(settings, Arc::new(resource));
+    let err = verifier
+        .decode_bearer_token(&token)
+        .await
+        .expect_err("a token from another issuer must be rejected");
+    assert!(matches!(err, AppError::InvalidToken(_)));
+}
+
+#[tokio::test]
+async fn a_real_token_carries_the_public_issuer_the_api_audience_and_the_roles() {
+    let http = reqwest::Client::new();
+    let token = keycloak_token(&http, "viewer").await;
+    let verifier = dev_verifier(dev_settings(None));
+    let claims = verifier
+        .decode_bearer_token(&token)
+        .await
+        .expect("a real Keycloak token must verify against OIDC_ISSUER and aud=api");
+    assert_eq!(claims.0["iss"], verifier.resource_server().issuer.as_str());
+    let aud = &claims.0["aud"];
+    assert!(
+        aud == "api" || aud.as_array().is_some_and(|a| a.iter().any(|v| v == "api")),
+        "aud must contain api, got {aud}"
+    );
+    assert!(claims.require_any_role("api", &["viewer"]).is_ok());
 }
 
 fn base64_url(bytes: &[u8]) -> String {
@@ -85,9 +119,11 @@ fn base64_url(bytes: &[u8]) -> String {
 
 #[tokio::test]
 async fn reports_service_unavailable_when_discovery_is_unreachable() {
-    let mut settings = (*dev_settings(None)).clone();
-    settings.oidc_issuer_url = "http://127.0.0.1:1/realms/nowhere".to_string();
-    let verifier = OidcVerifier::new(Arc::new(settings));
+    let settings = dev_settings(None);
+    let mut resource = template_axum::config::ResourceServer::from_env(&settings).unwrap();
+    resource.discovery_url =
+        "http://127.0.0.1:1/realms/nowhere/.well-known/openid-configuration".to_string();
+    let verifier = OidcVerifier::with_resource_server(settings, Arc::new(resource));
 
     // Well-formed enough to pass `decode_header` (so the failure comes
     // from the discovery fetch, not an earlier parse error).
@@ -113,7 +149,7 @@ async fn the_auth_claims_extractor_rejects_a_bad_bearer_token_over_http() {
 
     let settings = dev_settings(None);
     let state = template_axum::hero::controllers::AppState {
-        oidc: Arc::new(OidcVerifier::new(settings.clone())),
+        oidc: Arc::new(dev_verifier(settings.clone())),
         settings,
         health_registry: Arc::new(craftainer_observability::health::HealthRegistry::new()),
         hero_crud: Arc::new(craftainer_crud::crud::CrudService::new(

@@ -13,6 +13,7 @@ include:
   - ./stack/redis/compose.yml
   - ./stack/mqtt/compose.yml
   - ./stack/selenium/compose.yml
+  - ./stack/umami/compose.yml
 
 services:
   myapp:

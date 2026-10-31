@@ -190,6 +190,20 @@ pub fn oidc_token_url() -> String {
         .unwrap_or_else(|_| format!("{}/protocol/openid-connect/token", oidc_issuer_url()))
 }
 
+/// A verifier for the devcontainer's real Keycloak: the issuer tokens
+/// carry (`OIDC_ISSUER`, the public URL) and the in-network discovery URL
+/// (`OIDC_DISCOVERY_URL`) come from the environment exactly as the app
+/// reads them, with `settings.oidc_audience` (when set) taking the place
+/// of `OIDC_AUDIENCE`.
+pub fn dev_verifier(settings: Arc<Settings>) -> OidcVerifier {
+    let mut resource = template_axum::config::ResourceServer::from_env(&settings)
+        .expect("the devcontainer's OIDC_* environment must be valid");
+    if let Some(audience) = &settings.oidc_audience {
+        resource.audience = audience.clone();
+    }
+    OidcVerifier::with_resource_server(settings, Arc::new(resource))
+}
+
 /// Settings for the integration tier's `Mode::Dev` path: real Postgres/
 /// Redis/S3/MQTT/Keycloak coordinates, so a test can exercise a real
 /// backend's happy path instead of `Mode::Mock`'s fakes.
@@ -228,8 +242,9 @@ pub fn dev_settings(oidc_audience: Option<String>) -> Arc<Settings> {
     })
 }
 
-/// Real Keycloak Resource Owner Password Credentials grant -- the `api`
-/// client is public with `directAccessGrantsEnabled` (`realm-export.json`),
+/// Real Keycloak Resource Owner Password Credentials grant -- the dev-only
+/// `test-cli` client is public with `directAccessGrantsEnabled` (the `api`
+/// client has no direct grants; `realm-export.json`),
 /// and every test user's password equals its username
 /// (`.devcontainer/stack/keycloak/README.md`).
 pub async fn keycloak_token(client: &reqwest::Client, username: &str) -> String {
@@ -237,7 +252,7 @@ pub async fn keycloak_token(client: &reqwest::Client, username: &str) -> String 
         .post(oidc_token_url())
         .form(&[
             ("grant_type", "password"),
-            ("client_id", "api"),
+            ("client_id", "test-cli"),
             ("username", username),
             ("password", username),
         ])

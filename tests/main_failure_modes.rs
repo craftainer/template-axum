@@ -74,6 +74,14 @@ fn hardened_production_env() -> Vec<(&'static str, String)> {
         ("S3_ENDPOINT_URL", "https://s3.example.com"),
         ("REDIS_URL", "rediss://redis.example.com:6379/0"),
         ("OIDC_ISSUER_URL", "https://issuer.example.com/realms/api"),
+        // The devcontainer exports plaintext OIDC_ISSUER/OIDC_DISCOVERY_URL
+        // (keycloak.env), which would otherwise win over the line above.
+        ("OIDC_ISSUER", "https://issuer.example.com/realms/api"),
+        (
+            "OIDC_DISCOVERY_URL",
+            "https://issuer.example.com/realms/api/.well-known/openid-configuration",
+        ),
+        ("PUBLIC_BASE_URL", "https://api.example.com"),
         ("POSTGRES_SSLMODE", "verify-full"),
     ]
     .into_iter()
