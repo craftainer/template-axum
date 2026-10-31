@@ -10,6 +10,8 @@
 //! scenario reads the environment again) and inspects what the stand-in
 //! received.
 
+mod common;
+
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
@@ -341,7 +343,40 @@ async fn hero_events_honour_gpc_dnt_consent_and_the_prop_allowlist() {
 
     // Disabled: nothing is sent.
     set_env(&url, &[("ANALYTICS_ENABLED", "false")]);
-    call(&app, &editor, "POST", CREATE, hero, &[]).await;
+    call(&app, &editor, "POST", CREATE, hero.clone(), &[]).await;
     flush().await;
     assert!(payloads(&received).is_empty());
+
+    // The shared test pin (`common::disable_analytics`): with the
+    // environment still selecting the stand-in, a create and a delete
+    // through the router reach nothing.
+    set_env(&url, &[("ANALYTICS_ENABLED", "true")]);
+    common::disable_analytics();
+    assert_eq!(
+        call(&app, &editor, "POST", CREATE, hero.clone(), &[]).await,
+        StatusCode::CREATED
+    );
+    assert_eq!(
+        call(
+            &app,
+            &maintainer,
+            "DELETE",
+            &format!("{CREATE}?id=2"),
+            Value::Null,
+            &[]
+        )
+        .await,
+        StatusCode::NO_CONTENT
+    );
+    flush().await;
+    assert!(
+        payloads(&received).is_empty(),
+        "the pinned client must not post to the stand-in"
+    );
+
+    // Control: once the pin is flushed away, the same call reaches it again.
+    set_env(&url, &[("ANALYTICS_ENABLED", "true")]);
+    call(&app, &editor, "POST", CREATE, hero, &[]).await;
+    flush().await;
+    assert_eq!(payloads(&received).len(), 1);
 }

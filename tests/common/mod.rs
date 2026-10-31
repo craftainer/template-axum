@@ -163,8 +163,31 @@ pub fn integration_settings() -> Settings {
     }
 }
 
+/// Pins the process-wide analytics client to backend `none`, so hero
+/// creates and deletes a test drives through the router never post to the
+/// devcontainer's Umami (`analytics.env` selects `umami` for every process
+/// there, `docs/adrs/0029`). Installs a client through the library's own
+/// `init`, behind its mutex, rather than touching the process environment, so
+/// parallel tests can't race on it. Call it before the first request; a later
+/// `analytics::shutdown()` discards the client and the next `track()` would
+/// read the environment again, so only `tests/analytics.rs`, which sets its
+/// own stand-in, calls that.
+pub fn disable_analytics() {
+    craftainer_observability::analytics::init(
+        &craftainer_observability::analytics::AnalyticsConfig::default(),
+        None,
+    );
+}
+
+/// The same pin for a spawned `template-axum` binary, which reads
+/// `ANALYTICS_*` from its own environment.
+pub fn without_analytics(command: &mut std::process::Command) -> &mut std::process::Command {
+    command.env("ANALYTICS_BACKEND", "none")
+}
+
 /// `AppState` wired to a real Postgres-backed repository.
 pub fn state_for(db: DatabaseConnection, events: EventBus) -> AppState {
+    disable_analytics();
     let settings = Arc::new(integration_settings());
     AppState {
         oidc: Arc::new(OidcVerifier::new(settings.clone())),

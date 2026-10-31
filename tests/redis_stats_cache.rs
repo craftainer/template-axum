@@ -75,6 +75,7 @@ async fn cleanup(prefix: &str) {
 }
 
 fn state(events: Arc<EventBus>, stats: CachedStats) -> AppState {
+    common::disable_analytics();
     let mut settings = common::integration_settings();
     settings.oidc_client_id = "api".to_string();
     let settings = Arc::new(settings);

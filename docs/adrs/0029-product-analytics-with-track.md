@@ -37,9 +37,13 @@ We will:
   `ANALYTICS_RESPECT_GPC` is true (the default). `Analytics-Consent: 1` sets `consent`,
   which matters only under `ANALYTICS_CONSENT=opt-in`: without it no event is recorded. A
   browser never sends that header by itself, so a front end or BFF that collected consent
-  adds it to its calls. The context is a thread-local set around every poll of the future,
-  so a task a handler spawns does not inherit it; none of the events here are tracked
-  from a spawned task.
+  adds it to its calls. The layer wraps the v2 JSON hero routes only, the handlers that
+  call `track()`; health, discovery and `.well-known` run without a context. The context
+  is a thread-local set around every poll of the future, so a task a handler spawns with
+  `tokio::spawn` does not inherit it: a caller that tracks from a spawned task has to
+  capture `current_request_context()` before the spawn and wrap the spawned future in
+  `RequestContext::scope`, or the event is recorded without the request's GPC and consent
+  signals. None of the events here are tracked from a spawned task.
 - Record two sample domain events from the Hero v2 JSON handlers, `hero.created` and
   `hero.deleted`, right after the repository write has succeeded and the CRUD event has
   been published. A request that fails validation, authorisation or the write returns
@@ -52,7 +56,9 @@ We will:
   request's, so query strings and record ids cannot leak into it.
 - Treat analytics as best effort: `track()` never fails, panics or waits for the network,
   the Umami queue drops on overflow, and `main` flushes it once on shutdown, after the
-  server has stopped and off the async workers (`spawn_blocking`). A request is never
+  server has stopped and off the async workers (`spawn_blocking`), waiting at most 5 s
+  (the library's flush interval) and logging a timeout or a panicked flush as a warning
+  before the OTLP export is shut down. A request is never
   slowed or failed by analytics.
 - Keep the CNIL audience-measurement exemption as the privacy reference (see
   [NFR-0033](../nfrs/NFR-0033-analytics-privacy.md)), in its stricter reading.

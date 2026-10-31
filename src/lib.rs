@@ -422,16 +422,17 @@ fn discovery_routers(state: &AppState) -> Router {
 /// built here, so after `configure_telemetry` in `main`), `TraceLayer`
 /// (`docs/adrs/0026`). Inside those, on every response: the RFC 9728
 /// `WWW-Authenticate` challenge on a 401 and the baseline security headers
-/// (`docs/adrs/0030`); innermost, `analytics_context`, which runs each
-/// handler inside the request's GPC/DNT and consent signals for `track()`
-/// (`docs/adrs/0029`).
+/// (`docs/adrs/0030`). `analytics_context`, which runs each handler inside
+/// the request's GPC/DNT and consent signals for `track()`
+/// (`docs/adrs/0029`), wraps the v2 JSON hero routes only -- the handlers
+/// that track -- and not health, discovery or `.well-known`.
 pub fn build_router(state: AppState) -> Router {
     let mut app = Router::new()
         .nest("/health", health_router().merge(info_router()))
         .nest("/audit", generic_controllers::audit::router())
         .nest(
             "/crud/v1/heroes/v2/json",
-            hero_controllers::heroes::router(),
+            with_analytics_context(hero_controllers::heroes::router()),
         )
         .nest(
             "/crud/v1/heroes/v2/xml",
@@ -458,9 +459,6 @@ pub fn build_router(state: AppState) -> Router {
     app.with_state(state)
         .merge(discovery)
         .merge(well_known)
-        .layer(axum::middleware::from_fn(
-            hero_controllers::analytics::analytics_context,
-        ))
         .layer(axum::middleware::map_response_with_state(
             resource_metadata_url,
             problem_details::add_resource_metadata,
@@ -471,6 +469,55 @@ pub fn build_router(state: AppState) -> Router {
         .layer(TraceLayer::new_for_http())
         .layer(ServerSpanLayer::new())
         .layer(RequestIdLayer::new())
+}
+
+/// Runs every request of `routes` inside its analytics request context
+/// (`docs/adrs/0029`). Applied to the routes whose handlers call `track()`
+/// and to nothing else.
+fn with_analytics_context<S>(routes: Router<S>) -> Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
+    routes.layer(axum::middleware::from_fn(
+        hero_controllers::analytics::analytics_context,
+    ))
+}
+
+/// How [`flush_analytics`] ended.
+#[derive(Debug, PartialEq, Eq)]
+pub enum FlushOutcome {
+    /// The flush returned inside the limit.
+    Flushed,
+    /// The flush was still running at the limit; shutdown carries on.
+    TimedOut,
+    /// The blocking task panicked or was cancelled.
+    Failed,
+}
+
+/// Runs `flush` (the blocking analytics flush) off the async workers and
+/// waits for it at most `limit`, so a stuck backend cannot hold up the OTLP
+/// shutdown behind it. A panic or cancellation (`JoinError`) and a timeout
+/// are logged as warnings, never fatal. A timed-out flush keeps running on
+/// its blocking thread: it cannot be aborted, and the runtime waits for it
+/// when `main` returns, which the library's own HTTP timeout bounds.
+pub async fn flush_analytics<F>(limit: std::time::Duration, flush: F) -> FlushOutcome
+where
+    F: FnOnce() + Send + 'static,
+{
+    match tokio::time::timeout(limit, tokio::task::spawn_blocking(flush)).await {
+        Ok(Ok(())) => FlushOutcome::Flushed,
+        Ok(Err(err)) => {
+            tracing::warn!("flushing the analytics queue failed: {err}");
+            FlushOutcome::Failed
+        }
+        Err(_) => {
+            tracing::warn!(
+                "flushing the analytics queue timed out after {}s, shutting down without it",
+                limit.as_secs()
+            );
+            FlushOutcome::TimedOut
+        }
+    }
 }
 
 #[cfg(test)]
@@ -864,5 +911,59 @@ mod tests {
             .unwrap()
             .iter()
             .any(|f| f["name"] == "power_level"));
+    }
+
+    #[tokio::test]
+    async fn flush_analytics_reports_done_timeout_and_panic() {
+        use std::time::Duration;
+        let limit = Duration::from_secs(5);
+        assert_eq!(flush_analytics(limit, || {}).await, FlushOutcome::Flushed);
+        assert_eq!(
+            flush_analytics(Duration::from_millis(20), || {
+                std::thread::sleep(Duration::from_millis(300));
+            })
+            .await,
+            FlushOutcome::TimedOut,
+            "a flush still running at the limit must not block shutdown"
+        );
+        assert_eq!(
+            flush_analytics(limit, || panic!("flush blew up")).await,
+            FlushOutcome::Failed
+        );
+    }
+
+    #[tokio::test]
+    async fn only_routes_wrapped_by_with_analytics_context_get_a_request_context() {
+        use axum::routing::get;
+        async fn probe() -> String {
+            craftainer_observability::analytics::current_request_context()
+                .map_or_else(|| "none".to_string(), |ctx| format!("gpc={}", ctx.gpc))
+        }
+        let app: Router = Router::new()
+            .route("/health", get(probe))
+            .merge(with_analytics_context(
+                Router::new().route("/hero", get(probe)),
+            ));
+        let body_of = |uri: &'static str| {
+            let app = app.clone();
+            async move {
+                let response = app
+                    .oneshot(
+                        Request::builder()
+                            .uri(uri)
+                            .header("Sec-GPC", "1")
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                String::from_utf8(bytes.to_vec()).unwrap()
+            }
+        };
+        assert_eq!(body_of("/hero").await, "gpc=true");
+        assert_eq!(body_of("/health").await, "none");
     }
 }

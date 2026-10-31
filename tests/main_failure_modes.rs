@@ -6,6 +6,8 @@
 //! unlike `tests/e2e.rs`'s `AppProcess`, which is killed on drop and
 //! never reaches either.
 
+mod common;
+
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -206,6 +208,8 @@ async fn start_mock_server(shutdown_timeout_seconds: Option<&str>) -> Child {
         .env("ALLOW_MOCK_MODE", "1")
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit());
+    // The tests below create heroes: keep them off the dev Umami.
+    common::without_analytics(&mut command);
     if let Some(seconds) = shutdown_timeout_seconds {
         command.env("GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS", seconds);
     }

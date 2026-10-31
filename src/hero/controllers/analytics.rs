@@ -22,9 +22,18 @@
 //!   without it. A browser never sends this header by itself: a front end
 //!   or BFF that has collected consent adds it to its calls.
 //!
+//! `build_router` applies the layer to the v2 JSON hero routes only, the
+//! handlers that call `track()`; health, discovery and `.well-known` run
+//! without a context.
+//!
 //! The context is a thread-local set around every poll of the wrapped
-//! future, so handlers see it; it does not follow into `tokio::spawn`ed
-//! tasks.
+//! future, so handlers see it. It does not follow into a `tokio::spawn`ed
+//! task (which polls on another thread, outside the scope): a handler that
+//! tracks from a spawned task must wrap that future itself, with
+//! `current_request_context()` captured before the spawn and
+//! `RequestContext::scope` around the spawned future; otherwise the task's
+//! events are recorded without the request's GPC/consent signals. None of
+//! the events here are tracked from a spawned task.
 //!
 //! The events ([`hero_created`], [`hero_deleted`]) are called by the v2 JSON
 //! handlers after the write succeeded, so a failed (rolled-back) write emits
