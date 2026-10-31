@@ -62,6 +62,15 @@ directory tree, so this instance's four tiers live in different places:
     version and commit from `APP_VERSION`/`APP_COMMIT`, `null` when unset
     or empty (`docs/adrs/0026`). Needs no service; it sets the process
     environment, so it is the only test in its binary.
+  - `analytics.rs` — product analytics (`docs/adrs/0029`, FR-0037,
+    NFR-0033) over the mock-mode router and an in-process stand-in for
+    Umami's `POST /api/batch` (never the real Umami): `hero.created`/
+    `hero.deleted` after a successful write and none after a failed one,
+    the GPC/DNT drop, `ANALYTICS_CONSENT=opt-in` with and without
+    `Analytics-Consent: 1`, the `ANALYTICS_PROP_KEYS` allowlist. It sets
+    the process environment, so it is the only test in its binary. `e2e.rs`
+    spawns the binary with `ANALYTICS_BACKEND=none`, so that suite does
+    not need Umami either.
   - `redis_rate_limiter.rs` — `rate_limit::RateLimiter`'s real-Redis
     backend against live Redis: `RateLimiter::connect`'s success path and
     a check/increment/reject round trip. The unreachable-server failure

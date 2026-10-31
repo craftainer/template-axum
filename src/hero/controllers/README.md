@@ -21,6 +21,16 @@ may import from here.
   purely generic) is where this app's one resource-specific dependency
   lives. Also `read_etag`/`enforce_if_match`, the conditional-request glue
   the four JSON/XML routers share (below).
+- `analytics.rs` — product analytics wiring (`docs/adrs/0029`, FR-0037,
+  NFR-0033): `analytics_context`, the `from_fn` middleware `lib.rs` layers
+  onto the router, which runs each request inside the
+  `craftainer-observability` `RequestContext` built from `Sec-GPC: 1`,
+  `DNT: 1` and `Analytics-Consent: 1`; and `hero_created`/`hero_deleted`,
+  the sample `track()` calls `heroes.rs` makes after a write succeeded
+  (`url` the constant route path, the only prop `powers_count`). The
+  library reads `ANALYTICS_*` itself, so `config.rs` has no fields for it.
+  Here rather than a top-level module because `check_layering.py` knows no
+  category for one.
 - `heroes.rs` — the Hero v2 resource router (list/get/create/update/
   delete), mounted by `lib.rs` at `/crud/v1/heroes/v2/json`. Owner-
   scoped (`docs/adrs/0007`), soft-deleted (`docs/adrs/0008`), RBAC-gated

@@ -133,6 +133,11 @@ async fn main() {
         }
     }
 
+    // Rust has no `atexit`: flush the queued analytics events now, after the
+    // last request has finished tracking and before the OTLP export closes.
+    // Blocking (a dead Umami costs one 2 s timeout), hence `spawn_blocking`.
+    let _ = tokio::task::spawn_blocking(craftainer_observability::analytics::shutdown).await;
+
     // The server has stopped, so blocking on the final export is fine here;
     // `spawn_blocking` keeps the runtime's worker free regardless. Done
     // before the `expect` below so a server error is exported too.
