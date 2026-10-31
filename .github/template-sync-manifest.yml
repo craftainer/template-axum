@@ -116,6 +116,7 @@ replace:
   - scripts/post-create.d/10-cargo-build.sh
   - scripts/runner-setup.d/10-ca-certificates.sh
   - scripts/image-scan.sh
+  - scripts/image-dast.sh
   - scripts/skopeo.sh
   - scripts/test-image-scripts.sh
 
@@ -142,6 +143,10 @@ ignore:
   # The skeletons shipped here are examples to replace, never synced.
   - Dockerfile
   - image.mk
+
+  # The instance's ZAP baseline rule levels (seeded with a commented header;
+  # an instance adds its own FAIL/IGNORE lines, with a reason each).
+  - .zap/rules.tsv
 
   # Product/domain knowledge and working plans: instance-owned from the
   # moment it's instantiated.
