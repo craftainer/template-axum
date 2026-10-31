@@ -132,7 +132,7 @@ base64 = "=0.22.1"
 # `Mode::Mock` registers in non-test code (the feature name is the crate's;
 # a production build never registers it outside `Mode::Mock`).
 craftainer-crud = { version = "=0.3.0", features = ["mqtt"] }
-craftainer-observability = { version = "=0.3.0", features = ["postgres", "redis", "s3", "http", "otel", "testing"] }
+craftainer-observability = { version = "=0.4.0", features = ["postgres", "redis", "s3", "http", "otel", "analytics", "testing"] }
 
 [dev-dependencies]
 # tests/ and a few src/ tests read SSE bodies as a stream.

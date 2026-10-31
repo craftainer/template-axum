@@ -21,6 +21,7 @@ services:
       - ./stack/postgres/postgres.env
       - ./stack/s3/s3.env
       - ./stack/keycloak/keycloak.env
+      - ./stack/umami/analytics.env
     # Waits for every stack service's own healthcheck (see each fragment's
     # compose.yml) so `docker compose up` -- and therefore devcontainers/ci's
     # runCmd, and postCreateCommand -- never starts myapp, prek, or cargo

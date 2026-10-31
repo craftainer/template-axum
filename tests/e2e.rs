@@ -36,6 +36,9 @@ impl AppProcess {
         let mut command = Command::new(env!("CARGO_BIN_EXE_template-axum"));
         command
             .env("MODE", mode)
+            // Independent of Umami: the devcontainer's analytics.env points
+            // myapp at it, but this suite must not need it (docs/adrs/0029).
+            .env("ANALYTICS_BACKEND", "none")
             .stdout(Stdio::null())
             .stderr(Stdio::inherit());
         for (key, value) in extra_env {

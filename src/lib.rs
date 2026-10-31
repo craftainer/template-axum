@@ -422,7 +422,9 @@ fn discovery_routers(state: &AppState) -> Router {
 /// built here, so after `configure_telemetry` in `main`), `TraceLayer`
 /// (`docs/adrs/0026`). Inside those, on every response: the RFC 9728
 /// `WWW-Authenticate` challenge on a 401 and the baseline security headers
-/// (`docs/adrs/0030`).
+/// (`docs/adrs/0030`); innermost, `analytics_context`, which runs each
+/// handler inside the request's GPC/DNT and consent signals for `track()`
+/// (`docs/adrs/0029`).
 pub fn build_router(state: AppState) -> Router {
     let mut app = Router::new()
         .nest("/health", health_router().merge(info_router()))
@@ -456,6 +458,9 @@ pub fn build_router(state: AppState) -> Router {
     app.with_state(state)
         .merge(discovery)
         .merge(well_known)
+        .layer(axum::middleware::from_fn(
+            hero_controllers::analytics::analytics_context,
+        ))
         .layer(axum::middleware::map_response_with_state(
             resource_metadata_url,
             problem_details::add_resource_metadata,

@@ -1265,9 +1265,9 @@ dependencies = [
 
 [[package]]
 name = "craftainer-observability"
-version = "0.3.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b3e404ac82f168c9000380fa4de88af12ec2b1ac5856e04e98978f139469d802"
+checksum = "95e41f183daf31d68924420f7f0dbf5a7816bd8009546ffbfa54a87462bff3c7"
 dependencies = [
  "async-trait",
  "aws-sdk-s3",

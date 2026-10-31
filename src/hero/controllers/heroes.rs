@@ -13,6 +13,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 
+use crate::hero::controllers::analytics;
 use crate::hero::controllers::{
     enforce_if_match, read_etag, AppState, HERO_DELETE_ROLES, HERO_EVENT_RESOURCE, HERO_READ_ROLES,
     HERO_WRITE_ROLES,
@@ -142,6 +143,9 @@ async fn create(
         vec![hero.id],
     )
     .await;
+    // Likewise only after success: a failed write returned above and emits
+    // nothing (docs/adrs/0029).
+    analytics::hero_created(&hero);
     Ok((StatusCode::CREATED, Json(HeroRead::from(hero))))
 }
 
@@ -268,6 +272,7 @@ async fn delete_hero(
             let ids = query.id.into_iter().collect();
             crud_events::publish(&state.events, HERO_EVENT_RESOURCE, EventAction::Delete, ids)
                 .await;
+            analytics::hero_deleted();
             Ok(StatusCode::NO_CONTENT.into_response())
         }
         DeleteOutcome::Bulk(result) => {

@@ -1,14 +1,14 @@
 # umami
 
 [Umami](https://umami.is) 3.4.1 (MIT), cookieless web analytics. The app
-sends events to it server-side via `POST /api/send`.
+sends events to it server-side (`craftainer-observability`'s `analytics` feature posts batches to `/api/batch`).
 
 - Compose file: `compose.yml` (services `umami`, plus the one-shots `umami-db-init` and `umami-seed`)
 - Image: `ghcr.io/umami-software/umami:3.4.1`, pinned by digest
 - Host (from other containers): `umami`, port `3000` (forwarded to the host for the dev UI)
 - Database: `umami` in the stack's Postgres (`postgres:5432`), created by `umami-db-init` (idempotent; `initdb.d` would skip an existing volume)
 - Website: `umami-seed` inserts the site `template-axum` with ID `a076165c-04f6-5693-94ad-a3ae8ca0c316` (UUIDv5 of `template-axum.craftainer.local`, in the DNS namespace) owned by the admin user from Umami's first migration. Idempotent.
-- Configuration: `umami.env`, next to this file. It also holds `ANALYTICS_BACKEND`, `ANALYTICS_ENDPOINT` and `ANALYTICS_SITE_ID` for the app.
+- Configuration, next to this file: `umami.env` (the umami service only: its `DATABASE_URL` and `APP_SECRET`; myapp does not load it) and `analytics.env` (the app-facing `ANALYTICS_*` settings: backend, endpoint, site ID, property allowlist `powers_count`, hostname; loaded by myapp and by `umami-seed`, holds no secrets).
 
 ## Do
 
@@ -18,7 +18,7 @@ sends events to it server-side via `POST /api/send`.
 ## Don't
 
 - Expose port 3000 beyond the devcontainer's forwarding. **Ingestion (`/api/send`, `/api/batch`) is unauthenticated**: anyone who can reach it can write events.
-- Reuse `APP_SECRET` from `umami.env` anywhere else. It is a dev-only value.
+- Load `umami.env` into the app, or reuse `APP_SECRET` from it anywhere else. It is a dev-only value.
 
 ## Retention
 

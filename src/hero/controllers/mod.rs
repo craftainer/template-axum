@@ -18,6 +18,7 @@
 //! doc for the `HasSettings`/`HasHealthRegistry`/`HasRateLimiter`
 //! traits `AppState` implements below alongside `oidc::HasOidcVerifier`).
 
+pub mod analytics;
 pub mod heroes;
 pub mod heroes_v1;
 pub mod heroes_v1_xml;
