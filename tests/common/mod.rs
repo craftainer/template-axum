@@ -169,9 +169,11 @@ pub fn integration_settings() -> Settings {
 /// there, `docs/adrs/0029`). Installs a client through the library's own
 /// `init`, rather than touching the process environment, and does so once
 /// per test binary (`OnceLock`), so parallel tests can't replace a client
-/// another test installed. Call it before the first request. Only
-/// `tests/analytics.rs`, which sets up its own stand-in and flushes with
-/// `analytics::shutdown()`, doesn't rely on it.
+/// another test installed. Call it before the first request. Once only:
+/// `analytics::shutdown()` discards the installed client, and a later call
+/// here does not re-pin. `tests/analytics.rs` (a single test function)
+/// flushes with `shutdown()` between its scenarios and calls this once,
+/// in its pin scenario; a second call there would be a no-op.
 pub fn disable_analytics() {
     static PINNED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     PINNED.get_or_init(|| {
