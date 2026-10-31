@@ -22,9 +22,9 @@
 //!   without it. A browser never sends this header by itself: a front end
 //!   or BFF that has collected consent adds it to its calls.
 //!
-//! `build_router` applies the layer to the v2 JSON hero routes only, the
-//! handlers that call `track()`; health, discovery and `.well-known` run
-//! without a context.
+//! `build_router` applies the layer to the whole router, so no handler can
+//! call `track()` outside a request context and skip the GPC/consent
+//! signals.
 //!
 //! The context is a thread-local set around every poll of the wrapped
 //! future, so handlers see it. It does not follow into a `tokio::spawn`ed

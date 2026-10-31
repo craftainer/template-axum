@@ -422,17 +422,18 @@ fn discovery_routers(state: &AppState) -> Router {
 /// built here, so after `configure_telemetry` in `main`), `TraceLayer`
 /// (`docs/adrs/0026`). Inside those, on every response: the RFC 9728
 /// `WWW-Authenticate` challenge on a 401 and the baseline security headers
-/// (`docs/adrs/0030`). `analytics_context`, which runs each handler inside
-/// the request's GPC/DNT and consent signals for `track()`
-/// (`docs/adrs/0029`), wraps the v2 JSON hero routes only -- the handlers
-/// that track -- and not health, discovery or `.well-known`.
+/// (`docs/adrs/0030`); innermost, `analytics_context`, which runs each
+/// handler inside the request's GPC/DNT and consent signals for `track()`
+/// (`docs/adrs/0029`). It wraps every route, so no handler can call
+/// `track()` outside a request context (which would skip the privacy
+/// signals).
 pub fn build_router(state: AppState) -> Router {
     let mut app = Router::new()
         .nest("/health", health_router().merge(info_router()))
         .nest("/audit", generic_controllers::audit::router())
         .nest(
             "/crud/v1/heroes/v2/json",
-            with_analytics_context(hero_controllers::heroes::router()),
+            hero_controllers::heroes::router(),
         )
         .nest(
             "/crud/v1/heroes/v2/xml",
@@ -459,6 +460,9 @@ pub fn build_router(state: AppState) -> Router {
     app.with_state(state)
         .merge(discovery)
         .merge(well_known)
+        .layer(axum::middleware::from_fn(
+            hero_controllers::analytics::analytics_context,
+        ))
         .layer(axum::middleware::map_response_with_state(
             resource_metadata_url,
             problem_details::add_resource_metadata,
@@ -469,18 +473,6 @@ pub fn build_router(state: AppState) -> Router {
         .layer(TraceLayer::new_for_http())
         .layer(ServerSpanLayer::new())
         .layer(RequestIdLayer::new())
-}
-
-/// Runs every request of `routes` inside its analytics request context
-/// (`docs/adrs/0029`). Applied to the routes whose handlers call `track()`
-/// and to nothing else.
-fn with_analytics_context<S>(routes: Router<S>) -> Router<S>
-where
-    S: Clone + Send + Sync + 'static,
-{
-    routes.layer(axum::middleware::from_fn(
-        hero_controllers::analytics::analytics_context,
-    ))
 }
 
 /// How [`flush_analytics`] ended.
@@ -918,14 +910,21 @@ mod tests {
         use std::time::Duration;
         let limit = Duration::from_secs(5);
         assert_eq!(flush_analytics(limit, || {}).await, FlushOutcome::Flushed);
+
+        // A flush that blocks until the test releases it, so the outcome
+        // can't depend on timing: only the timeout can end the wait. (The
+        // crate's tokio has no `test-util`, so no paused clock.)
+        let (release, blocked) = std::sync::mpsc::channel::<()>();
         assert_eq!(
-            flush_analytics(Duration::from_millis(20), || {
-                std::thread::sleep(Duration::from_millis(300));
+            flush_analytics(Duration::from_millis(20), move || {
+                let _ = blocked.recv();
             })
             .await,
             FlushOutcome::TimedOut,
             "a flush still running at the limit must not block shutdown"
         );
+        release.send(()).unwrap();
+
         assert_eq!(
             flush_analytics(limit, || panic!("flush blew up")).await,
             FlushOutcome::Failed
@@ -933,37 +932,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn only_routes_wrapped_by_with_analytics_context_get_a_request_context() {
+    async fn the_analytics_layer_gives_every_route_a_request_context() {
         use axum::routing::get;
         async fn probe() -> String {
             craftainer_observability::analytics::current_request_context()
                 .map_or_else(|| "none".to_string(), |ctx| format!("gpc={}", ctx.gpc))
         }
+        // The layer `build_router` applies to the whole router: a health-style
+        // route gets a context too (harmless there), as does a hero-style one.
         let app: Router = Router::new()
             .route("/health", get(probe))
-            .merge(with_analytics_context(
-                Router::new().route("/hero", get(probe)),
+            .route("/hero", get(probe))
+            .layer(axum::middleware::from_fn(
+                hero_controllers::analytics::analytics_context,
             ));
-        let body_of = |uri: &'static str| {
-            let app = app.clone();
-            async move {
-                let response = app
-                    .oneshot(
-                        Request::builder()
-                            .uri(uri)
-                            .header("Sec-GPC", "1")
-                            .body(Body::empty())
-                            .unwrap(),
-                    )
-                    .await
-                    .unwrap();
-                let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
-                    .await
-                    .unwrap();
-                String::from_utf8(bytes.to_vec()).unwrap()
-            }
-        };
-        assert_eq!(body_of("/hero").await, "gpc=true");
-        assert_eq!(body_of("/health").await, "none");
+        for uri in ["/hero", "/health"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(uri)
+                        .header("Sec-GPC", "1")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            assert_eq!(bytes.as_ref(), b"gpc=true", "{uri}");
+        }
     }
 }

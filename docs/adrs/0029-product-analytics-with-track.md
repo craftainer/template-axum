@@ -37,8 +37,8 @@ We will:
   `ANALYTICS_RESPECT_GPC` is true (the default). `Analytics-Consent: 1` sets `consent`,
   which matters only under `ANALYTICS_CONSENT=opt-in`: without it no event is recorded. A
   browser never sends that header by itself, so a front end or BFF that collected consent
-  adds it to its calls. The layer wraps the v2 JSON hero routes only, the handlers that
-  call `track()`; health, discovery and `.well-known` run without a context. The context
+  adds it to its calls. The layer wraps every route of the router, so no handler can call
+  `track()` without a request context (which would skip GPC and consent). The context
   is a thread-local set around every poll of the future, so a task a handler spawns with
   `tokio::spawn` does not inherit it: a caller that tracks from a spawned task has to
   capture `current_request_context()` before the spawn and wrap the spawned future in

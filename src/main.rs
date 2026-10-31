@@ -18,8 +18,11 @@ use template_axum::{
     spawn_stats_cache_invalidation,
 };
 
-/// How long shutdown waits for the analytics flush: the library's flush
-/// interval.
+/// How long shutdown waits for the analytics flush. Equal to the library's
+/// own `FLUSH_INTERVAL` (craftainer-observability 0.4.0, `analytics::umami`,
+/// private, so repeated here): the Umami flusher sends its queue at least
+/// that often, so a final flush still running after one interval is stuck
+/// rather than slow. If the library's interval changes, revisit this value.
 const ANALYTICS_FLUSH_LIMIT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Installs JSON logging (plus OTLP export when the environment asks for

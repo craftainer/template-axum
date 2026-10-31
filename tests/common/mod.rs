@@ -167,16 +167,19 @@ pub fn integration_settings() -> Settings {
 /// creates and deletes a test drives through the router never post to the
 /// devcontainer's Umami (`analytics.env` selects `umami` for every process
 /// there, `docs/adrs/0029`). Installs a client through the library's own
-/// `init`, behind its mutex, rather than touching the process environment, so
-/// parallel tests can't race on it. Call it before the first request; a later
-/// `analytics::shutdown()` discards the client and the next `track()` would
-/// read the environment again, so only `tests/analytics.rs`, which sets its
-/// own stand-in, calls that.
+/// `init`, rather than touching the process environment, and does so once
+/// per test binary (`OnceLock`), so parallel tests can't replace a client
+/// another test installed. Call it before the first request. Only
+/// `tests/analytics.rs`, which sets up its own stand-in and flushes with
+/// `analytics::shutdown()`, doesn't rely on it.
 pub fn disable_analytics() {
-    craftainer_observability::analytics::init(
-        &craftainer_observability::analytics::AnalyticsConfig::default(),
-        None,
-    );
+    static PINNED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    PINNED.get_or_init(|| {
+        craftainer_observability::analytics::init(
+            &craftainer_observability::analytics::AnalyticsConfig::default(),
+            None,
+        );
+    });
 }
 
 /// The same pin for a spawned `template-axum` binary, which reads

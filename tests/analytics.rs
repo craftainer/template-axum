@@ -18,6 +18,7 @@ use std::sync::{Arc, Mutex};
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use axum::Router;
+use craftainer_observability::analytics::{AnalyticsConfig, Backend};
 use serde_json::{json, Value};
 use template_axum::config::Settings;
 use template_axum::{build_router, build_state};
@@ -151,6 +152,26 @@ async fn call(
 }
 
 const CREATE: &str = "/crud/v1/heroes/v2/json";
+
+/// `POST` a hero and return the id the response carries.
+async fn create_hero(app: &Router, token: &str, hero: &Value) -> i64 {
+    let mut request = Request::builder()
+        .method("POST")
+        .uri(CREATE)
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/json")
+        .body(Body::from(hero.to_string()))
+        .unwrap();
+    request
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(SocketAddr::from((
+            [127, 0, 0, 1],
+            40000,
+        ))));
+    let response = app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    json_body(response).await["id"].as_i64().unwrap()
+}
 
 /// Flush and discard the process-wide analytics client.
 async fn flush() {
@@ -351,17 +372,18 @@ async fn hero_events_honour_gpc_dnt_consent_and_the_prop_allowlist() {
     // environment still selecting the stand-in, a create and a delete
     // through the router reach nothing.
     set_env(&url, &[("ANALYTICS_ENABLED", "true")]);
+    // The client the pin installs is the `none` backend, while the
+    // environment alone would have selected the stand-in.
+    assert_eq!(AnalyticsConfig::default().backend, Backend::None);
+    assert_eq!(AnalyticsConfig::from_env().backend, Backend::Umami);
     common::disable_analytics();
-    assert_eq!(
-        call(&app, &editor, "POST", CREATE, hero.clone(), &[]).await,
-        StatusCode::CREATED
-    );
+    let created = create_hero(&app, &editor, &hero).await;
     assert_eq!(
         call(
             &app,
             &maintainer,
             "DELETE",
-            &format!("{CREATE}?id=2"),
+            &format!("{CREATE}?id={created}"),
             Value::Null,
             &[]
         )
