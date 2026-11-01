@@ -424,7 +424,9 @@ fn discovery_routers(state: &AppState) -> Router {
 /// `WWW-Authenticate` challenge on a 401 and the baseline security headers
 /// (`docs/adrs/0030`); innermost, `analytics_context`, which runs each
 /// handler inside the request's GPC/DNT and consent signals for `track()`
-/// (`docs/adrs/0029`).
+/// (`docs/adrs/0029`). It wraps every route, so no handler can call
+/// `track()` outside a request context (which would skip the privacy
+/// signals).
 pub fn build_router(state: AppState) -> Router {
     let mut app = Router::new()
         .nest("/health", health_router().merge(info_router()))
@@ -471,6 +473,43 @@ pub fn build_router(state: AppState) -> Router {
         .layer(TraceLayer::new_for_http())
         .layer(ServerSpanLayer::new())
         .layer(RequestIdLayer::new())
+}
+
+/// How [`flush_analytics`] ended.
+#[derive(Debug, PartialEq, Eq)]
+pub enum FlushOutcome {
+    /// The flush returned inside the limit.
+    Flushed,
+    /// The flush was still running at the limit; shutdown carries on.
+    TimedOut,
+    /// The blocking task panicked or was cancelled.
+    Failed,
+}
+
+/// Runs `flush` (the blocking analytics flush) off the async workers and
+/// waits for it at most `limit`, so a stuck backend cannot hold up the OTLP
+/// shutdown behind it. A panic or cancellation (`JoinError`) and a timeout
+/// are logged as warnings, never fatal. A timed-out flush keeps running on
+/// its blocking thread: it cannot be aborted, and the runtime waits for it
+/// when `main` returns, which the library's own HTTP timeout bounds.
+pub async fn flush_analytics<F>(limit: std::time::Duration, flush: F) -> FlushOutcome
+where
+    F: FnOnce() + Send + 'static,
+{
+    match tokio::time::timeout(limit, tokio::task::spawn_blocking(flush)).await {
+        Ok(Ok(())) => FlushOutcome::Flushed,
+        Ok(Err(err)) => {
+            tracing::warn!("flushing the analytics queue failed: {err}");
+            FlushOutcome::Failed
+        }
+        Err(_) => {
+            tracing::warn!(
+                "flushing the analytics queue timed out after {}s, shutting down without it",
+                limit.as_secs()
+            );
+            FlushOutcome::TimedOut
+        }
+    }
 }
 
 #[cfg(test)]
@@ -864,5 +903,65 @@ mod tests {
             .unwrap()
             .iter()
             .any(|f| f["name"] == "power_level"));
+    }
+
+    #[tokio::test]
+    async fn flush_analytics_reports_done_timeout_and_panic() {
+        use std::time::Duration;
+        let limit = Duration::from_secs(5);
+        assert_eq!(flush_analytics(limit, || {}).await, FlushOutcome::Flushed);
+
+        // A flush that blocks until the test releases it, so the outcome
+        // can't depend on timing: only the timeout can end the wait. (The
+        // crate's tokio has no `test-util`, so no paused clock.)
+        let (release, blocked) = std::sync::mpsc::channel::<()>();
+        assert_eq!(
+            flush_analytics(Duration::from_millis(20), move || {
+                let _ = blocked.recv();
+            })
+            .await,
+            FlushOutcome::TimedOut,
+            "a flush still running at the limit must not block shutdown"
+        );
+        release.send(()).unwrap();
+
+        assert_eq!(
+            flush_analytics(limit, || panic!("flush blew up")).await,
+            FlushOutcome::Failed
+        );
+    }
+
+    #[tokio::test]
+    async fn the_analytics_layer_gives_every_route_a_request_context() {
+        use axum::routing::get;
+        async fn probe() -> String {
+            craftainer_observability::analytics::current_request_context()
+                .map_or_else(|| "none".to_string(), |ctx| format!("gpc={}", ctx.gpc))
+        }
+        // The layer `build_router` applies to the whole router: a health-style
+        // route gets a context too (harmless there), as does a hero-style one.
+        let app: Router = Router::new()
+            .route("/health", get(probe))
+            .route("/hero", get(probe))
+            .layer(axum::middleware::from_fn(
+                hero_controllers::analytics::analytics_context,
+            ));
+        for uri in ["/hero", "/health"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(uri)
+                        .header("Sec-GPC", "1")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            assert_eq!(bytes.as_ref(), b"gpc=true", "{uri}");
+        }
     }
 }

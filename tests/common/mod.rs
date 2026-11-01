@@ -163,8 +163,36 @@ pub fn integration_settings() -> Settings {
     }
 }
 
+/// Pins the process-wide analytics client to backend `none`, so hero
+/// creates and deletes a test drives through the router never post to the
+/// devcontainer's Umami (`analytics.env` selects `umami` for every process
+/// there, `docs/adrs/0029`). Installs a client through the library's own
+/// `init`, rather than touching the process environment, and does so once
+/// per test binary (`OnceLock`), so parallel tests can't replace a client
+/// another test installed. Call it before the first request. Once only:
+/// `analytics::shutdown()` discards the installed client, and a later call
+/// here does not re-pin. `tests/analytics.rs` (a single test function)
+/// flushes with `shutdown()` between its scenarios and calls this once,
+/// in its pin scenario; a second call there would be a no-op.
+pub fn disable_analytics() {
+    static PINNED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    PINNED.get_or_init(|| {
+        craftainer_observability::analytics::init(
+            &craftainer_observability::analytics::AnalyticsConfig::default(),
+            None,
+        );
+    });
+}
+
+/// The same pin for a spawned `template-axum` binary, which reads
+/// `ANALYTICS_*` from its own environment.
+pub fn without_analytics(command: &mut std::process::Command) -> &mut std::process::Command {
+    command.env("ANALYTICS_BACKEND", "none")
+}
+
 /// `AppState` wired to a real Postgres-backed repository.
 pub fn state_for(db: DatabaseConnection, events: EventBus) -> AppState {
+    disable_analytics();
     let settings = Arc::new(integration_settings());
     AppState {
         oidc: Arc::new(OidcVerifier::new(settings.clone())),

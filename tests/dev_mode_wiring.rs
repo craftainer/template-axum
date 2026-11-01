@@ -31,6 +31,7 @@ async fn dev_mode_health_registry_reports_every_check_healthy() {
 
 #[tokio::test]
 async fn dev_mode_build_state_serves_health_live_and_a_real_hero_round_trip() {
+    common::disable_analytics();
     let settings = common::dev_settings(None);
     let state = build_state(settings).await;
     let app = build_router(state);

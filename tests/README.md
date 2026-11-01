@@ -132,6 +132,15 @@ whole-table aggregates run in parallel and share nothing with the dev
 database. MQTT tests use a per-run topic/resource name for the same
 reason.
 
+Inside the devcontainer every process loads `analytics.env`, which selects
+`ANALYTICS_BACKEND=umami`, so a test that creates or deletes a hero would post
+a real event to the dev Umami. Any test that drives the hero handlers calls
+`common::disable_analytics()` (installs a `none` client through the
+library's `analytics::init`, no environment mutation; `common::state_for`
+does it already), and one that spawns the binary adds
+`common::without_analytics(&mut command)`. `analytics.rs` keeps its own
+stand-in setup, and `e2e.rs` sets `ANALYTICS_BACKEND=none` itself.
+
 `common::seed_hero_at` writes a Hero row with a caller-chosen
 `created_at`. It is deliberately test-only and not reachable from any
 production path: `HeroSeaOrmRepository::create` always stamps

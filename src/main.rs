@@ -14,9 +14,16 @@ use craftainer_observability::{
 };
 use template_axum::config::Settings;
 use template_axum::{
-    build_router, build_state_with_db, connect_database, problem_details,
+    build_router, build_state_with_db, connect_database, flush_analytics, problem_details,
     spawn_stats_cache_invalidation,
 };
+
+/// How long shutdown waits for the analytics flush. Equal to the library's
+/// own `FLUSH_INTERVAL` (craftainer-observability 0.4.0, `analytics::umami`,
+/// private, so repeated here): the Umami flusher sends its queue at least
+/// that often, so a final flush still running after one interval is stuck
+/// rather than slow. If the library's interval changes, revisit this value.
+const ANALYTICS_FLUSH_LIMIT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Installs JSON logging (plus OTLP export when the environment asks for
 /// it). An exporter that can't be built isn't fatal: carry on with JSON
@@ -135,8 +142,14 @@ async fn main() {
 
     // Rust has no `atexit`: flush the queued analytics events now, after the
     // last request has finished tracking and before the OTLP export closes.
-    // Blocking (a dead Umami costs one 2 s timeout), hence `spawn_blocking`.
-    let _ = tokio::task::spawn_blocking(craftainer_observability::analytics::shutdown).await;
+    // Blocking (a dead Umami costs one 2 s timeout), hence `spawn_blocking`,
+    // and bounded by the library's 5 s flush interval so a stuck backend
+    // cannot hold up the OTLP shutdown below; a panic or a timeout is logged.
+    flush_analytics(
+        ANALYTICS_FLUSH_LIMIT,
+        craftainer_observability::analytics::shutdown,
+    )
+    .await;
 
     // The server has stopped, so blocking on the final export is fine here;
     // `spawn_blocking` keeps the runtime's worker free regardless. Done
