@@ -187,7 +187,7 @@ def check(src: Path) -> list[str]:
                     f"{rs_file.relative_to(src.parent)} ('{own_category}') "
                     f"imports '{referenced}', which isn't in its allowed set "
                     f"{sorted(allowed) or '{}'} -- see docs/adrs/0009 and "
-                    "src/README.md's \"Generic vs. Hero-specific split\"."
+                    'src/README.md\'s "Generic vs. Hero-specific split".'
                 )
     return violations
 
