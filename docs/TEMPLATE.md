@@ -144,8 +144,10 @@ run `prek install` once to enable the git hooks.
 `.pre-commit-config.yaml` defines whitespace/EOF fixers, YAML/TOML/JSON
 checks, `conventional-pre-commit` (Conventional Commits, enforced at the
 `commit-msg` stage), the `template-sync-manifest` completeness check, and
-<<<<<<< /home/runner/work/template-axum/template-axum/docs/TEMPLATE.md
-the `devcontainer-lock` lockfile-consistency check, three security
+the `devcontainer-lock` lockfile-consistency check, `ruff-check`/`ruff-format`
+(`astral-sh/ruff-pre-commit`, scoped to `.github/scripts/*.py` so base can't
+ship scripts that fail a Python instance's own ruff hook; keep its `rev` equal
+to the ruff the Python templates pin), three security
 scanners (below), the image-layer hooks
 (`hadolint`, `check-dockerfile-versions`, `image-scan`; see "Image
 layer"), `check-rust-version` (the Rust pin in `Dockerfile`,
@@ -159,16 +161,6 @@ integration/e2e-equivalent tiers in `tests/` — see `tests/README.md`),
 `docs/nfrs/NFR-0023-test-coverage-gate.md`), and `cargo audit`
 (dependency vulnerabilities) on push only, since they need the
 devcontainer stack's real backing services and take longer to run.
-=======
-the `devcontainer-lock` lockfile-consistency check, `ruff-check`/`ruff-format`
-(`astral-sh/ruff-pre-commit`, scoped to `.github/scripts/*.py` so base can't
-ship scripts that fail a Python instance's own ruff hook; keep its `rev` equal
-to the ruff the Python templates pin), and three security scanners (below). An instance layers
-its own language-specific hooks on top (lint,
-format, type check, test suite, dependency-vulnerability scan, ...),
-matching the shape `template-fastapi`'s own `.pre-commit-config.yaml`
-already establishes for `ruff`/`mypy`/`pytest`/`pip-audit`.
->>>>>>> /tmp/template-new/docs/TEMPLATE.md
 
 `check-merge-conflict` runs with `--assume-in-merge`, so it flags committed
 conflict markers (a line starting `<<<<<<< `, `=======` or `>>>>>>> `) in any
