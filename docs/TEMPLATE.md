@@ -144,6 +144,7 @@ run `prek install` once to enable the git hooks.
 `.pre-commit-config.yaml` defines whitespace/EOF fixers, YAML/TOML/JSON
 checks, `conventional-pre-commit` (Conventional Commits, enforced at the
 `commit-msg` stage), the `template-sync-manifest` completeness check, and
+<<<<<<< /home/runner/work/template-axum/template-axum/docs/TEMPLATE.md
 the `devcontainer-lock` lockfile-consistency check, three security
 scanners (below), the image-layer hooks
 (`hadolint`, `check-dockerfile-versions`, `image-scan`; see "Image
@@ -158,6 +159,21 @@ integration/e2e-equivalent tiers in `tests/` — see `tests/README.md`),
 `docs/nfrs/NFR-0023-test-coverage-gate.md`), and `cargo audit`
 (dependency vulnerabilities) on push only, since they need the
 devcontainer stack's real backing services and take longer to run.
+=======
+the `devcontainer-lock` lockfile-consistency check, `ruff-check`/`ruff-format`
+(`astral-sh/ruff-pre-commit`, scoped to `.github/scripts/*.py` so base can't
+ship scripts that fail a Python instance's own ruff hook; keep its `rev` equal
+to the ruff the Python templates pin), and three security scanners (below). An instance layers
+its own language-specific hooks on top (lint,
+format, type check, test suite, dependency-vulnerability scan, ...),
+matching the shape `template-fastapi`'s own `.pre-commit-config.yaml`
+already establishes for `ruff`/`mypy`/`pytest`/`pip-audit`.
+>>>>>>> /tmp/template-new/docs/TEMPLATE.md
+
+`check-merge-conflict` runs with `--assume-in-merge`, so it flags committed
+conflict markers (a line starting `<<<<<<< `, `=======` or `>>>>>>> `) in any
+file, not just during an in-progress git merge; a template sync PR that
+commits a merge-tier conflict is then caught in CI.
 
 ### Security scanners
 
@@ -943,6 +959,13 @@ the place for their own runtime (FastAPI, axum, React) and their own ADRs.
 A mid-layer classifies its own tree for its instances in its own
 `.github/template-sync-manifest.yml`, which is `merge` tier in every
 instance: base's additions are resolved by hand there.
+In `template-docker`, `README.md` is `ignore` tier: each instance's
+README is entirely its own, so a merge conflicted on every sync. The
+instance owns it from creation, and later changes to the template's
+README no longer reach instances by sync. This applies through the
+chain: the README of `template-fastapi`, `template-axum` and
+`template-react` becomes owned by that app template, and its own
+instances follow that template's manifest.
 An instance lists extra paths of its own under `ignore:` in
 `.github/template-sync-manifest.local.yml`. Which template an instance
 follows is recorded in its `.github/template-sync-state.json`
