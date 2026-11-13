@@ -521,6 +521,19 @@ pub fn mqtt_security(mode: Mode) -> Result<MqttSecurity, String> {
         if security.allow_insecure {
             problems.push("MQTT_ALLOW_INSECURE must not be set");
         }
+        // The bus reads these files only when it connects, so a missing mount
+        // or a typo would otherwise surface as events silently never delivered.
+        for (name, path) in [
+            ("MQTT_TLS_CA_FILE", &security.tls_ca_file),
+            ("MQTT_TLS_CLIENT_CERT", &security.tls_client_cert),
+            ("MQTT_TLS_CLIENT_KEY", &security.tls_client_key),
+        ] {
+            if path.as_ref().is_some_and(|path| !path.is_file()) {
+                return Err(format!(
+                    "{name} must name a readable file when MODE=production"
+                ));
+            }
+        }
         if !problems.is_empty() {
             return Err(format!("{} when MODE=production", problems.join("; ")));
         }
@@ -868,11 +881,13 @@ fn env_bool(key: &str, default: bool) -> Result<bool, String> {
     }
 }
 
-/// An optional string (`None` when unset); a set-but-empty or non-UTF-8
-/// value is an error rather than silently "unset".
+/// An optional string (`None` when unset or empty -- compose and Helm
+/// templating emit `NAME=` for an unset optional value; a required value that
+/// is empty is then refused by the caller as missing). A non-UTF-8 value is an
+/// error.
 fn env_present(key: &str) -> Result<Option<String>, String> {
     match env::var(key) {
-        Ok(value) if value.is_empty() => Err(format!("{key} must not be empty when set")),
+        Ok(value) if value.is_empty() => Ok(None),
         Ok(value) => Ok(Some(value)),
         Err(env::VarError::NotPresent) => Ok(None),
         Err(env::VarError::NotUnicode(_)) => Err(format!("{key} must be valid UTF-8")),
@@ -1623,7 +1638,7 @@ mod tests {
         set_hardened_mqtt();
         unsafe { env::set_var("MQTT_TLS_CLIENT_CERT", "/tls/client.crt") };
         unsafe { env::set_var("MQTT_TLS_CLIENT_KEY", "/tls/client.key") };
-        let security = mqtt_security(Mode::Production).unwrap();
+        let security = mqtt_security(Mode::Dev).unwrap();
         assert_eq!(security.username.as_deref(), Some("app"));
         assert_eq!(security.password.as_deref(), Some("a-real-broker-secret"));
         assert_eq!(
@@ -1677,15 +1692,45 @@ mod tests {
             assert!(!err.contains("secret"), "{err}");
         }
         clear_all();
+        // Empty is unset (templating emits `NAME=`), and so still missing in
+        // production.
         unsafe { env::set_var("MQTT_USERNAME", "") };
-        let err = mqtt_security(Mode::Dev).expect_err("an empty value is not unset");
-        assert!(err.contains("MQTT_USERNAME"), "{err}");
+        assert_eq!(mqtt_security(Mode::Dev), Ok(MqttSecurity::default()));
+        let err = mqtt_security(Mode::Production).expect_err("empty is not a credential");
+        assert!(
+            err.contains("MQTT_USERNAME and MQTT_PASSWORD must be set"),
+            "{err}"
+        );
         {
             use std::os::unix::ffi::OsStrExt;
             unsafe { env::set_var("MQTT_USERNAME", std::ffi::OsStr::from_bytes(b"a\xffb")) };
         }
         let err = mqtt_security(Mode::Dev).expect_err("a non-UTF-8 value must fail");
         assert_eq!(err, "MQTT_USERNAME must be valid UTF-8");
+        clear_all();
+    }
+
+    #[test]
+    fn production_refuses_tls_files_that_do_not_exist() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_all();
+        set_hardened_mqtt();
+        assert!(mqtt_security(Mode::Production).is_ok());
+        const CA: &str = "/etc/ssl/certs/ca-certificates.crt";
+        for key in [
+            "MQTT_TLS_CA_FILE",
+            "MQTT_TLS_CLIENT_CERT",
+            "MQTT_TLS_CLIENT_KEY",
+        ] {
+            clear_all();
+            set_hardened_mqtt();
+            unsafe { env::set_var("MQTT_TLS_CLIENT_CERT", CA) };
+            unsafe { env::set_var("MQTT_TLS_CLIENT_KEY", CA) };
+            unsafe { env::set_var(key, "/no/such/mqtt/file.pem") };
+            let err = mqtt_security(Mode::Production).expect_err("a missing file is refused");
+            let expected = format!("{key} must name a readable file when MODE=production");
+            assert_eq!(err, expected);
+        }
         clear_all();
     }
 
@@ -1713,7 +1758,7 @@ mod tests {
              when MODE=production"
         );
         // TLS without credentials is still anonymous.
-        unsafe { env::set_var("MQTT_TLS_CA_FILE", "/ca.pem") };
+        unsafe { env::set_var("MQTT_TLS_CA_FILE", "/etc/ssl/certs/ca-certificates.crt") };
         let err = mqtt_security(Mode::Production).expect_err("an anonymous client is refused");
         assert!(
             err.starts_with("MQTT_USERNAME and MQTT_PASSWORD must be set"),

@@ -40,7 +40,9 @@
       if (response.status === 422) {
         return response.json().then(function (problem) {
           showErrors(form, problem.detail);
-          throw new Error("validation failed");
+          var invalid = new Error("validation failed");
+          invalid.shown = true;
+          throw invalid;
         });
       }
       if (response.type !== "opaqueredirect" && !response.ok) {
@@ -64,10 +66,13 @@
       .then(function () {
         window.location.reload();
       })
-      .catch(function () {
-        // Field errors are already shown inline by submit(); any other
-        // failure leaves the form as-is rather than losing the caller's
-        // input to a full-page error navigation.
+      .catch(function (err) {
+        // Field errors are already shown inline by submit(). Any other
+        // failure (an expired session, a refused role, the rate limit) is
+        // handed to the browser as the plain form post it would have been
+        // without this script, so the server's own error page is shown
+        // rather than nothing.
+        if (!err || !err.shown) form.submit();
       });
   });
 })();

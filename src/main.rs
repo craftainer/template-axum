@@ -102,8 +102,9 @@ async fn main() {
 
     // `into_make_service_with_connect_info` (rather than plain `app.
     // into_make_service()`) makes the caller's socket address available to
-    // handlers via the `ConnectInfo<SocketAddr>` extractor -- src/
-    // rate_limit.rs's per-IP check needs it.
+    // handlers via the `ConnectInfo<SocketAddr>` extractor -- `POST
+    // /mock/token`'s per-IP rate limit needs it (the Hero write limit is keyed
+    // on the token's `sub`).
     let serve = axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),

@@ -629,7 +629,10 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/form")
-                    .header("Authorization", format!("Bearer {}", token("alice", &["viewer"])))
+                    .header(
+                        "Authorization",
+                        format!("Bearer {}", token("alice", &["viewer"])),
+                    )
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -645,7 +648,10 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/form")
-                    .header("Authorization", format!("Bearer {}", token("alice", &["editor"])))
+                    .header(
+                        "Authorization",
+                        format!("Bearer {}", token("alice", &["editor"])),
+                    )
                     .header("Content-Type", "application/x-www-form-urlencoded")
                     .body(Body::from("name=Spectra&powers=flight&power_level=5"))
                     .unwrap(),
@@ -689,7 +695,10 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/form")
-                    .header("Authorization", format!("Bearer {}", token("alice", &["viewer"])))
+                    .header(
+                        "Authorization",
+                        format!("Bearer {}", token("alice", &["viewer"])),
+                    )
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -723,7 +732,10 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/form")
-                    .header("Authorization", format!("Bearer {}", token("alice", &["viewer"])))
+                    .header(
+                        "Authorization",
+                        format!("Bearer {}", token("alice", &["viewer"])),
+                    )
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -741,7 +753,10 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/form")
-                    .header("Authorization", format!("Bearer {}", token("alice", &["editor"])))
+                    .header(
+                        "Authorization",
+                        format!("Bearer {}", token("alice", &["editor"])),
+                    )
                     .header("Content-Type", "application/x-www-form-urlencoded")
                     .body(Body::from("name=&powers=&power_level="))
                     .unwrap(),
@@ -758,7 +773,10 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/form")
-                    .header("Authorization", format!("Bearer {}", token("alice", &["viewer"])))
+                    .header(
+                        "Authorization",
+                        format!("Bearer {}", token("alice", &["viewer"])),
+                    )
                     .header("Content-Type", "application/x-www-form-urlencoded")
                     .body(Body::from("name=Spectra&powers=flight&power_level=5"))
                     .unwrap(),
@@ -884,7 +902,10 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/form")
-                    .header("Authorization", format!("Bearer {}", token("alice", &["security"])))
+                    .header(
+                        "Authorization",
+                        format!("Bearer {}", token("alice", &["security"])),
+                    )
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -916,7 +937,10 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/form")
-                    .header("Authorization", format!("Bearer {}", token_with_no_sub(&["editor"])))
+                    .header(
+                        "Authorization",
+                        format!("Bearer {}", token_with_no_sub(&["editor"])),
+                    )
                     .header("Content-Type", "application/x-www-form-urlencoded")
                     .body(Body::from("name=Spectra&powers=flight&power_level=5"))
                     .unwrap(),
@@ -949,7 +973,10 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/form/1/update")
-                    .header("Authorization", format!("Bearer {}", token("alice", &["viewer"])))
+                    .header(
+                        "Authorization",
+                        format!("Bearer {}", token("alice", &["viewer"])),
+                    )
                     .header("Content-Type", "application/x-www-form-urlencoded")
                     .body(Body::from("name=Renamed&powers=stealth&power_level=9"))
                     .unwrap(),
@@ -966,7 +993,10 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/form/1/update")
-                    .header("Authorization", format!("Bearer {}", token("alice", &["editor"])))
+                    .header(
+                        "Authorization",
+                        format!("Bearer {}", token("alice", &["editor"])),
+                    )
                     .header("Content-Type", "application/x-www-form-urlencoded")
                     .body(Body::from(
                         "name=Renamed&powers=stealth&power_level=not-a-number",
@@ -985,7 +1015,10 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/form/1/update")
-                    .header("Authorization", format!("Bearer {}", token_with_no_sub(&["editor"])))
+                    .header(
+                        "Authorization",
+                        format!("Bearer {}", token_with_no_sub(&["editor"])),
+                    )
                     .header("Content-Type", "application/x-www-form-urlencoded")
                     .body(Body::from("name=Renamed&powers=stealth&power_level=9"))
                     .unwrap(),
@@ -1002,7 +1035,10 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/form/999999/update")
-                    .header("Authorization", format!("Bearer {}", token("alice", &["editor"])))
+                    .header(
+                        "Authorization",
+                        format!("Bearer {}", token("alice", &["editor"])),
+                    )
                     .header("Content-Type", "application/x-www-form-urlencoded")
                     .body(Body::from("name=Renamed&powers=stealth&power_level=9"))
                     .unwrap(),
@@ -1034,7 +1070,10 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/form/1/delete")
-                    .header("Authorization", format!("Bearer {}", token("alice", &["editor"])))
+                    .header(
+                        "Authorization",
+                        format!("Bearer {}", token("alice", &["editor"])),
+                    )
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1069,7 +1108,10 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/form/999999/delete")
-                    .header("Authorization", format!("Bearer {}", token("alice", &["maintainer"])))
+                    .header(
+                        "Authorization",
+                        format!("Bearer {}", token("alice", &["maintainer"])),
+                    )
                     .body(Body::empty())
                     .unwrap(),
             )
