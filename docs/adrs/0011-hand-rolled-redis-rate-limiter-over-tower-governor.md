@@ -64,7 +64,11 @@ than adopt `tower_governor`:
 - **Caller identity via `axum::extract::ConnectInfo<SocketAddr>`**
   (`main.rs` now serves via
   `into_make_service_with_connect_info::<SocketAddr>()`), matching
-  `get_remote_address`'s role in the reference.
+  `get_remote_address`'s role in the reference. (Amended by
+  [ADR 0031](0031-owasp-hardening-after-craftainer-crud-0-4.md): the Hero
+  write routes now charge the limit after the role check, keyed on the
+  token's `sub`; only the unauthenticated `POST /mock/token` still uses the
+  peer address.)
 - **`Mode::Mock` gets an in-memory fallback** (`Backend::Mock`, a
   `Mutex<HashMap<String, (u32, Instant)>>` behind the same `check()`
   API) rather than requiring a real Redis connection --

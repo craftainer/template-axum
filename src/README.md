@@ -74,22 +74,43 @@ Hero create/update/delete activity (FR-0030). The resource-agnostic half
 `craftainer_crud::controllers::crud_events`; the transport is
 `craftainer_crud::events` (feature `mqtt` for the broker-backed bus).
 
-The delivery guarantee is narrow and deliberate: a subscriber that
-reconnects with the `subscriber_id` the server issued it gets everything
-published while it was away, because that id (a server-minted capability,
-not a client-chosen name) is part of the client id of a persistent,
-QoS-1 MQTT session. A client that discards it, or sends one the server did
-not mint, gets a new id and no replay, silently. The default minting secret
-is random per process, so an id does not resume across a restart or on
-another replica (`docs/adrs/0020`). `Mode::Mock` has no broker and no
-replay at all. `docs/adrs/0016`, `docs/nfrs/NFR-0029` and the crate's
-`events` module doc all state this; don't paraphrase it into something
-broader.
+Streams are transient (`docs/adrs/0031`): a clean MQTT session, a fresh
+server-minted `subscriber_id` per connection, no replay, and a
+`subscriber_id` or `Last-Event-ID` the client sends back is ignored; a client
+that missed events refetches. A caller (the token's `sub`) holds at most 5
+concurrent streams and a subscriber id at most 2, `429` beyond. Durable
+sessions with replay are an opt-in on the bus
+(`EventBus::with_durable_streams`) that this template does not enable;
+`docs/adrs/0016`, `docs/nfrs/NFR-0029` and the crate's `events` module doc
+state the persistent-session guarantee that would then apply, so don't
+paraphrase it into something broader. `Mode::Mock` has no broker at all.
 
-A mutating handler announces its own event inline (`crud_events::
-publish`) the way it checks its own rate limit — `CrudService` stays free
-of infrastructure concerns (NFR-0004). Publishing never fails the request
-that triggered it.
+A mutating handler announces its own event after the write succeeded
+(`controllers::announce`: a `PendingEvents` committed on the bus, best
+effort, in its own task) the way it checks its own rate limit —
+`CrudService` stays free of infrastructure concerns (NFR-0004). Publishing
+never fails the request that triggered it; a broker failure is logged and
+counted by the bus.
+
+## MQTT transport security
+
+`config::mqtt_security(mode)` reads the broker's security options from the
+environment (held outside `Settings`, like `SUBSCRIBER_SECRET`);
+`build_event_bus(settings, secret, &mqtt)` applies them to the bus
+(`docs/adrs/0031`). `MQTT_HOST`/`MQTT_PORT` stay in `Settings` (the TLS
+port is conventionally 8883; the default stays 1883).
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `MQTT_USERNAME`, `MQTT_PASSWORD` | unset | Broker login; set together. Refused over plaintext unless `MQTT_ALLOW_INSECURE=true`. |
+| `MQTT_TLS_CA_FILE` | unset | PEM bundle the broker is verified against (the only trust anchor; point it at `/etc/ssl/certs/ca-certificates.crt` for the system store). Setting it turns TLS on: TLS 1.2 or later, host name always verified. |
+| `MQTT_TLS_CLIENT_CERT`, `MQTT_TLS_CLIENT_KEY` | unset | Mutual TLS; set together, need the CA file. The key is PKCS#8 PEM. |
+| `MQTT_ALLOW_INSECURE` | `false` | `true` allows credentials over a plaintext link (a local broker). Refused under `MODE=production`. |
+
+`MODE=production` requires the CA file and the credentials. The password
+never appears in an error message or in `Debug` output. The build needs
+`pkg-config`/`libssl-dev` and the runtime image `libssl3` (the feature uses
+the system OpenSSL, not rustls).
 
 ## Generic vs. Hero-specific split
 
@@ -207,7 +228,7 @@ shorter it fails in every mode; the message never contains the value. Unset
 restart nor a second replica; set the same value on every replica to let a
 client resume across both. `config::subscriber_secret(mode)` reads it; `main`
 checks it before opening any connection, `build_state_with_db` passes it to
-`build_event_bus(settings, secret)` (`EventBus::with_subscriber_secret`).
+`build_event_bus(settings, secret, &mqtt)` (`EventBus::with_subscriber_secret`).
 It is deliberately not a `Settings` field, so no `Debug` output of the
 settings can print it. `docs/adrs/0020` records the decision.
 
@@ -313,14 +334,18 @@ via the now-`pub` `Claims::granted_roles`.
 ## MODE (dev / mock / production)
 
 `config::Mode` (env var `MODE`) is `dev`, `mock`, or `production`, read
-once in `main()`.
+once in `main()`. **There is no default**: an unset (or empty) `MODE` makes
+startup exit 1 with `invalid configuration: MODE must be set ...`, so a
+deployment that forgets it cannot fall back to the mode that skips the
+production checks. The devcontainer's `myapp` service (`compose.instance.yml`),
+the image smoke and perf stacks and the tests set it explicitly.
 
-- `dev` (default): real Postgres/Redis/S3/OIDC/MQTT backends.
+- `dev`: real Postgres/Redis/S3/OIDC/MQTT backends.
 - `mock`: every external service is replaced with a local fake — the
   in-memory Hero repository, always-healthy mock health checks, an
   in-memory event bus, and unverified bearer-token trust — so the app
   needs zero containers to boot. Requires `ALLOW_MOCK_MODE=1` (`Settings::allow_mock_mode`), so
-  this mode can never be reached by `MODE`'s own default/typo alone.
+  this mode can never be reached by a `MODE` typo alone.
   `POST /mock/token` (`generic::controllers::mock`, mounted only in this mode)
   mints a Keycloak-shaped token so RBAC is exercisable without
   Keycloak.

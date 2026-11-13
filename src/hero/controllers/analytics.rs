@@ -20,7 +20,8 @@
 //! - `Analytics-Consent: 1` sets `consent`. It matters only with
 //!   `ANALYTICS_CONSENT=opt-in`, where no event is recorded for a request
 //!   without it. A browser never sends this header by itself: a front end
-//!   or BFF that has collected consent adds it to its calls.
+//!   or BFF that has collected consent adds it to its calls, and the BFF
+//!   must strip any copy the client sent (the header is a bare claim).
 //!
 //! `build_router` applies the layer to the whole router, so no handler can
 //! call `track()` outside a request context and skip the GPC/consent
@@ -48,29 +49,22 @@ use craftainer_observability::analytics::{track, RequestContext};
 
 use crate::hero::models::hero;
 
-/// The header a front end or BFF sets to `1` once the visitor consented
-/// (`ANALYTICS_CONSENT=opt-in`). Exactly this name; backends read only it.
-pub const CONSENT_HEADER: &str = "Analytics-Consent";
-
 /// The route path every Hero event is attributed to.
 pub const HERO_URL: &str = "/crud/v1/heroes/v2/json";
 
-/// Whether header `name` is present with the value `1` (the only value that
-/// counts).
-fn signalled(headers: &HeaderMap, name: &str) -> bool {
-    headers
-        .get(name)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value.trim() == "1")
-}
-
 /// What `headers` say about tracking: GPC (`Sec-GPC: 1` or `DNT: 1`) and
-/// consent (`Analytics-Consent: 1`).
+/// consent (`Analytics-Consent: 1`), read by the library's
+/// `RequestContext::from_headers`. Only the exact value `1` counts, a
+/// repeated `Analytics-Consent` counts only if every copy is `1`, and a
+/// header that is not UTF-8 is not a signal.
+///
+/// `Analytics-Consent` is a claim any caller can make. Under
+/// `ANALYTICS_CONSENT=opt-in` the guarantee holds only if the BFF in front of
+/// this service strips the client's copy and sets its own from the visitor's
+/// recorded choice; a service reachable without the BFF must not run opt-in
+/// (`docs/adrs/0029`).
 pub fn request_context(headers: &HeaderMap) -> RequestContext {
-    RequestContext {
-        gpc: signalled(headers, "Sec-GPC") || signalled(headers, "DNT"),
-        consent: signalled(headers, CONSENT_HEADER),
-    }
+    RequestContext::from_headers(headers)
 }
 
 /// axum middleware (`axum::middleware::from_fn`): runs each request inside
@@ -113,7 +107,6 @@ mod tests {
     fn gpc_and_dnt_each_set_gpc_and_only_the_value_one_counts() {
         assert!(request_context(&headers(&[("sec-gpc", "1")])).gpc);
         assert!(request_context(&headers(&[("dnt", "1")])).gpc);
-        assert!(request_context(&headers(&[("dnt", " 1 ")])).gpc);
         assert!(!request_context(&headers(&[("sec-gpc", "0")])).gpc);
         assert!(!request_context(&headers(&[("dnt", "yes")])).gpc);
         assert!(!request_context(&HeaderMap::new()).gpc);
@@ -125,6 +118,18 @@ mod tests {
         assert!(!request_context(&headers(&[("analytics-consent", "true")])).consent);
         assert!(!request_context(&headers(&[("x-analytics-consent", "1")])).consent);
         assert!(!request_context(&HeaderMap::new()).consent);
+    }
+
+    #[test]
+    fn a_repeated_consent_header_counts_only_if_every_copy_is_one() {
+        let mut map = HeaderMap::new();
+        map.append("analytics-consent", HeaderValue::from_static("1"));
+        map.append("analytics-consent", HeaderValue::from_static("0"));
+        assert!(!request_context(&map).consent);
+        let mut map = HeaderMap::new();
+        map.append("analytics-consent", HeaderValue::from_static("1"));
+        map.append("analytics-consent", HeaderValue::from_static("1"));
+        assert!(request_context(&map).consent);
     }
 
     #[test]

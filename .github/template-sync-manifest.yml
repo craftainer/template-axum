@@ -113,8 +113,10 @@ replace:
   # .github/template-sync-manifest.local.yml.
   - scripts/develop.d/10-rust.sh
   - scripts/develop.d/20-stack-tools.sh
+  - scripts/develop.d/30-libssl.sh
   - scripts/post-create.d/10-cargo-build.sh
   - scripts/runner-setup.d/10-ca-certificates.sh
+  - scripts/runner-setup.d/20-libssl3.sh
   - scripts/image-scan.sh
   - scripts/image-dast.sh
   - scripts/skopeo.sh

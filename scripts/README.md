@@ -72,9 +72,14 @@
   devcontainer tooling: the pinned Rust toolchain with `cargo-audit` and
   `cargo-llvm-cov`; then the CLIs for the backing-services stack
   (`psql`, `redis-cli`, `rc`, `kcadm`).
+- `develop.d/30-libssl.sh` — `pkg-config` and `libssl-dev`, which the
+  `mqtt-tls` feature of `craftainer-crud` (rumqttc over the system OpenSSL)
+  builds against; the `builder` stage installs the same in `builder.sh`.
 - `post-create.d/10-cargo-build.sh` — warms the cargo target dir.
 - `runner-setup.d/10-ca-certificates.sh` — installs the runtime CA trust
   store.
+- `runner-setup.d/20-libssl3.sh` — installs `libssl3`, the OpenSSL runtime
+  library the `mqtt-tls` feature links.
 - `builder.sh` — the `builder` stage's tooling setup (apt packages only;
   Rust/cargo come from the stage's own `rust:` base image).
 - `builder-sync-deps.sh` / `builder-sync-app.sh` — the `builder` stage's two

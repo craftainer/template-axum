@@ -315,7 +315,7 @@ async fn hero_and_audit_role_journey(client: &reqwest::Client, backend: Backend)
         .get(format!(
             "{BASE_URL}/crud/v1/heroes/v2/json?only_archived=true&id__in={id}"
         ))
-        .bearer_auth(&viewer)
+        .bearer_auth(&maintainer)
         .send()
         .await
         .unwrap()

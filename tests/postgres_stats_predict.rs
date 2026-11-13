@@ -107,7 +107,7 @@ async fn stats_lifecycle_counts_archived_rows_separately_from_the_visible_total(
                 "GET",
                 "/stats?include_archived=true",
                 "alice",
-                &["viewer"],
+                &["maintainer"],
                 serde_json::Value::Null,
             ))
             .await

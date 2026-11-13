@@ -11,13 +11,15 @@ The system shall expose `GET /crud/v1/heroes/v2/json/events` as a
 (`create`, `update`, `update_many`, `delete`, `delete_many`), the
 resource, the record ids it affected, and when it happened.
 
-The stream shall issue every connection a `subscriber_id` and shall
-replay, to a reconnecting client presenting the same `subscriber_id`,
-every event published while that subscriber was disconnected — within the
-broker's own bounds (`max_queued_messages 1000`,
-`persistent_client_expiration 1h`). A client that reconnects without a
-`subscriber_id` shall receive a working stream with a new id and no
-replay.
+The stream shall issue every connection a `subscriber_id`. Streams are
+transient (ADR 0031): the connection uses a clean session, so a
+reconnecting client receives a working stream with a new id and no replay,
+whatever `subscriber_id` or `Last-Event-ID` it presents, and a client that
+missed events refetches. (Durable sessions with replay, within the broker's
+own bounds, remain available on the bus as an opt-in this template does not
+enable; ADR 0016 describes that mechanism.) A caller shall hold at most 5
+concurrent streams and a subscriber id at most 2; a further stream is
+refused with `429`.
 
 ## Source
 
@@ -33,10 +35,11 @@ sessions + QoS 1 via `rumqttc`), NFR-0029 for the guarantee's scope, and
 - Every subsequent frame carries `event: <action>`, `id: <subscriber_id>`,
   and a JSON `data:` object with `resource`, `action`, `ids` and
   `occurred_at`.
-- A `subscriber_id` is taken from `?subscriber_id=` if present, otherwise
-  from the `Last-Event-ID` header, otherwise freshly issued. An id that
-  is empty, longer than 64 characters, or contains anything outside
-  `[A-Za-z0-9_-]` is treated as absent, not as an error.
+- Every connection is issued a fresh server-minted `subscriber_id`; one the
+  client sends (`?subscriber_id=` or `Last-Event-ID`) is ignored, not an
+  error.
+- A sixth concurrent stream for one caller (the token's `sub`) is `429`;
+  another caller is unaffected, and a closed stream frees its slot.
 - A create publishes one `create` event carrying the new record's id; a
   single-record update/delete publishes `update`/`delete` with that id; a
   bulk update/delete publishes `update_many`/`delete_many` with every
@@ -56,7 +59,7 @@ sessions + QoS 1 via `rumqttc`), NFR-0029 for the guarantee's scope, and
   `events_requires_a_read_role_and_a_token`/
   `a_created_hero_is_announced_on_the_event_stream`/
   `a_bulk_delete_is_announced_with_every_affected_id` against the
-  `Mode::Mock` bus, and end-to-end — including the reconnect replay this
-  requirement's second paragraph promises — by the `craftainer-crud` crate's
+  `Mode::Mock` bus (`events_streams_are_capped_per_caller` for the cap), and
+  end-to-end by the `craftainer-crud` crate's
   `mqtt`-feature tests against a real Mosquitto service (the app's own
   `tests/mqtt_event_bus.rs` covers its wiring of the bus).

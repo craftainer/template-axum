@@ -5,3 +5,18 @@
 id = "RUSTSEC-2026-0214"
 ignoreUntil = 2026-12-31T00:00:00Z
 reason = "Unmaintained notice, no fix available; only via goose 0.18.1 in tests/perf (dev-only load-test client, not in the app image). Re-check on expiry."
+
+# TEMPORARY ignore (decision 2026-11-12, follows lib-crud-rs#36; expires 2027-01-09).
+#
+# RUSTSEC-2026-0459 (C SQLite CVE-2026-119375) is reported against
+# libsqlite3-sys, which appears in Cargo.lock (0.30.1) only because cargo
+# locks optional dependencies reached through weak dependency features.
+# SQLite is never compiled: `cargo tree --locked --workspace -i
+# libsqlite3-sys --all-features --target all -e normal,build,dev` (and the
+# same for sqlx-sqlite) prints "nothing to print". The fixed libsqlite3-sys
+# 0.39 is unreachable: sqlx-sqlite 0.9.0 (the latest sqlx) caps it below 0.38.
+# Remove once a sqlx release allows libsqlite3-sys >= 0.39.
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0459"
+ignoreUntil = 2027-01-09T00:00:00Z
+reason = "libsqlite3-sys 0.30.1 is in Cargo.lock only via sqlx weak optional-dependency features and is never compiled: cargo tree (all features, all targets, normal/build/dev, whole workspace) shows neither libsqlite3-sys nor sqlx-sqlite. The fix (libsqlite3-sys >= 0.39) is unreachable because sqlx-sqlite 0.9.0, the latest sqlx, caps it below 0.38. Temporary decision 2026-11-12 (lib-crud-rs#36 precedent); remove once a sqlx release allows libsqlite3-sys >= 0.39."
