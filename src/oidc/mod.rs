@@ -808,7 +808,9 @@ mod tests {
     /// An RS256 token for `idp`, signed with `der` and carrying `kid`.
     fn signed_token(idp: &FakeIdp, der: &str, kid: &str) -> String {
         use base64::Engine;
-        let der = base64::engine::general_purpose::STANDARD.decode(der).unwrap();
+        let der = base64::engine::general_purpose::STANDARD
+            .decode(der)
+            .unwrap();
         let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256);
         header.kid = Some(kid.to_string());
         let exp = std::time::SystemTime::now()
@@ -853,7 +855,10 @@ mod tests {
         }))
         .await;
         for result in results {
-            assert!(matches!(result, Err(AppError::InvalidToken(_))), "{result:?}");
+            assert!(
+                matches!(result, Err(AppError::InvalidToken(_))),
+                "{result:?}"
+            );
         }
         assert_eq!(idp.hits(), 1, "ten concurrent requests, one fetch");
 

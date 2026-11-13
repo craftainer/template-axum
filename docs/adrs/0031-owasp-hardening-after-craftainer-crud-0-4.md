@@ -194,4 +194,3 @@ the pieces needed to fix several (`craftainer-crud` 0.4.0,
    that runs the whole suite, together with confirming against the
    `craftainer-crud` version in use that a transient bus never resumes a
    presented id. Until then it stays as documented in ADR 0020.
-
