@@ -131,6 +131,15 @@ impl IntoResponse for AppError {
             axum::http::header::CONTENT_TYPE,
             "application/problem+json".parse().unwrap(),
         );
+        if status == StatusCode::TOO_MANY_REQUESTS {
+            // Every limit in this app is a fixed 60-second window
+            // (`rate_limit::RateLimiter::check`), so waiting that long is
+            // always enough; RFC 6585 section 4 / RFC 9110 section 10.2.3.
+            response.headers_mut().insert(
+                axum::http::header::RETRY_AFTER,
+                HeaderValue::from_static("60"),
+            );
+        }
         if status == StatusCode::UNAUTHORIZED {
             // Without a configured `resource_metadata` URL (which only
             // `add_resource_metadata` below knows); the router layer
@@ -346,6 +355,15 @@ mod tests {
         assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
         let body = body_json(response).await;
         assert_eq!(body["detail"], "rate limit exceeded");
+    }
+
+    #[tokio::test]
+    async fn too_many_requests_says_when_to_retry() {
+        let response = AppError::TooManyRequests("slow down".to_string()).into_response();
+        assert_eq!(
+            response.headers().get(axum::http::header::RETRY_AFTER),
+            Some(&HeaderValue::from_static("60"))
+        );
     }
 
     #[tokio::test]

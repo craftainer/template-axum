@@ -4,7 +4,9 @@ Provider-agnostic OIDC bearer-token validation plus Keycloak client-role
 RBAC — see `docs/adrs/0003-auth-strategy-provider-agnostic-oidc.md`.
 
 - `OidcVerifier` — fetches OIDC discovery + JWKS from
-  `ResourceServer::discovery_url`, caches the key set for 5 minutes, and
+  `ResourceServer::discovery_url`, caches the key set for 5 minutes (a token
+  with an unknown `kid` refetches it: one fetch at a time, at most one per
+  30 s, cached keys kept if the fetch fails; `docs/adrs/0031` addendum), and
   verifies a bearer token's signature, exact issuer, expiry and
   audience (always; `OIDC_AUDIENCE`, default `api`). A rejected token is
   `AppError::InvalidToken`. Under `Mode::Mock`, verification is skipped

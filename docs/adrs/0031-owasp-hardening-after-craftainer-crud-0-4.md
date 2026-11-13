@@ -145,8 +145,7 @@ the pieces needed to fix several (`craftainer-crud` 0.4.0,
   in a cookie. Anything that linked to `/heroes/form?token=` must use the
   bearer header or the session form.
 - `If-Match`/optimistic concurrency (`lib-crud-rs` 0.5, a breaking repository
-  change), a TLS listener and authentication on the dev broker, a detached
-  single-flight JWKS refresh with key-rotation refetch, and request/body
+  change), a TLS listener and authentication on the dev broker, request/body
   limits at the HTTP edge are not part of this change.
 - `libsqlite3-sys` 0.30.1 is in `Cargo.lock` only through optional weak
   dependency features of `sqlx`; `cargo tree` for the whole workspace, all
@@ -154,3 +153,45 @@ the pieces needed to fix several (`craftainer-crud` 0.4.0,
   compiled in. `osv-scanner.toml` carries a dated ignore until 2027-01-09 for
   the lockfile-based scan, to be removed when a `sqlx` release allows
   `libsqlite3-sys` 0.39.
+
+## Addendum: follow-ups (JWKS refetch, session limit, `SUBSCRIBER_SECRET`)
+
+1. **JWKS: single flight, unknown-`kid` refetch, cooldown.** A token whose
+   `kid` the cached key set lacks (what a signing-key rotation looks like)
+   refetches the key set instead of waiting out the 5-minute cache. Refetches
+   are serialised behind one lock held for the whole fetch, and a request that
+   queued behind a fetch uses its outcome instead of fetching again, so ten
+   concurrent unknown-`kid` requests cost one fetch. No attempt starts within
+   30 s of the last one (successful or not), so attacker-chosen `kid`s cannot
+   make the app hammer the identity provider; an unknown `kid` after the
+   refetch (or inside the cooldown) is `401`. A failed fetch keeps the cached
+   keys serving, for up to an hour past their 5-minute expiry; with nothing
+   usable cached the answer is `503`. The first fetch after start-up is exempt
+   from the cooldown (nothing to fall back on) but still single-flight. The
+   30 s and one-hour bounds are constants in `oidc/mod.rs`, not settings.
+2. **`POST /heroes/form/session` is rate-limited.** It is the one route that
+   verifies a caller-supplied token before there is any identity, so it is
+   limited per peer address (10 per minute, the same limiter and fixed window
+   as `POST /mock/token`), after the cross-site check and before the token is
+   looked at. `429` responses (here and for the hero write limit and
+   `POST /mock/token`) now carry `Retry-After: 60`, the window length. Behind
+   a proxy or BFF the peer address is the proxy's, so the budget is shared by
+   everyone it fronts; the page is meant for direct use, and the JSON API
+   (keyed on `sub`) is unaffected.
+3. **`SUBSCRIBER_SECRET`: recommended for removal, not removed here.** It
+   signs the subscriber ids `/events` mints so a client can resume a
+   *durable* session on any replica. Streams are transient and a
+   client-supplied id is ignored (decision 3), so no deployment can use the
+   signature for anything: a random per-process key is equivalent, and
+   requiring a 32-character secret in production is configuration with no
+   effect (and a reason for a deployment to fail to start). The recommendation
+   is to delete `config::subscriber_secret`, its start-up check in `main`, the
+   `subscriber_secret` parameter of `build_event_bus` and the production
+   requirement, and to ignore a set value rather than reject it (existing
+   deployments set it). It is not part of this change because it touches the
+   public `build_event_bus` signature, `main`, `config`, `lib` and two test files,
+   and was written without a local compiler; it should be done in a change
+   that runs the whole suite, together with confirming against the
+   `craftainer-crud` version in use that a transient bus never resumes a
+   presented id. Until then it stays as documented in ADR 0020.
+
