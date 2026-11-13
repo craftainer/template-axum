@@ -141,10 +141,7 @@ fn resource_server(settings: &Settings) -> ResourceServer {
 /// the bus rejects the combination (`EventBus::validate`); `Settings::
 /// from_env` has already refused every such combination, so that is a
 /// programming error.
-pub fn build_event_bus(
-    settings: &Settings,
-    mqtt: &config::MqttSecurity,
-) -> EventBus {
+pub fn build_event_bus(settings: &Settings, mqtt: &config::MqttSecurity) -> EventBus {
     let mut bus = if settings.mode == Mode::Mock {
         EventBus::mock()
     } else {

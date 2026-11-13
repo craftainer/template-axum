@@ -1010,7 +1010,10 @@ mod tests {
         for value in ["", "short", &"k".repeat(40)] {
             unsafe { env::set_var("SUBSCRIBER_SECRET", value) };
             assert!(subscriber_secret_is_set());
-            assert!(Settings::from_env().is_ok(), "{value:?} must not be refused");
+            assert!(
+                Settings::from_env().is_ok(),
+                "{value:?} must not be refused"
+            );
         }
         clear_all();
     }
