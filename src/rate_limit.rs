@@ -9,7 +9,8 @@
 //! `storage_uri=settings.redis_url` is across every worker. `docs/adrs/
 //! 0011-hand-rolled-redis-rate-limiter-over-tower-governor.md` records this.
 //!
-//! Checked inline, at the top of a handler body (`RateLimiter::check`),
+//! Checked inline in a handler body (`RateLimiter::check`), after the role
+//! check for authenticated routes and keyed on the token's `sub`,
 //! never as `tower`/`axum::middleware` -- axum's `Router::route` mounts
 //! every HTTP method for a path as one service (see `controllers::heroes`'s
 //! single `"/"` route with `get(...).post(...).patch(...).delete(...)`), so
@@ -23,7 +24,6 @@
 //! instead of Lua+`INCR`+`EXPIRE`.
 
 use std::collections::HashMap;
-use std::net::IpAddr;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -87,19 +87,24 @@ impl RateLimiter {
         }
     }
 
-    /// Check-and-increment `scope`'s counter for `client_ip`, erroring with
+    /// Check-and-increment `scope`'s counter for `key`, erroring with
     /// `AppError::TooManyRequests` once more than `limit` requests land
     /// within a `window_secs`-second fixed window. `scope` namespaces
     /// independent limits (e.g. Hero writes vs. `POST /mock/token`) sharing
     /// the same backend.
+    ///
+    /// `key` says whose budget it is: the authenticated subject (`sub`) for
+    /// routes behind a role check, so one user cannot spend another's budget
+    /// and a proxy or BFF in front does not make everyone share one; the
+    /// peer address for the unauthenticated `POST /mock/token`.
     pub async fn check(
         &self,
         scope: &str,
-        client_ip: IpAddr,
+        key: impl std::fmt::Display,
         limit: u32,
         window_secs: u64,
     ) -> Result<(), AppError> {
-        let key = format!("ratelimit:{scope}:{client_ip}");
+        let key = format!("ratelimit:{scope}:{key}");
         let count = match &self.backend {
             Backend::Redis(manager) => {
                 let mut conn = manager.clone();
@@ -134,6 +139,7 @@ impl RateLimiter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::IpAddr;
 
     fn ip() -> IpAddr {
         "127.0.0.1".parse().unwrap()

@@ -23,10 +23,15 @@ Port of `app/rate_limit.py`. See ADR 0011.
   `Settings::rate_limit_mock_token_per_minute`).
 - Exceeding the limit returns `429` with an
   `application/problem+json` body (`AppError::TooManyRequests`).
-- The counter is keyed by scope + caller IP, so different callers (or
+- The counter is keyed by scope + caller, so different callers (or
   different scopes for the same caller) have independent budgets --
   verified by
   `rate_limit::tests::mock_backend_scopes_counters_independently_per_scope_and_ip`.
+  The caller is the token's `sub` for the Hero write routes and the peer
+  address for the unauthenticated mint-token route (ADR 0031).
+- The Hero write limit is charged after the role check: a caller refused
+  with `403` spends no budget -- verified by
+  `controllers::heroes::tests::the_write_limit_is_charged_after_the_role_check_and_keyed_on_the_subject`.
 - `GET` (list/get) is never rate-limited.
 - Under `Mode::Mock`, the same behavior holds with no Redis container
   running (`NFR-0022`) -- verified by

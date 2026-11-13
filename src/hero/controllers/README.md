@@ -35,8 +35,8 @@ may import from here.
   delete), mounted by `lib.rs` at `/crud/v1/heroes/v2/json`. Owner-
   scoped (`docs/adrs/0007`), soft-deleted (`docs/adrs/0008`), RBAC-gated
   per the role constants above. create/update/delete are rate-limited
-  (`FR-0023`, `docs/adrs/0011`) via `AppState::rate_limiter`, keyed by
-  the caller's `ConnectInfo<SocketAddr>`. list supports filtering/
+  (`FR-0023`, `docs/adrs/0011`, `docs/adrs/0031`) via `AppState::rate_limiter`,
+  charged after the role check and keyed by the token's `sub`. list supports filtering/
   sorting, and update/delete support a bulk form over filters
   (`FR-0025`/`FR-0026`, `docs/adrs/0013`) via `craftainer_crud::controllers::
   crud_query`/`crud_actions`. Also mounts `/stats`/`/predict`
@@ -47,7 +47,7 @@ may import from here.
   what it did on that stream after the write succeeds.
 - `heroes_xml.rs` — the XML sibling of `heroes.rs`, mounted by `lib.rs`
   at `/crud/v1/heroes/v2/xml` (`FR-0027`, `docs/adrs/0014`). Shares
-  `heroes.rs`'s `HERO_FIELD_SPECS`/`HERO_WRITE_RATE_SCOPE` and calls the
+  `heroes.rs`'s `HERO_FIELD_SPECS` and calls the
   exact same `craftainer_crud::controllers::crud_actions` functions — only the
   request/response (de)serialization (`quick_xml` instead of `Json`)
   differs.
@@ -69,7 +69,15 @@ may import from here.
   representation of the same resource at `/heroes/form` /
   `/heroes/components.js`: a progressively-enhanced HTML form, working
   with no JavaScript, calling the same `craftainer_crud::controllers::
-  crud_actions` path as every other sibling (`FR-0034`).
+  crud_actions` path as every other sibling (`FR-0034`). It authenticates
+  with a bearer header or the `HttpOnly` `hero_session` cookie that
+  `POST /heroes/form/session` sets from a token pasted into a form; there is
+  no `?token=` (`docs/adrs/0031`).
+- `mod.rs` also holds the helpers every mutating handler shares:
+  `enforce_write_limit` (the write rate limit, charged after the role check
+  and keyed on the token's `sub`), `announce` (after-commit event delivery),
+  `require_archive_access` (`include_archived`/`only_archived` need
+  `HERO_ARCHIVE_READ_ROLES`) and `enforce_if_match`.
 
 A resource's own router lives here as a small file per resource (e.g.
 `heroes.rs`); the generic CRUD machinery it's built from lives in

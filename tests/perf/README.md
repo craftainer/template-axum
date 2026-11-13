@@ -64,7 +64,7 @@ Mock mode writes the same JSON summary (`perf-summary.json`; its `cpu` is
 `null` unless `PERF_CGROUP_CPU_STAT` is set -- `perf.yml` sets it and
 caps the target at 1 vCPU / 2 GB like real-stack mode).
 
-The two `RATE_LIMIT_*` variables raise the app's per-IP limiters
+The two `RATE_LIMIT_*` variables raise the app's limiters (per token subject for the Hero writes, per IP for `POST /mock/token`)
 (`docs/adrs/0011`; defaults 10 and 20 per minute): every simulated user
 shares the load generator's IP, so at the defaults most writes would
 come back `429` and count as errors.

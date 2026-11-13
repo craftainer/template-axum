@@ -49,7 +49,13 @@ async fn run_to_exit(env: Vec<(&'static str, String)>) -> (Option<i32>, String) 
     let output = tokio::task::spawn_blocking(move || {
         Command::new(env!("CARGO_BIN_EXE_template-axum"))
             // Not inherited: only what the test sets counts.
+            .env_remove("MODE")
             .env_remove("SUBSCRIBER_SECRET")
+            .env_remove("ANALYTICS_CONSENT")
+            .env_remove("MQTT_USERNAME")
+            .env_remove("MQTT_PASSWORD")
+            .env_remove("MQTT_TLS_CA_FILE")
+            .env_remove("MQTT_ALLOW_INSECURE")
             .envs(env)
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
@@ -85,10 +91,50 @@ fn hardened_production_env() -> Vec<(&'static str, String)> {
         ),
         ("PUBLIC_BASE_URL", "https://api.example.com"),
         ("POSTGRES_SSLMODE", "verify-full"),
+        ("MQTT_USERNAME", "app"),
+        ("MQTT_PASSWORD", "a-real-broker-secret"),
+        ("MQTT_TLS_CA_FILE", "/etc/ssl/certs/ca-certificates.crt"),
     ]
     .into_iter()
     .map(|(k, v)| (k, v.to_string()))
     .collect()
+}
+
+#[tokio::test]
+async fn an_unset_mode_exits_with_status_1() {
+    // No default: a deployment that forgets MODE must not start in `dev`.
+    let (code, stderr) = run_to_exit(Vec::new()).await;
+
+    assert_eq!(code, Some(1));
+    assert!(stderr.contains("invalid configuration"), "stderr: {stderr}");
+    assert!(stderr.contains("MODE must be set"), "stderr: {stderr}");
+}
+
+#[tokio::test]
+async fn production_without_mqtt_tls_and_credentials_exits_with_status_1() {
+    let mut env = hardened_production_env();
+    env.retain(|(key, _)| !key.starts_with("MQTT_"));
+    let (code, stderr) = run_to_exit(env).await;
+
+    assert_eq!(code, Some(1));
+    assert!(
+        stderr.contains("MQTT_TLS_CA_FILE must be set"),
+        "stderr: {stderr}"
+    );
+    assert!(!stderr.contains("a-real-broker-secret"), "stderr: {stderr}");
+}
+
+#[tokio::test]
+async fn an_unknown_analytics_value_exits_with_status_1() {
+    let (code, stderr) = run_to_exit(vec![
+        ("MODE", "mock".to_string()),
+        ("ALLOW_MOCK_MODE", "1".to_string()),
+        ("ANALYTICS_CONSENT", "optin".to_string()),
+    ])
+    .await;
+
+    assert_eq!(code, Some(1));
+    assert!(stderr.contains("ANALYTICS_CONSENT"), "stderr: {stderr}");
 }
 
 #[tokio::test]

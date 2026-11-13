@@ -33,14 +33,14 @@ use crate::config::Settings;
 use crate::generic::controllers::{HasRateLimiter, HasSettings};
 use crate::hero::models::hero;
 use crate::hero::views::hero::{HeroCreate, HeroUpdate};
-use crate::oidc::{HasOidcVerifier, OidcVerifier};
+use crate::oidc::{Claims, HasOidcVerifier, OidcVerifier};
 use crate::problem_details::AppError;
 use crate::rate_limit::RateLimiter;
 use craftainer_crud::conditional::{check_if_match, list_etag, record_etag};
 use craftainer_crud::controllers::crud_actions::ListOrGet;
 use craftainer_crud::controllers::crud_query::parse_include_archived;
 use craftainer_crud::crud::CrudService;
-use craftainer_crud::events::EventBus;
+use craftainer_crud::events::{CrudEvent, EventAction, EventBus, PendingEvents};
 use craftainer_crud::stats_cache::CachedStats;
 use craftainer_observability::health::router::HasHealthRegistry;
 use craftainer_observability::health::HealthRegistry;
@@ -60,6 +60,13 @@ pub const HERO_READ_ROLES: &[&str] = &["viewer", "editor", "maintainer", "detect
 pub const HERO_WRITE_ROLES: &[&str] = &["editor", "maintainer"];
 /// Hero's delete-role set: `maintainer` alone can delete.
 pub const HERO_DELETE_ROLES: &[&str] = &["maintainer"];
+/// Who may read archived (soft-deleted) rows: `maintainer` alone, the role
+/// that can archive them. Reads are open to every owner's live rows, but a
+/// soft-deleted row is one its owner chose to remove, and
+/// `craftainer-crud` leaves gating `include_archived`/`only_archived` to the
+/// host. This template has no `admin` role (`FR-0015`); `maintainer` is its
+/// most privileged one.
+pub const HERO_ARCHIVE_READ_ROLES: &[&str] = &["maintainer"];
 
 /// Shared application state -- one instance built at startup in `main.rs`,
 /// cloned (cheaply, via `Arc`) into every request.
@@ -88,6 +95,50 @@ pub struct AppState {
 /// both announce onto the same topic.
 pub const HERO_EVENT_RESOURCE: &str = "heroes";
 
+/// Rate-limit scope key (`src/rate_limit.rs`) shared by create/update/
+/// delete in every representation, so a single record edit draws on the same
+/// per-caller budget as every other mutating call and the JSON, XML, v1 and
+/// form routers do not each get their own.
+pub(crate) const HERO_WRITE_RATE_SCOPE: &str = "hero-write";
+
+/// Charge one write against the caller's budget (`RATE_LIMIT_HERO_WRITE_PER_
+/// MINUTE`), keyed on the token's `sub` (`docs/adrs/0011`).
+///
+/// Call it after `require_any_role`: a caller the role check refuses must not
+/// spend, or drain, the budget of the users it shares a proxy with, and
+/// the key is a verified identity, not the peer address (which behind the BFF
+/// is the same for everybody).
+pub(crate) async fn enforce_write_limit(state: &AppState, claims: &Claims) -> Result<(), AppError> {
+    state
+        .rate_limiter
+        .check(
+            HERO_WRITE_RATE_SCOPE,
+            claims.subject()?,
+            state.settings.rate_limit_hero_write_per_minute,
+            60,
+        )
+        .await
+}
+
+/// Announce a completed Hero write on the event bus (`docs/adrs/0016`).
+///
+/// The write has already been committed -- every handler calls this only
+/// after its repository call succeeded, and each write is one statement
+/// (`docs/adrs/0028`), so there is no enclosing transaction to roll back --
+/// and the event goes through `PendingEvents::commit`: recorded, then
+/// delivered after the commit, best effort. A broker failure is logged and
+/// counted by the bus, never turned into a failed request. Delivery runs in
+/// its own task so a client that disconnects mid-request (cancelling the
+/// handler) cannot drop an event for a write that was committed.
+pub(crate) async fn announce(state: &AppState, action: EventAction, ids: Vec<i32>) {
+    let mut pending = PendingEvents::new();
+    pending.record(CrudEvent::new(HERO_EVENT_RESOURCE, action, ids));
+    let bus = Arc::clone(&state.events);
+    // `commit` does not fail, so the only error is the task being cancelled
+    // by a runtime shutdown, when there is nobody left to tell.
+    let _ = tokio::spawn(async move { pending.commit(&bus).await }).await;
+}
+
 /// The `ETag` a `GET` of `result` carries (`docs/adrs/0023`): strong over
 /// one record, weak over a page. Shared by the four JSON/XML routers, so a
 /// row has the same tag whichever representation or version served it.
@@ -98,14 +149,33 @@ pub(crate) fn read_etag(result: &ListOrGet<hero::Model>) -> String {
     }
 }
 
+/// Refuse (`403`) a read that asks for archived rows
+/// (`include_archived=true` or `only_archived=true`) unless the caller holds a
+/// `HERO_ARCHIVE_READ_ROLES` role; a request that does not ask passes.
+///
+/// Call it after the flags parsed (so a malformed flag stays a `422`) and
+/// before the data is read, on every route that reads rows.
+pub(crate) fn require_archive_access(
+    state: &AppState,
+    claims: &Claims,
+    requested: bool,
+) -> Result<(), AppError> {
+    if requested {
+        claims.require_any_role(&state.settings.oidc_client_id, HERO_ARCHIVE_READ_ROLES)?;
+    }
+    Ok(())
+}
+
 /// Honour `If-Match` on a single-record `PATCH`/`DELETE` (`docs/adrs/0023`):
 /// `412` when the header is present and does not match the record's current
 /// tag. Returns without checking when the header is absent, when `id` is
 /// `None` (a bulk write has no one representation to compare) and when the
 /// record does not exist (the write's own `404` follows). The record is read
-/// with the same `include_archived` visibility the write sees.
+/// with the same `include_archived` visibility the write sees, which only a
+/// caller with archive access may ask for.
 pub(crate) async fn enforce_if_match(
     state: &AppState,
+    claims: &Claims,
     headers: &HeaderMap,
     id: Option<i32>,
     raw_params: &[(String, String)],
@@ -118,6 +188,7 @@ pub(crate) async fn enforce_if_match(
     }
     let include_archived =
         parse_include_archived(raw_params).map_err(AppError::UnprocessableEntity)?;
+    require_archive_access(state, claims, include_archived)?;
     if let Some(current) = state.hero_crud.get(id, include_archived).await? {
         check_if_match(headers, &record_etag(&current), "Hero")?;
     }

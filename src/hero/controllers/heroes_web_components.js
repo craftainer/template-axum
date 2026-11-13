@@ -1,13 +1,13 @@
 // Progressive enhancement for /heroes/form (FR-0034): every form still
 // works with this script absent (a plain HTML POST/redirect round trip
 // against controllers::heroes_web's own handlers). Once loaded, this
-// intercepts the same forms and drives the existing JSON API
-// (controllers::heroes, /crud/v1/heroes/v2/json) via fetch instead, so a
-// create/update/delete no longer needs a full page navigation.
+// intercepts the same forms and submits them with fetch instead, to the same
+// endpoints and with the same HttpOnly session cookie (credentials:
+// "same-origin"), so a create/update/delete no longer needs a full page
+// navigation and a validation error shows inline. No token is read or kept
+// here: the page never contains one and script cannot read the cookie.
 (function () {
   "use strict";
-
-  var token = document.body.getAttribute("data-token") || "";
 
   function clearErrors(form) {
     var existing = form.querySelector(".errors");
@@ -26,37 +26,26 @@
     form.prepend(list);
   }
 
-  function payloadFrom(form) {
-    var powersRaw = form.elements.powers ? form.elements.powers.value : "";
-    var powers = powersRaw
-      .split(",")
-      .map(function (p) { return p.trim(); })
-      .filter(function (p) { return p.length > 0; });
-    var payload = {};
-    if (form.elements.name) payload.name = form.elements.name.value;
-    if (form.elements.powers) payload.powers = powers;
-    if (form.elements.power_level) {
-      var raw = form.elements.power_level.value.trim();
-      payload.power_level = raw === "" ? null : Number(raw);
-    }
-    return payload;
-  }
-
   function submit(form) {
-    var url = form.getAttribute("data-json-action");
-    var method = form.getAttribute("data-json-method");
-    var body = method === "DELETE" ? undefined : JSON.stringify(payloadFrom(form));
-    var headers = { "Authorization": "Bearer " + token };
-    if (body !== undefined) headers["Content-Type"] = "application/json";
-
-    return fetch(url, { method: method, headers: headers, body: body }).then(function (response) {
+    // The form's own method and action, with its fields urlencoded exactly as
+    // a plain submission would send them. `redirect: "manual"` stops fetch
+    // from following the 303 back to the page: success is an opaque redirect.
+    var body = new URLSearchParams(new FormData(form));
+    return fetch(form.action, {
+      method: form.method.toUpperCase(),
+      body: body,
+      credentials: "same-origin",
+      redirect: "manual",
+    }).then(function (response) {
       if (response.status === 422) {
         return response.json().then(function (problem) {
           showErrors(form, problem.detail);
-          throw new Error("validation failed");
+          var invalid = new Error("validation failed");
+          invalid.shown = true;
+          throw invalid;
         });
       }
-      if (!response.ok) {
+      if (response.type !== "opaqueredirect" && !response.ok) {
         throw new Error("request failed: " + response.status);
       }
       clearErrors(form);
@@ -66,19 +55,24 @@
 
   document.addEventListener("submit", function (event) {
     var form = event.target;
-    if (!form.classList || !form.classList.contains("hero-form") && !form.classList.contains("hero-delete-form")) {
+    if (
+      !form.classList ||
+      !(form.classList.contains("hero-form") || form.classList.contains("hero-delete-form"))
+    ) {
       return;
     }
-    if (!form.hasAttribute("data-json-action")) return;
     event.preventDefault();
     submit(form)
       .then(function () {
         window.location.reload();
       })
-      .catch(function () {
-        // Field errors are already shown inline by submit(); any other
-        // failure leaves the form as-is rather than losing the caller's
-        // input to a full-page error navigation.
+      .catch(function (err) {
+        // Field errors are already shown inline by submit(). Any other
+        // failure (an expired session, a refused role, the rate limit) is
+        // handed to the browser as the plain form post it would have been
+        // without this script, so the server's own error page is shown
+        // rather than nothing.
+        if (!err || !err.shown) form.submit();
       });
   });
 })();

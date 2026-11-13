@@ -375,7 +375,7 @@ async fn hero_events_honour_gpc_dnt_consent_and_the_prop_allowlist() {
     // The client the pin installs is the `none` backend, while the
     // environment alone would have selected the stand-in.
     assert_eq!(AnalyticsConfig::default().backend, Backend::None);
-    assert_eq!(AnalyticsConfig::from_env().backend, Backend::Umami);
+    assert_eq!(AnalyticsConfig::from_env().unwrap().backend, Backend::Umami);
     common::disable_analytics();
     let created = create_hero(&app, &editor, &hero).await;
     assert_eq!(

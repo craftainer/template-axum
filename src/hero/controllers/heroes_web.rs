@@ -2,59 +2,125 @@
 //! (`FR-0034`, ports the reference's `FR-0009`). `GET /heroes/form` works
 //! as a plain no-JS `<form>` against server-rendered HTML;
 //! `GET /heroes/components.js` is vanilla JS that, once loaded,
-//! intercepts those same forms and drives the *existing* JSON API
-//! (`controllers::heroes`) via `fetch` instead, so create/update/delete
-//! don't need a full page navigation once JS is available -- but every
-//! capability keeps working with JS disabled, through this router's own
-//! handlers, which reuse `views::hero_form`'s conversion into the exact
-//! same `HeroCreate`/`HeroUpdate`/`CrudService` path the JSON router
-//! uses.
+//! intercepts those same forms and submits them with `fetch` instead (same
+//! endpoints, same cookie), so create/update/delete don't need a full page
+//! navigation once JS is available -- but every capability keeps working
+//! with JS disabled, through this router's own handlers, which reuse
+//! `views::hero_form`'s conversion into the exact same
+//! `HeroCreate`/`HeroUpdate`/`CrudService` path the JSON router uses.
 //!
-//! **Auth, and why this router alone accepts `?token=`:** this app's only
-//! auth mechanism is a bearer token (`oidc::AuthClaims`); it has no
-//! browser session/cookie login flow (the `openidconnect`/`oauth2`
-//! crates get added to `Cargo.toml` when OIDC login is wired up). A plain HTML
-//! navigation can't attach an `Authorization` header, so this router's own
-//! `WebAuthClaims` extractor additionally accepts the
-//! token via `?token=`, and every link/form this router renders carries it
-//! forward in its `action`/`href`. This is a deliberate,
-//! narrow scope decision for demonstrating progressive enhancement over
-//! the existing JSON API -- not a general browser-auth mechanism, and not
-//! something any other router in this app does.
+//! **Auth (`docs/adrs/0031`):** this app's only auth mechanism is a bearer
+//! token (`oidc::AuthClaims`); it has no OIDC login flow of its own. A plain
+//! HTML navigation can't attach an `Authorization` header, and a token in the
+//! URL (`?token=`) is what RFC 6750 section 2.3 says SHOULD NOT be used: it
+//! lands in history, proxy and access logs and in the server's own request
+//! span. So this router's `WebAuthClaims` extractor takes the token from
+//!
+//! 1. `Authorization: Bearer` (RFC 6750 section 2.1; API clients and
+//!    tests), or
+//! 2. the `hero_session` cookie, which `POST /heroes/form/session` sets after
+//!    verifying a token the user pasted into a form (RFC 6750 section 2.2: a
+//!    form-encoded body, never the URL). The cookie is `HttpOnly` (script
+//!    cannot read it), `SameSite=Strict`, scoped to `/heroes`, `Secure`
+//!    whenever `PUBLIC_BASE_URL` is https, and lives one hour at most; the
+//!    token inside is verified again on every request, so it cannot outlive
+//!    its own `exp`.
+//!
+//! A cookie is ambient authority, so unsafe requests authenticated by it
+//! (and the session routes themselves) are refused when the browser says
+//! the request is cross-site (`Sec-Fetch-Site`), on top of `SameSite`
+//! (OWASP CSRF cheat sheet, fetch-metadata defence). No token is ever
+//! rendered into a page or a URL. This is a deliberate, narrow scope
+//! decision for demonstrating progressive enhancement over the existing
+//! resource -- not a general browser-auth mechanism (that is the BFF's
+//! job), and not something any other router in this app does.
 
-use std::net::SocketAddr;
-
-use axum::extract::{ConnectInfo, Path, Query, State};
-use axum::http::header::AUTHORIZATION;
+use axum::extract::{Path, State};
+use axum::http::header::{AUTHORIZATION, CACHE_CONTROL, COOKIE, SET_COOKIE};
 use axum::http::request::Parts;
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, HeaderValue, Method, StatusCode};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::{Form, Router};
 
-use crate::hero::controllers::heroes::HERO_WRITE_RATE_SCOPE;
 use crate::hero::controllers::{
-    AppState, HERO_DELETE_ROLES, HERO_EVENT_RESOURCE, HERO_READ_ROLES, HERO_WRITE_ROLES,
+    announce, enforce_write_limit, AppState, HERO_DELETE_ROLES, HERO_READ_ROLES, HERO_WRITE_ROLES,
 };
 use crate::hero::models::hero;
 use crate::hero::views::hero_form::HeroFormFields;
 use crate::oidc::{Claims, HasOidcVerifier};
 use crate::problem_details::AppError;
-use craftainer_crud::controllers::{crud_actions, crud_events};
+use craftainer_crud::controllers::crud_actions;
 use craftainer_crud::events::EventAction;
 
 const COMPONENTS_JS: &str = include_str!("heroes_web_components.js");
 
-// -- auth: bearer header, or `?token=` for a plain HTML navigation --
+/// The page every successful form post redirects back to.
+const PAGE: &str = "/heroes/form";
 
-#[derive(Debug, serde::Deserialize)]
-struct TokenQuery {
-    token: Option<String>,
-}
+/// The session cookie's name.
+const SESSION_COOKIE: &str = "hero_session";
+
+/// How long the session cookie lives, in seconds.
+const SESSION_MAX_AGE_SECONDS: u64 = 3600;
+
+/// Longest token the session form accepts (a JWT with a few roles is well
+/// under 4 KiB; a cookie larger than this is refused by browsers anyway).
+const MAX_TOKEN_BYTES: usize = 4096;
+
+const REJECTED: &str = "That token was rejected -- paste a current one.";
+
+// -- auth: bearer header, or the session cookie --
 
 struct WebAuthClaims {
     claims: Claims,
-    token: String,
+}
+
+/// The token of an `Authorization: Bearer` header (the scheme is
+/// case-insensitive, RFC 9110 section 11.1).
+fn bearer_token(headers: &HeaderMap) -> Option<String> {
+    let value = headers.get(AUTHORIZATION)?.to_str().ok()?;
+    let (scheme, token) = value.split_once(' ')?;
+    scheme
+        .eq_ignore_ascii_case("Bearer")
+        .then(|| token.trim().to_string())
+}
+
+/// The value of the session cookie, if the request carries one.
+fn cookie_token(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get_all(COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(';'))
+        .filter_map(|pair| pair.trim().split_once('='))
+        .find(|(name, _)| *name == SESSION_COOKIE)
+        .map(|(_, value)| value.to_string())
+}
+
+/// Whether the browser did not mark the request cross-site. An absent
+/// `Sec-Fetch-Site` (an old browser, or a client that is not a browser and
+/// so carries no ambient cookie) passes; `SameSite=Strict` still applies.
+fn not_cross_site(headers: &HeaderMap) -> bool {
+    headers
+        .get("sec-fetch-site")
+        .is_none_or(|value| matches!(value.to_str(), Ok("same-origin" | "none")))
+}
+
+fn cross_site_refused() -> Response {
+    AppError::Forbidden("Cross-site request refused".to_string()).into_response()
+}
+
+/// Whether `byte` is in a JWT's alphabet (base64url and `.`) or the padding
+/// and standard-base64 characters: what the session cookie can carry
+/// verbatim, with no quoting.
+fn is_token_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b'~' | b'+' | b'/' | b'=')
+}
+
+/// A token worth putting in the cookie: non-empty, bounded, cookie-safe.
+fn is_cookie_safe(token: &str) -> bool {
+    !token.is_empty() && token.len() <= MAX_TOKEN_BYTES && token.bytes().all(is_token_byte)
 }
 
 impl<S> axum::extract::FromRequestParts<S> for WebAuthClaims
@@ -64,29 +130,21 @@ where
     type Rejection = Response;
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
-        let header_token = parts
-            .headers
-            .get(AUTHORIZATION)
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.strip_prefix("Bearer "))
-            .map(str::to_string);
-
-        let query_token = Query::<TokenQuery>::from_request_parts(parts, state)
-            .await
-            .ok()
-            .and_then(|Query(TokenQuery { token })| token);
-
-        let Some(token) = header_token.or(query_token) else {
-            return Err(bootstrap_page(None).into_response());
+        let (token, from_cookie) = match bearer_token(&parts.headers) {
+            Some(token) => (token, false),
+            None => match cookie_token(&parts.headers) {
+                Some(token) => (token, true),
+                None => return Err(bootstrap_page(StatusCode::OK, None)),
+            },
         };
+        let unsafe_method = !matches!(parts.method, Method::GET | Method::HEAD | Method::OPTIONS);
+        if from_cookie && unsafe_method && !not_cross_site(&parts.headers) {
+            return Err(cross_site_refused());
+        }
 
         match state.oidc_verifier().decode_bearer_token(&token).await {
-            Ok(claims) => Ok(WebAuthClaims { claims, token }),
-            Err(_) => Err((
-                StatusCode::UNAUTHORIZED,
-                bootstrap_page(Some("That token was rejected -- paste a current one.")),
-            )
-                .into_response()),
+            Ok(claims) => Ok(WebAuthClaims { claims }),
+            Err(_) => Err(bootstrap_page(StatusCode::UNAUTHORIZED, Some(REJECTED))),
         }
     }
 }
@@ -101,69 +159,146 @@ fn escape_html(raw: &str) -> String {
         .replace('\'', "&#39;")
 }
 
-fn bootstrap_page(message: Option<&str>) -> Html<String> {
+/// An HTML page the browser and any shared cache must not keep: it lists
+/// other owners' records and is only valid for the signed-in session.
+fn page(status: StatusCode, html: String) -> Response {
+    (status, [(CACHE_CONTROL, "no-store")], Html(html)).into_response()
+}
+
+fn bootstrap_page(status: StatusCode, message: Option<&str>) -> Response {
     let message = message
         .map(|m| format!("<p class=\"error\">{}</p>", escape_html(m)))
         .unwrap_or_default();
-    Html(format!(
-        r#"<!doctype html>
+    page(
+        status,
+        format!(
+            r#"<!doctype html>
 <html><head><title>Heroes</title></head>
 <body>
 <h1>Heroes</h1>
 {message}
 <p>Paste a bearer token to continue (under <code>MODE=mock</code>, mint
-one via <code>POST /mock/token</code>).</p>
-<form method="GET" action="/heroes/form">
-  <label>Token <input type="text" name="token" size="80" required></label>
+one via <code>POST /mock/token</code>). It is sent in the request body and
+kept in an HttpOnly cookie for this browser session, never in a URL.</p>
+<form method="POST" action="/heroes/form/session">
+  <label>Token <input type="password" name="token" size="80" autocomplete="off" required></label>
   <button type="submit">Continue</button>
 </form>
 </body></html>"#
-    ))
+        ),
+    )
 }
 
-fn hero_row_html(hero: &hero::Model, token: &str) -> String {
+fn hero_row_html(hero: &hero::Model) -> String {
     let id = hero.id;
     let name = escape_html(hero.name.as_deref().unwrap_or(""));
     let powers = escape_html(&hero.powers.clone().unwrap_or_default().join(", "));
     let power_level = hero.power_level.map(|p| p.to_string()).unwrap_or_default();
     format!(
         r#"<li class="hero" data-hero-id="{id}">
-  <form class="hero-form" method="POST" action="/heroes/form/{id}/update?token={token}" data-json-action="/crud/v1/heroes/v2/json?id={id}" data-json-method="PATCH">
+  <form class="hero-form" method="POST" action="/heroes/form/{id}/update">
     <input type="text" name="name" value="{name}" required>
     <input type="text" name="powers" value="{powers}" required>
     <input type="number" name="power_level" value="{power_level}">
     <button type="submit">Update</button>
   </form>
-  <form class="hero-delete-form" method="POST" action="/heroes/form/{id}/delete?token={token}" data-json-action="/crud/v1/heroes/v2/json?id={id}" data-json-method="DELETE">
+  <form class="hero-delete-form" method="POST" action="/heroes/form/{id}/delete">
     <button type="submit">Delete</button>
   </form>
 </li>"#
     )
 }
 
-fn heroes_page(heroes: &[hero::Model], token: &str) -> Html<String> {
+fn heroes_page(heroes: &[hero::Model]) -> Response {
     let rows: String = heroes
         .iter()
-        .map(|hero| hero_row_html(hero, token))
+        .map(hero_row_html)
         .collect::<Vec<_>>()
         .join("\n");
-    Html(format!(
-        r#"<!doctype html>
-<html><head><title>Heroes</title><script src="/heroes/components.js?token={token}" defer></script></head>
-<body data-token="{token}">
+    page(
+        StatusCode::OK,
+        format!(
+            r#"<!doctype html>
+<html><head><title>Heroes</title><script src="/heroes/components.js" defer></script></head>
+<body>
 <h1>Heroes</h1>
 <ul class="hero-list">
 {rows}
 </ul>
 <h2>Create a hero</h2>
-<form class="hero-form" method="POST" action="/heroes/form?token={token}" data-json-action="/crud/v1/heroes/v2/json" data-json-method="POST">
+<form class="hero-form" method="POST" action="/heroes/form">
   <input type="text" name="name" placeholder="Name" required>
   <input type="text" name="powers" placeholder="Powers, comma-separated" required>
   <input type="number" name="power_level" placeholder="Power level">
   <button type="submit">Create</button>
 </form>
+<form class="session-form" method="POST" action="/heroes/form/logout">
+  <button type="submit">Sign out</button>
+</form>
 </body></html>"#
+        ),
+    )
+}
+
+// -- session --
+
+#[derive(Debug, serde::Deserialize)]
+struct SessionForm {
+    token: String,
+}
+
+/// A `Set-Cookie` value for the session cookie. `Secure` follows the public
+/// origin: https in any real deployment (production requires it), plain http
+/// only on a developer's machine, where browsers would drop a `Secure`
+/// cookie.
+fn session_cookie(state: &AppState, token: &str, max_age: u64) -> HeaderValue {
+    let secure = if state
+        .oidc
+        .resource_server()
+        .public_base_url
+        .starts_with("https://")
+    {
+        "; Secure"
+    } else {
+        ""
+    };
+    HeaderValue::from_str(&format!(
+        "{SESSION_COOKIE}={token}; HttpOnly; SameSite=Strict; Path=/heroes; Max-Age={max_age}{secure}"
     ))
+    .expect("a cookie-safe token and fixed attributes are a valid header value")
+}
+
+fn redirect_with_cookie(cookie: HeaderValue) -> Response {
+    let mut response = Redirect::to(PAGE).into_response();
+    response.headers_mut().insert(SET_COOKIE, cookie);
+    response
+}
+
+/// `POST /heroes/form/session` -- verify the pasted token and keep it in the
+/// session cookie.
+async fn start_session(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Form(form): Form<SessionForm>,
+) -> Response {
+    if !not_cross_site(&headers) {
+        return cross_site_refused();
+    }
+    let token = form.token.trim();
+    // Checked before verifying: only a token the cookie can carry verbatim
+    // is worth the verification round trip.
+    if !is_cookie_safe(token) || state.oidc.decode_bearer_token(token).await.is_err() {
+        return bootstrap_page(StatusCode::UNAUTHORIZED, Some(REJECTED));
+    }
+    redirect_with_cookie(session_cookie(&state, token, SESSION_MAX_AGE_SECONDS))
+}
+
+/// `POST /heroes/form/logout` -- clear the session cookie.
+async fn end_session(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if !not_cross_site(&headers) {
+        return cross_site_refused();
+    }
+    redirect_with_cookie(session_cookie(&state, "", 0))
 }
 
 // -- handlers --
@@ -172,7 +307,7 @@ async fn form_page(
     State(state): State<AppState>,
     claims: Result<WebAuthClaims, Response>,
 ) -> Response {
-    let WebAuthClaims { claims, token } = match claims {
+    let WebAuthClaims { claims } = match claims {
         Ok(claims) => claims,
         Err(response) => return response,
     };
@@ -187,32 +322,22 @@ async fn form_page(
         Ok(heroes) => heroes,
         Err(err) => return AppError::from(err).into_response(),
     };
-    heroes_page(&heroes, &token).into_response()
+    heroes_page(&heroes)
 }
 
 async fn create(
     State(state): State<AppState>,
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     claims: Result<WebAuthClaims, Response>,
     Form(fields): Form<HeroFormFields>,
 ) -> Response {
-    let WebAuthClaims { claims, token } = match claims {
+    let WebAuthClaims { claims } = match claims {
         Ok(claims) => claims,
         Err(response) => return response,
     };
-    if let Err(err) = state
-        .rate_limiter
-        .check(
-            HERO_WRITE_RATE_SCOPE,
-            addr.ip(),
-            state.settings.rate_limit_hero_write_per_minute,
-            60,
-        )
-        .await
-    {
+    if let Err(err) = claims.require_any_role(&state.settings.oidc_client_id, HERO_WRITE_ROLES) {
         return err.into_response();
     }
-    if let Err(err) = claims.require_any_role(&state.settings.oidc_client_id, HERO_WRITE_ROLES) {
+    if let Err(err) = enforce_write_limit(&state, &claims).await {
         return err.into_response();
     }
     let create = match fields.into_hero_create() {
@@ -227,40 +352,24 @@ async fn create(
         Ok(hero) => hero,
         Err(err) => return AppError::from(err).into_response(),
     };
-    crud_events::publish(
-        &state.events,
-        HERO_EVENT_RESOURCE,
-        EventAction::Create,
-        vec![hero.id],
-    )
-    .await;
-    Redirect::to(&format!("/heroes/form?token={token}")).into_response()
+    announce(&state, EventAction::Create, vec![hero.id]).await;
+    Redirect::to(PAGE).into_response()
 }
 
 async fn update(
     State(state): State<AppState>,
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Path(id): Path<i32>,
     claims: Result<WebAuthClaims, Response>,
     Form(fields): Form<HeroFormFields>,
 ) -> Response {
-    let WebAuthClaims { claims, token } = match claims {
+    let WebAuthClaims { claims } = match claims {
         Ok(claims) => claims,
         Err(response) => return response,
     };
-    if let Err(err) = state
-        .rate_limiter
-        .check(
-            HERO_WRITE_RATE_SCOPE,
-            addr.ip(),
-            state.settings.rate_limit_hero_write_per_minute,
-            60,
-        )
-        .await
-    {
+    if let Err(err) = claims.require_any_role(&state.settings.oidc_client_id, HERO_WRITE_ROLES) {
         return err.into_response();
     }
-    if let Err(err) = claims.require_any_role(&state.settings.oidc_client_id, HERO_WRITE_ROLES) {
+    if let Err(err) = enforce_write_limit(&state, &claims).await {
         return err.into_response();
     }
     let update = match fields.into_hero_update() {
@@ -273,14 +382,8 @@ async fn update(
     };
     match crud_actions::resolve_update_by_id(&state.hero_crud, id, &owner_id, update).await {
         Ok(hero) => {
-            crud_events::publish(
-                &state.events,
-                HERO_EVENT_RESOURCE,
-                EventAction::Update,
-                vec![hero.id],
-            )
-            .await;
-            Redirect::to(&format!("/heroes/form?token={token}")).into_response()
+            announce(&state, EventAction::Update, vec![hero.id]).await;
+            Redirect::to(PAGE).into_response()
         }
         Err(err) => err.into_response(),
     }
@@ -288,27 +391,17 @@ async fn update(
 
 async fn delete(
     State(state): State<AppState>,
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Path(id): Path<i32>,
     claims: Result<WebAuthClaims, Response>,
 ) -> Response {
-    let WebAuthClaims { claims, token } = match claims {
+    let WebAuthClaims { claims } = match claims {
         Ok(claims) => claims,
         Err(response) => return response,
     };
-    if let Err(err) = state
-        .rate_limiter
-        .check(
-            HERO_WRITE_RATE_SCOPE,
-            addr.ip(),
-            state.settings.rate_limit_hero_write_per_minute,
-            60,
-        )
-        .await
-    {
+    if let Err(err) = claims.require_any_role(&state.settings.oidc_client_id, HERO_DELETE_ROLES) {
         return err.into_response();
     }
-    if let Err(err) = claims.require_any_role(&state.settings.oidc_client_id, HERO_DELETE_ROLES) {
+    if let Err(err) = enforce_write_limit(&state, &claims).await {
         return err.into_response();
     }
     let owner_id = match claims.subject() {
@@ -327,14 +420,8 @@ async fn delete(
     .await
     {
         Ok(_) => {
-            crud_events::publish(
-                &state.events,
-                HERO_EVENT_RESOURCE,
-                EventAction::Delete,
-                vec![id],
-            )
-            .await;
-            Redirect::to(&format!("/heroes/form?token={token}")).into_response()
+            announce(&state, EventAction::Delete, vec![id]).await;
+            Redirect::to(PAGE).into_response()
         }
         Err(err) => err.into_response(),
     }
@@ -353,6 +440,8 @@ async fn components_js() -> impl IntoResponse {
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/form", get(form_page).post(create))
+        .route("/form/session", post(start_session))
+        .route("/form/logout", post(end_session))
         .route("/form/{id}/update", post(update))
         .route("/form/{id}/delete", post(delete))
         .route("/components.js", get(components_js))
@@ -426,13 +515,6 @@ mod tests {
             &jsonwebtoken::EncodingKey::from_secret(b"mock-mode-doesnt-verify-signatures"),
         )
         .unwrap()
-    }
-
-    fn with_addr(mut request: Request<Body>) -> Request<Body> {
-        request
-            .extensions_mut()
-            .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 12345))));
-        request
     }
 
     async fn body_text(response: Response) -> String {
@@ -546,7 +628,11 @@ mod tests {
         let response = app_with_faulty_repository()
             .oneshot(
                 Request::builder()
-                    .uri(format!("/form?token={}", token("alice", &["viewer"])))
+                    .uri("/form")
+                    .header(
+                        "Authorization",
+                        format!("Bearer {}", token("alice", &["viewer"])),
+                    )
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -558,14 +644,18 @@ mod tests {
     #[tokio::test]
     async fn create_maps_a_repository_failure_to_an_app_error_response() {
         let response = app_with_faulty_repository()
-            .oneshot(with_addr(
+            .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(format!("/form?token={}", token("alice", &["editor"])))
+                    .uri("/form")
+                    .header(
+                        "Authorization",
+                        format!("Bearer {}", token("alice", &["editor"])),
+                    )
                     .header("Content-Type", "application/x-www-form-urlencoded")
                     .body(Body::from("name=Spectra&powers=flight&power_level=5"))
                     .unwrap(),
-            ))
+            )
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
@@ -587,7 +677,8 @@ mod tests {
         let response = app()
             .oneshot(
                 Request::builder()
-                    .uri("/form?token=not-a-real-token")
+                    .uri("/form")
+                    .header("Authorization", "Bearer not-a-real-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -603,7 +694,11 @@ mod tests {
         let response = app()
             .oneshot(
                 Request::builder()
-                    .uri(format!("/form?token={}", token("alice", &["viewer"])))
+                    .uri("/form")
+                    .header(
+                        "Authorization",
+                        format!("Bearer {}", token("alice", &["viewer"])),
+                    )
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -620,14 +715,15 @@ mod tests {
         let create_token = token("alice", &["editor"]);
         let create = shared_app
             .clone()
-            .oneshot(with_addr(
+            .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(format!("/form?token={create_token}"))
+                    .uri("/form")
+                    .header("Authorization", format!("Bearer {create_token}"))
                     .header("Content-Type", "application/x-www-form-urlencoded")
                     .body(Body::from("name=Spectra&powers=flight&power_level=5"))
                     .unwrap(),
-            ))
+            )
             .await
             .unwrap();
         assert_eq!(create.status(), StatusCode::SEE_OTHER);
@@ -635,7 +731,11 @@ mod tests {
         let list = shared_app
             .oneshot(
                 Request::builder()
-                    .uri(format!("/form?token={}", token("alice", &["viewer"])))
+                    .uri("/form")
+                    .header(
+                        "Authorization",
+                        format!("Bearer {}", token("alice", &["viewer"])),
+                    )
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -649,14 +749,18 @@ mod tests {
     #[tokio::test]
     async fn create_with_an_invalid_payload_returns_422_problem_details() {
         let response = app()
-            .oneshot(with_addr(
+            .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(format!("/form?token={}", token("alice", &["editor"])))
+                    .uri("/form")
+                    .header(
+                        "Authorization",
+                        format!("Bearer {}", token("alice", &["editor"])),
+                    )
                     .header("Content-Type", "application/x-www-form-urlencoded")
                     .body(Body::from("name=&powers=&power_level="))
                     .unwrap(),
-            ))
+            )
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
@@ -665,14 +769,18 @@ mod tests {
     #[tokio::test]
     async fn a_role_with_no_write_grant_is_forbidden_from_creating() {
         let response = app()
-            .oneshot(with_addr(
+            .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(format!("/form?token={}", token("alice", &["viewer"])))
+                    .uri("/form")
+                    .header(
+                        "Authorization",
+                        format!("Bearer {}", token("alice", &["viewer"])),
+                    )
                     .header("Content-Type", "application/x-www-form-urlencoded")
                     .body(Body::from("name=Spectra&powers=flight&power_level=5"))
                     .unwrap(),
-            ))
+            )
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
@@ -684,14 +792,15 @@ mod tests {
         let owner_token = token("alice", &["editor", "maintainer"]);
         let create = shared_app
             .clone()
-            .oneshot(with_addr(
+            .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(format!("/form?token={owner_token}"))
+                    .uri("/form")
+                    .header("Authorization", format!("Bearer {owner_token}"))
                     .header("Content-Type", "application/x-www-form-urlencoded")
                     .body(Body::from("name=Spectra&powers=flight&power_level=5"))
                     .unwrap(),
-            ))
+            )
             .await
             .unwrap();
         assert_eq!(create.status(), StatusCode::SEE_OTHER);
@@ -700,7 +809,8 @@ mod tests {
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri(format!("/form?token={owner_token}"))
+                    .uri("/form")
+                    .header("Authorization", format!("Bearer {owner_token}"))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -719,14 +829,15 @@ mod tests {
 
         let update = shared_app
             .clone()
-            .oneshot(with_addr(
+            .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(format!("/form/{id}/update?token={owner_token}"))
+                    .uri(format!("/form/{id}/update"))
+                    .header("Authorization", format!("Bearer {owner_token}"))
                     .header("Content-Type", "application/x-www-form-urlencoded")
                     .body(Body::from("name=Renamed&powers=stealth&power_level=9"))
                     .unwrap(),
-            ))
+            )
             .await
             .unwrap();
         assert_eq!(update.status(), StatusCode::SEE_OTHER);
@@ -735,7 +846,8 @@ mod tests {
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri(format!("/form?token={owner_token}"))
+                    .uri("/form")
+                    .header("Authorization", format!("Bearer {owner_token}"))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -747,13 +859,14 @@ mod tests {
 
         let delete = shared_app
             .clone()
-            .oneshot(with_addr(
+            .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(format!("/form/{id}/delete?token={owner_token}"))
+                    .uri(format!("/form/{id}/delete"))
+                    .header("Authorization", format!("Bearer {owner_token}"))
                     .body(Body::empty())
                     .unwrap(),
-            ))
+            )
             .await
             .unwrap();
         assert_eq!(delete.status(), StatusCode::SEE_OTHER);
@@ -761,7 +874,8 @@ mod tests {
         let after_delete = shared_app
             .oneshot(
                 Request::builder()
-                    .uri(format!("/form?token={owner_token}"))
+                    .uri("/form")
+                    .header("Authorization", format!("Bearer {owner_token}"))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -787,7 +901,11 @@ mod tests {
         let response = app()
             .oneshot(
                 Request::builder()
-                    .uri(format!("/form?token={}", token("alice", &["security"])))
+                    .uri("/form")
+                    .header(
+                        "Authorization",
+                        format!("Bearer {}", token("alice", &["security"])),
+                    )
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -799,14 +917,14 @@ mod tests {
     #[tokio::test]
     async fn create_without_a_token_shows_the_bootstrap_page() {
         let response = app()
-            .oneshot(with_addr(
+            .oneshot(
                 Request::builder()
                     .method("POST")
                     .uri("/form")
                     .header("Content-Type", "application/x-www-form-urlencoded")
                     .body(Body::from("name=Spectra&powers=flight&power_level=5"))
                     .unwrap(),
-            ))
+            )
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
@@ -815,14 +933,18 @@ mod tests {
     #[tokio::test]
     async fn create_rejects_a_token_with_no_subject() {
         let response = app()
-            .oneshot(with_addr(
+            .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(format!("/form?token={}", token_with_no_sub(&["editor"])))
+                    .uri("/form")
+                    .header(
+                        "Authorization",
+                        format!("Bearer {}", token_with_no_sub(&["editor"])),
+                    )
                     .header("Content-Type", "application/x-www-form-urlencoded")
                     .body(Body::from("name=Spectra&powers=flight&power_level=5"))
                     .unwrap(),
-            ))
+            )
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
@@ -831,14 +953,14 @@ mod tests {
     #[tokio::test]
     async fn update_without_a_token_shows_the_bootstrap_page() {
         let response = app()
-            .oneshot(with_addr(
+            .oneshot(
                 Request::builder()
                     .method("POST")
                     .uri("/form/1/update")
                     .header("Content-Type", "application/x-www-form-urlencoded")
                     .body(Body::from("name=Renamed&powers=stealth&power_level=9"))
                     .unwrap(),
-            ))
+            )
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
@@ -847,17 +969,18 @@ mod tests {
     #[tokio::test]
     async fn update_is_forbidden_without_a_write_role() {
         let response = app()
-            .oneshot(with_addr(
+            .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(format!(
-                        "/form/1/update?token={}",
-                        token("alice", &["viewer"])
-                    ))
+                    .uri("/form/1/update")
+                    .header(
+                        "Authorization",
+                        format!("Bearer {}", token("alice", &["viewer"])),
+                    )
                     .header("Content-Type", "application/x-www-form-urlencoded")
                     .body(Body::from("name=Renamed&powers=stealth&power_level=9"))
                     .unwrap(),
-            ))
+            )
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
@@ -866,19 +989,20 @@ mod tests {
     #[tokio::test]
     async fn update_rejects_an_invalid_payload_with_422() {
         let response = app()
-            .oneshot(with_addr(
+            .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(format!(
-                        "/form/1/update?token={}",
-                        token("alice", &["editor"])
-                    ))
+                    .uri("/form/1/update")
+                    .header(
+                        "Authorization",
+                        format!("Bearer {}", token("alice", &["editor"])),
+                    )
                     .header("Content-Type", "application/x-www-form-urlencoded")
                     .body(Body::from(
                         "name=Renamed&powers=stealth&power_level=not-a-number",
                     ))
                     .unwrap(),
-            ))
+            )
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
@@ -887,17 +1011,18 @@ mod tests {
     #[tokio::test]
     async fn update_rejects_a_token_with_no_subject() {
         let response = app()
-            .oneshot(with_addr(
+            .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(format!(
-                        "/form/1/update?token={}",
-                        token_with_no_sub(&["editor"])
-                    ))
+                    .uri("/form/1/update")
+                    .header(
+                        "Authorization",
+                        format!("Bearer {}", token_with_no_sub(&["editor"])),
+                    )
                     .header("Content-Type", "application/x-www-form-urlencoded")
                     .body(Body::from("name=Renamed&powers=stealth&power_level=9"))
                     .unwrap(),
-            ))
+            )
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
@@ -906,17 +1031,18 @@ mod tests {
     #[tokio::test]
     async fn update_of_a_nonexistent_id_returns_404() {
         let response = app()
-            .oneshot(with_addr(
+            .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(format!(
-                        "/form/999999/update?token={}",
-                        token("alice", &["editor"])
-                    ))
+                    .uri("/form/999999/update")
+                    .header(
+                        "Authorization",
+                        format!("Bearer {}", token("alice", &["editor"])),
+                    )
                     .header("Content-Type", "application/x-www-form-urlencoded")
                     .body(Body::from("name=Renamed&powers=stealth&power_level=9"))
                     .unwrap(),
-            ))
+            )
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
@@ -925,13 +1051,13 @@ mod tests {
     #[tokio::test]
     async fn delete_without_a_token_shows_the_bootstrap_page() {
         let response = app()
-            .oneshot(with_addr(
+            .oneshot(
                 Request::builder()
                     .method("POST")
                     .uri("/form/1/delete")
                     .body(Body::empty())
                     .unwrap(),
-            ))
+            )
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
@@ -940,16 +1066,17 @@ mod tests {
     #[tokio::test]
     async fn delete_is_forbidden_without_the_maintainer_role() {
         let response = app()
-            .oneshot(with_addr(
+            .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(format!(
-                        "/form/1/delete?token={}",
-                        token("alice", &["editor"])
-                    ))
+                    .uri("/form/1/delete")
+                    .header(
+                        "Authorization",
+                        format!("Bearer {}", token("alice", &["editor"])),
+                    )
                     .body(Body::empty())
                     .unwrap(),
-            ))
+            )
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
@@ -958,16 +1085,17 @@ mod tests {
     #[tokio::test]
     async fn delete_rejects_a_token_with_no_subject() {
         let response = app()
-            .oneshot(with_addr(
+            .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(format!(
-                        "/form/1/delete?token={}",
-                        token_with_no_sub(&["maintainer"])
-                    ))
+                    .uri("/form/1/delete")
+                    .header(
+                        "Authorization",
+                        format!("Bearer {}", token_with_no_sub(&["maintainer"])),
+                    )
                     .body(Body::empty())
                     .unwrap(),
-            ))
+            )
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
@@ -976,16 +1104,17 @@ mod tests {
     #[tokio::test]
     async fn delete_of_a_nonexistent_id_returns_404() {
         let response = app()
-            .oneshot(with_addr(
+            .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(format!(
-                        "/form/999999/delete?token={}",
-                        token("alice", &["maintainer"])
-                    ))
+                    .uri("/form/999999/delete")
+                    .header(
+                        "Authorization",
+                        format!("Bearer {}", token("alice", &["maintainer"])),
+                    )
                     .body(Body::empty())
                     .unwrap(),
-            ))
+            )
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
@@ -1018,26 +1147,28 @@ mod tests {
         for _ in 0..1 {
             shared_app
                 .clone()
-                .oneshot(with_addr(
+                .oneshot(
                     Request::builder()
                         .method("POST")
-                        .uri(format!("/form?token={create_token}"))
+                        .uri("/form")
+                        .header("Authorization", format!("Bearer {create_token}"))
                         .header("Content-Type", "application/x-www-form-urlencoded")
                         .body(Body::from("name=Spectra&powers=flight&power_level=5"))
                         .unwrap(),
-                ))
+                )
                 .await
                 .unwrap();
         }
         let response = shared_app
-            .oneshot(with_addr(
+            .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(format!("/form?token={create_token}"))
+                    .uri("/form")
+                    .header("Authorization", format!("Bearer {create_token}"))
                     .header("Content-Type", "application/x-www-form-urlencoded")
                     .body(Body::from("name=Spectra&powers=flight&power_level=5"))
                     .unwrap(),
-            ))
+            )
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
@@ -1051,27 +1182,29 @@ mod tests {
         // update below is the first write to find the limit already hit.
         let create = shared_app
             .clone()
-            .oneshot(with_addr(
+            .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(format!("/form?token={owner_token}"))
+                    .uri("/form")
+                    .header("Authorization", format!("Bearer {owner_token}"))
                     .header("Content-Type", "application/x-www-form-urlencoded")
                     .body(Body::from("name=Spectra&powers=flight&power_level=5"))
                     .unwrap(),
-            ))
+            )
             .await
             .unwrap();
         assert_eq!(create.status(), StatusCode::SEE_OTHER);
 
         let response = shared_app
-            .oneshot(with_addr(
+            .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(format!("/form/1/update?token={owner_token}"))
+                    .uri("/form/1/update")
+                    .header("Authorization", format!("Bearer {owner_token}"))
                     .header("Content-Type", "application/x-www-form-urlencoded")
                     .body(Body::from("name=Renamed&powers=stealth&power_level=9"))
                     .unwrap(),
-            ))
+            )
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
@@ -1083,26 +1216,28 @@ mod tests {
         let owner_token = token("alice", &["editor", "maintainer"]);
         let create = shared_app
             .clone()
-            .oneshot(with_addr(
+            .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(format!("/form?token={owner_token}"))
+                    .uri("/form")
+                    .header("Authorization", format!("Bearer {owner_token}"))
                     .header("Content-Type", "application/x-www-form-urlencoded")
                     .body(Body::from("name=Spectra&powers=flight&power_level=5"))
                     .unwrap(),
-            ))
+            )
             .await
             .unwrap();
         assert_eq!(create.status(), StatusCode::SEE_OTHER);
 
         let response = shared_app
-            .oneshot(with_addr(
+            .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(format!("/form/1/delete?token={owner_token}"))
+                    .uri("/form/1/delete")
+                    .header("Authorization", format!("Bearer {owner_token}"))
                     .body(Body::empty())
                     .unwrap(),
-            ))
+            )
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
@@ -1129,5 +1264,286 @@ mod tests {
         );
         let body = body_text(response).await;
         assert!(body.contains("hero-form"));
+    }
+    // -- the session cookie replaces `?token=` (docs/adrs/0031) --
+
+    fn session_post(path: &str, body: String, extra: &[(&str, &str)]) -> Request<Body> {
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri(path)
+            .header("Content-Type", "application/x-www-form-urlencoded");
+        for (name, value) in extra {
+            builder = builder.header(*name, *value);
+        }
+        builder.body(Body::from(body)).unwrap()
+    }
+
+    fn set_cookie_of(response: &Response) -> String {
+        response
+            .headers()
+            .get(SET_COOKIE)
+            .expect("a Set-Cookie header")
+            .to_str()
+            .unwrap()
+            .to_string()
+    }
+
+    #[tokio::test]
+    async fn the_token_in_the_query_string_is_no_longer_accepted() {
+        let response = app()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/form?token={}", token("alice", &["viewer"])))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // Treated as no credentials at all: the bootstrap page, not the list.
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = body_text(response).await;
+        assert!(body.contains("Paste a bearer token"), "{body}");
+        assert!(!body.contains("Create a hero"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn posting_a_token_starts_a_session_cookie_that_authenticates_later_requests() {
+        let shared_app = app();
+        let tok = token("alice", &["editor"]);
+        let started = shared_app
+            .clone()
+            .oneshot(session_post(
+                "/form/session",
+                format!("token={tok}"),
+                &[("Sec-Fetch-Site", "same-origin")],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(started.status(), StatusCode::SEE_OTHER);
+        assert_eq!(started.headers()["location"], "/heroes/form");
+        let cookie = set_cookie_of(&started);
+        assert!(
+            cookie.starts_with(&format!("hero_session={tok};")),
+            "{cookie}"
+        );
+        for attribute in [
+            "HttpOnly",
+            "SameSite=Strict",
+            "Path=/heroes",
+            "Max-Age=3600",
+        ] {
+            assert!(cookie.contains(attribute), "{attribute} in {cookie}");
+        }
+        // http://localhost (the default public origin): a Secure cookie would
+        // be dropped by the browser.
+        assert!(!cookie.contains("Secure"), "{cookie}");
+
+        // The cookie alone authenticates a navigation...
+        let cookie_header = format!("a=b; hero_session={tok}; c=d");
+        let page = shared_app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/form")
+                    .header("Cookie", cookie_header.as_str())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(page.status(), StatusCode::OK);
+        assert_eq!(page.headers()[CACHE_CONTROL], "no-store");
+        let body = body_text(page).await;
+        assert!(body.contains("Create a hero"));
+        // ...and the page never repeats the token, in a URL or anywhere.
+        assert!(!body.contains(&tok), "the token must not be rendered");
+        assert!(!body.contains("token="), "{body}");
+
+        // ...and a form post, which a same-origin browser sends.
+        let created = shared_app
+            .clone()
+            .oneshot(session_post(
+                "/form",
+                "name=Spectra&powers=flight&power_level=5".to_string(),
+                &[
+                    ("Cookie", cookie_header.as_str()),
+                    ("Sec-Fetch-Site", "same-origin"),
+                ],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(created.status(), StatusCode::SEE_OTHER);
+        assert_eq!(created.headers()["location"], "/heroes/form");
+    }
+
+    #[tokio::test]
+    async fn a_cookie_authenticated_post_marked_cross_site_is_refused() {
+        let tok = token("alice", &["editor"]);
+        for site in ["cross-site", "same-site", "bogus"] {
+            let response = app()
+                .oneshot(session_post(
+                    "/form",
+                    "name=Spectra&powers=flight".to_string(),
+                    &[
+                        ("Cookie", format!("hero_session={tok}").as_str()),
+                        ("Sec-Fetch-Site", site),
+                    ],
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{site}");
+        }
+        // The same post with a bearer header is not ambient authority, so
+        // the fetch metadata is irrelevant to it.
+        let response = app()
+            .oneshot(session_post(
+                "/form",
+                "name=Spectra&powers=flight".to_string(),
+                &[
+                    ("Authorization", format!("Bearer {tok}").as_str()),
+                    ("Sec-Fetch-Site", "cross-site"),
+                ],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        // A navigation (GET) is safe whatever it says.
+        let response = app()
+            .oneshot(
+                Request::builder()
+                    .uri("/form")
+                    .header(
+                        "Cookie",
+                        format!("hero_session={}", token("a", &["viewer"])),
+                    )
+                    .header("Sec-Fetch-Site", "cross-site")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn the_session_routes_refuse_cross_site_requests() {
+        let tok = token("alice", &["editor"]);
+        for (path, body) in [
+            ("/form/session", format!("token={tok}")),
+            ("/form/logout", String::new()),
+        ] {
+            let response = app()
+                .oneshot(session_post(
+                    path,
+                    body,
+                    &[("Sec-Fetch-Site", "cross-site")],
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{path}");
+            assert!(response.headers().get(SET_COOKIE).is_none(), "{path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_token_that_does_not_verify_or_cannot_be_a_cookie_value_starts_no_session() {
+        for body in [
+            "token=not-a-real-token".to_string(),
+            "token=".to_string(),
+            "token=a%3Bb".to_string(),
+            "token=a%20b".to_string(),
+            format!("token={}", "a".repeat(MAX_TOKEN_BYTES + 1)),
+        ] {
+            let response = app()
+                .oneshot(session_post("/form/session", body.clone(), &[]))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{body}");
+            assert!(response.headers().get(SET_COOKIE).is_none(), "{body}");
+            assert!(body_text(response).await.contains("was rejected"));
+        }
+    }
+
+    #[tokio::test]
+    async fn logging_out_clears_the_cookie() {
+        let response = app()
+            .oneshot(session_post("/form/logout", String::new(), &[]))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let cookie = set_cookie_of(&response);
+        assert!(cookie.starts_with("hero_session=;"), "{cookie}");
+        assert!(cookie.contains("Max-Age=0"), "{cookie}");
+    }
+
+    #[tokio::test]
+    async fn the_session_cookie_is_secure_when_the_public_origin_is_https() {
+        let settings = Arc::new(mock_settings());
+        let resource = crate::config::ResourceServer {
+            public_base_url: "https://api.example.com".to_string(),
+            ..crate::config::ResourceServer::from_settings(&settings)
+        };
+        let state = AppState {
+            oidc: Arc::new(OidcVerifier::with_resource_server(
+                settings.clone(),
+                Arc::new(resource),
+            )),
+            settings,
+            health_registry: Arc::new(HealthRegistry::new()),
+            hero_crud: Arc::new(craftainer_crud::crud::CrudService::new(DynHeroRepository(
+                Box::new(HeroMemoryRepository::new()),
+            ))),
+            rate_limiter: Arc::new(crate::rate_limit::RateLimiter::mock()),
+            hero_stats: craftainer_crud::stats_cache::CachedStats::uncached("heroes"),
+            shutdown: tokio_util::sync::CancellationToken::new(),
+            events: Arc::new(craftainer_crud::events::EventBus::mock()),
+        };
+        let response = router()
+            .with_state(state)
+            .oneshot(session_post(
+                "/form/session",
+                format!("token={}", token("alice", &["viewer"])),
+                &[],
+            ))
+            .await
+            .unwrap();
+        assert!(set_cookie_of(&response).ends_with("; Secure"));
+    }
+
+    #[tokio::test]
+    async fn a_lowercase_bearer_scheme_authenticates_the_form_page() {
+        let response = app()
+            .oneshot(
+                Request::builder()
+                    .uri("/form")
+                    .header(
+                        "Authorization",
+                        format!("bearer {}", token("alice", &["viewer"])),
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(body_text(response).await.contains("Create a hero"));
+    }
+
+    #[test]
+    fn only_a_bearer_scheme_and_the_session_cookie_are_credentials() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            AUTHORIZATION,
+            HeaderValue::from_static("Basic dXNlcjpwYXNz"),
+        );
+        headers.insert(
+            COOKIE,
+            HeaderValue::from_static("other=1; hero_session_x=2"),
+        );
+        assert_eq!(bearer_token(&headers), None);
+        assert_eq!(cookie_token(&headers), None);
+        let mut headers = HeaderMap::new();
+        headers.insert(AUTHORIZATION, HeaderValue::from_static("Bearer"));
+        assert_eq!(bearer_token(&headers), None);
     }
 }

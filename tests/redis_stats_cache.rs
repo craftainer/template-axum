@@ -123,7 +123,7 @@ fn request(method: &str, uri: &str, roles: &[&str], body: Option<Value>) -> Requ
 async fn get(app: &Router, uri: &str) -> (StatusCode, Option<String>, Value) {
     let response = app
         .clone()
-        .oneshot(request("GET", uri, &["viewer"], None))
+        .oneshot(request("GET", uri, &["maintainer"], None))
         .await
         .unwrap();
     let status = response.status();

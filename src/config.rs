@@ -5,6 +5,8 @@
 //! which the compose files set directly.
 
 use std::env;
+use std::fmt;
+use std::path::PathBuf;
 use std::time::Duration;
 
 /// Startup-time mode: controls which backend (real vs. in-memory/mock) every
@@ -22,6 +24,20 @@ pub enum Mode {
 }
 
 impl Mode {
+    /// `MODE` from the environment. There is deliberately no default: a
+    /// deployment that forgets to set it must fail to start rather than fall
+    /// back to a mode that skips the production checks (fail closed; OWASP
+    /// A02 secure configuration).
+    fn from_env() -> Result<Self, String> {
+        match env::var("MODE") {
+            Ok(raw) => Self::parse(&raw),
+            Err(env::VarError::NotPresent) => {
+                Err("MODE must be set to dev, mock or production (it has no default)".to_string())
+            }
+            Err(env::VarError::NotUnicode(_)) => Err("MODE must be valid UTF-8".to_string()),
+        }
+    }
+
     fn parse(raw: &str) -> Result<Self, String> {
         match raw {
             "dev" => Ok(Mode::Dev),
@@ -177,9 +193,10 @@ pub struct Settings {
 
     /// The MQTT broker backing the CRUD event stream (`craftainer_crud::events`,
     /// `docs/adrs/0016`). Host/port rather than a URL, matching rumqttc's
-    /// own `MqttOptions::new(id, host, port)` shape -- there is no
-    /// credential here to protect, so `validate()`'s production checks have
-    /// nothing to add beyond what the stack's own network isolation gives.
+    /// own `MqttOptions::new(id, host, port)` shape. Its credentials and TLS
+    /// files are not held here (a `Debug`-printable struct): see
+    /// [`mqtt_security`], which `validate()` runs so production refuses a
+    /// plaintext or anonymous broker.
     pub mqtt_host: String,
     pub mqtt_port: u16,
 
@@ -211,7 +228,7 @@ impl Settings {
     /// production-only validation -- returns `Err` (never panics itself) so
     /// the caller (`main`) decides how to fail fast.
     pub fn from_env() -> Result<Self, String> {
-        let mode = Mode::parse(&env_or("MODE", "dev"))?;
+        let mode = Mode::from_env()?;
         let settings = Settings {
             app_name: env_or("APP_NAME", "template-axum"),
             mode,
@@ -318,6 +335,8 @@ impl Settings {
         }
 
         if self.mode != Mode::Production {
+            // Outside production the MQTT options only have to be well formed.
+            mqtt_security(self.mode)?;
             return Ok(());
         }
 
@@ -369,6 +388,8 @@ impl Settings {
             return Err(format!("{} when MODE=production", insecure.join("; ")));
         }
 
+        // The event broker: TLS and credentials required, like the services above.
+        mqtt_security(self.mode)?;
         Ok(())
     }
 }
@@ -416,6 +437,108 @@ pub fn subscriber_secret(mode: Mode) -> Result<Option<String>, String> {
         }
         Err(env::VarError::NotPresent) => Ok(None),
     }
+}
+
+/// The MQTT broker's transport security, read from `MQTT_*` variables
+/// (`docs/adrs/0031`). Held outside [`Settings`] like [`subscriber_secret`],
+/// so the password is never part of a `Debug`-printable struct; `Debug` here
+/// redacts it anyway.
+#[derive(Clone, PartialEq, Eq, Default)]
+pub struct MqttSecurity {
+    /// `MQTT_USERNAME`; set together with `password`.
+    pub username: Option<String>,
+    /// `MQTT_PASSWORD`.
+    pub password: Option<String>,
+    /// `MQTT_TLS_CA_FILE`: the PEM bundle the broker is verified against (the
+    /// only trust anchor). Setting it turns TLS on.
+    pub tls_ca_file: Option<PathBuf>,
+    /// `MQTT_TLS_CLIENT_CERT`, for mutual TLS; set together with the key.
+    pub tls_client_cert: Option<PathBuf>,
+    /// `MQTT_TLS_CLIENT_KEY`: PKCS#8 PEM.
+    pub tls_client_key: Option<PathBuf>,
+    /// `MQTT_ALLOW_INSECURE`: permit credentials over a plaintext link (a
+    /// local development broker). Refused in production.
+    pub allow_insecure: bool,
+}
+
+impl fmt::Debug for MqttSecurity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MqttSecurity")
+            .field("username", &self.username)
+            .field("password", &self.password.as_ref().map(|_| "<redacted>"))
+            .field("tls_ca_file", &self.tls_ca_file)
+            .field("tls_client_cert", &self.tls_client_cert)
+            .field("tls_client_key", &self.tls_client_key)
+            .field("allow_insecure", &self.allow_insecure)
+            .finish()
+    }
+}
+
+/// The MQTT security options (`MQTT_USERNAME`, `MQTT_PASSWORD`,
+/// `MQTT_TLS_CA_FILE`, `MQTT_TLS_CLIENT_CERT`, `MQTT_TLS_CLIENT_KEY`,
+/// `MQTT_ALLOW_INSECURE`), validated for `mode`.
+///
+/// Every mode refuses a half-set pair (user without password, certificate
+/// without key), a client certificate without a CA file, and credentials
+/// that would cross a plaintext link without `MQTT_ALLOW_INSECURE=true`.
+/// `Mode::Production` additionally requires TLS (`MQTT_TLS_CA_FILE`) and
+/// credentials and refuses `MQTT_ALLOW_INSECURE`, as it does for Postgres,
+/// S3, Redis and OIDC. An error message never contains the password.
+pub fn mqtt_security(mode: Mode) -> Result<MqttSecurity, String> {
+    let security = MqttSecurity {
+        username: env_present("MQTT_USERNAME")?,
+        password: env_present("MQTT_PASSWORD")?,
+        tls_ca_file: env_present("MQTT_TLS_CA_FILE")?.map(PathBuf::from),
+        tls_client_cert: env_present("MQTT_TLS_CLIENT_CERT")?.map(PathBuf::from),
+        tls_client_key: env_present("MQTT_TLS_CLIENT_KEY")?.map(PathBuf::from),
+        allow_insecure: env_bool("MQTT_ALLOW_INSECURE", false)?,
+    };
+    if security.username.is_some() != security.password.is_some() {
+        return Err("MQTT_USERNAME and MQTT_PASSWORD must be set together".to_string());
+    }
+    if security.tls_client_cert.is_some() != security.tls_client_key.is_some() {
+        return Err(
+            "MQTT_TLS_CLIENT_CERT and MQTT_TLS_CLIENT_KEY must be set together".to_string(),
+        );
+    }
+    if security.tls_client_cert.is_some() && security.tls_ca_file.is_none() {
+        return Err("MQTT_TLS_CLIENT_CERT needs MQTT_TLS_CA_FILE".to_string());
+    }
+    if security.username.is_some() && security.tls_ca_file.is_none() && !security.allow_insecure {
+        return Err(
+            "MQTT_USERNAME needs MQTT_TLS_CA_FILE (or MQTT_ALLOW_INSECURE=true for a local broker)"
+                .to_string(),
+        );
+    }
+    if mode == Mode::Production {
+        let mut problems = Vec::new();
+        if security.tls_ca_file.is_none() {
+            problems.push("MQTT_TLS_CA_FILE must be set");
+        }
+        if security.username.is_none() {
+            problems.push("MQTT_USERNAME and MQTT_PASSWORD must be set");
+        }
+        if security.allow_insecure {
+            problems.push("MQTT_ALLOW_INSECURE must not be set");
+        }
+        // The bus reads these files only when it connects, so a missing mount
+        // or a typo would otherwise surface as events silently never delivered.
+        for (name, path) in [
+            ("MQTT_TLS_CA_FILE", &security.tls_ca_file),
+            ("MQTT_TLS_CLIENT_CERT", &security.tls_client_cert),
+            ("MQTT_TLS_CLIENT_KEY", &security.tls_client_key),
+        ] {
+            if path.as_ref().is_some_and(|path| !path.is_file()) {
+                return Err(format!(
+                    "{name} must name a readable file when MODE=production"
+                ));
+            }
+        }
+        if !problems.is_empty() {
+            return Err(format!("{} when MODE=production", problems.join("; ")));
+        }
+    }
+    Ok(security)
 }
 
 /// The shortest `SUBSCRIBER_SECRET`, in characters (`config.py`'s
@@ -758,6 +881,19 @@ fn env_bool(key: &str, default: bool) -> Result<bool, String> {
     }
 }
 
+/// An optional string (`None` when unset or empty -- compose and Helm
+/// templating emit `NAME=` for an unset optional value; a required value that
+/// is empty is then refused by the caller as missing). A non-UTF-8 value is an
+/// error.
+fn env_present(key: &str) -> Result<Option<String>, String> {
+    match env::var(key) {
+        Ok(value) if value.is_empty() => Ok(None),
+        Ok(value) => Ok(Some(value)),
+        Err(env::VarError::NotPresent) => Ok(None),
+        Err(env::VarError::NotUnicode(_)) => Err(format!("{key} must be valid UTF-8")),
+    }
+}
+
 fn env_flag(key: &str) -> bool {
     matches!(env::var(key).as_deref(), Ok("1") | Ok("true") | Ok("True"))
 }
@@ -788,6 +924,12 @@ mod tests {
             "POSTGRES_PORT",
             "MQTT_HOST",
             "MQTT_PORT",
+            "MQTT_USERNAME",
+            "MQTT_PASSWORD",
+            "MQTT_TLS_CA_FILE",
+            "MQTT_TLS_CLIENT_CERT",
+            "MQTT_TLS_CLIENT_KEY",
+            "MQTT_ALLOW_INSECURE",
             "RUSTFS_ACCESS_KEY",
             "S3_ACCESS_KEY",
             "RUSTFS_SECRET_KEY",
@@ -821,6 +963,17 @@ mod tests {
         ] {
             unsafe { env::remove_var(key) };
         }
+        // `MODE` has no default (`Mode::from_env`), so a test that is not
+        // about the mode starts from the explicit value the devcontainer
+        // sets; the tests about an unset `MODE` remove it themselves.
+        unsafe { env::set_var("MODE", "dev") };
+    }
+
+    /// The MQTT variables a hardened production deployment sets.
+    fn set_hardened_mqtt() {
+        unsafe { env::set_var("MQTT_USERNAME", "app") };
+        unsafe { env::set_var("MQTT_PASSWORD", "a-real-broker-secret") };
+        unsafe { env::set_var("MQTT_TLS_CA_FILE", "/etc/ssl/certs/ca-certificates.crt") };
     }
 
     #[test]
@@ -903,7 +1056,28 @@ mod tests {
     }
 
     #[test]
-    fn defaults_to_dev_mode() {
+    fn refuses_to_start_without_a_mode() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_all();
+        unsafe { env::remove_var("MODE") };
+        let err = Settings::from_env().expect_err("an unset MODE must be rejected");
+        assert!(err.contains("MODE must be set"), "{err}");
+        // Empty is not "unset" and is not a mode either.
+        unsafe { env::set_var("MODE", "") };
+        let err = Settings::from_env().expect_err("an empty MODE must be rejected");
+        assert!(err.contains("MODE must be one of"), "{err}");
+        // Nor is a value that is not UTF-8.
+        {
+            use std::os::unix::ffi::OsStrExt;
+            unsafe { env::set_var("MODE", std::ffi::OsStr::from_bytes(b"d\xffv")) };
+        }
+        let err = Settings::from_env().expect_err("a non-UTF-8 MODE must be rejected");
+        assert_eq!(err, "MODE must be valid UTF-8");
+        clear_all();
+    }
+
+    #[test]
+    fn dev_mode_validates_with_its_defaults() {
         let _guard = ENV_LOCK.lock().unwrap();
         clear_all();
         let settings = Settings::from_env().expect("dev defaults must validate");
@@ -992,6 +1166,10 @@ mod tests {
         unsafe { env::set_var("OIDC_ISSUER_URL", "https://issuer.example.com/realms/api") };
         unsafe { env::set_var("PUBLIC_BASE_URL", "https://api.example.com") };
         unsafe { env::set_var("POSTGRES_SSLMODE", "verify-full") };
+        // Everything but the MQTT broker is hardened: that alone refuses.
+        let err = Settings::from_env().expect_err("a plaintext broker must be rejected");
+        assert!(err.contains("MQTT_TLS_CA_FILE"), "{err}");
+        set_hardened_mqtt();
         assert!(Settings::from_env().is_ok());
         clear_all();
     }
@@ -1009,6 +1187,7 @@ mod tests {
         unsafe { env::set_var("REDIS_URL", "rediss://redis.example.com:6379/0") };
         unsafe { env::set_var("OIDC_ISSUER_URL", "https://issuer.example.com/realms/api") };
         unsafe { env::set_var("PUBLIC_BASE_URL", "https://api.example.com") };
+        set_hardened_mqtt();
         for weak in ["disable", "allow", "prefer"] {
             unsafe { env::set_var("POSTGRES_SSLMODE", weak) };
             let err = Settings::from_env().expect_err("a weak sslmode must be rejected");
@@ -1034,6 +1213,7 @@ mod tests {
         unsafe { env::set_var("REDIS_URL", "rediss://redis.example.com:6379/0") };
         unsafe { env::set_var("OIDC_ISSUER_URL", "https://issuer.example.com/realms/api") };
         unsafe { env::set_var("PUBLIC_BASE_URL", "https://api.example.com") };
+        set_hardened_mqtt();
         unsafe {
             env::set_var(
                 "DATABASE_URL",
@@ -1436,7 +1616,165 @@ mod tests {
         let err = Settings::from_env().expect_err("a plaintext public issuer must be rejected");
         assert!(err.contains("OIDC_ISSUER"), "{err}");
         unsafe { env::set_var("OIDC_ISSUER", "https://issuer.example.com/realms/api") };
+        set_hardened_mqtt();
         assert!(Settings::from_env().is_ok());
+        clear_all();
+    }
+
+    #[test]
+    fn mqtt_security_is_empty_by_default_outside_production() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_all();
+        for mode in [Mode::Dev, Mode::Mock] {
+            assert_eq!(mqtt_security(mode), Ok(MqttSecurity::default()));
+        }
+        clear_all();
+    }
+
+    #[test]
+    fn mqtt_security_reads_every_variable_and_redacts_the_password() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_all();
+        set_hardened_mqtt();
+        unsafe { env::set_var("MQTT_TLS_CLIENT_CERT", "/tls/client.crt") };
+        unsafe { env::set_var("MQTT_TLS_CLIENT_KEY", "/tls/client.key") };
+        let security = mqtt_security(Mode::Dev).unwrap();
+        assert_eq!(security.username.as_deref(), Some("app"));
+        assert_eq!(security.password.as_deref(), Some("a-real-broker-secret"));
+        assert_eq!(
+            security.tls_ca_file,
+            Some(PathBuf::from("/etc/ssl/certs/ca-certificates.crt"))
+        );
+        assert_eq!(
+            security.tls_client_cert,
+            Some(PathBuf::from("/tls/client.crt"))
+        );
+        assert_eq!(
+            security.tls_client_key,
+            Some(PathBuf::from("/tls/client.key"))
+        );
+        assert!(!security.allow_insecure);
+        let shown = format!("{security:?}");
+        assert!(
+            shown.contains("<redacted>") && shown.contains("app"),
+            "{shown}"
+        );
+        assert!(!shown.contains("a-real-broker-secret"), "{shown}");
+        clear_all();
+    }
+
+    #[test]
+    fn mqtt_security_rejects_malformed_combinations_in_every_mode() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cases: [(&[(&str, &str)], &str); 5] = [
+            (&[("MQTT_USERNAME", "app")], "set together"),
+            (&[("MQTT_PASSWORD", "secret")], "set together"),
+            (&[("MQTT_TLS_CLIENT_CERT", "/c.crt")], "set together"),
+            (
+                &[
+                    ("MQTT_TLS_CLIENT_CERT", "/c.crt"),
+                    ("MQTT_TLS_CLIENT_KEY", "/c.key"),
+                ],
+                "needs MQTT_TLS_CA_FILE",
+            ),
+            (
+                &[("MQTT_USERNAME", "app"), ("MQTT_PASSWORD", "secret")],
+                "MQTT_ALLOW_INSECURE=true",
+            ),
+        ];
+        for (vars, expected) in cases {
+            clear_all();
+            for (key, value) in vars {
+                unsafe { env::set_var(key, value) };
+            }
+            let err = mqtt_security(Mode::Dev).expect_err("malformed MQTT options must fail");
+            assert!(err.contains(expected), "{vars:?}: {err}");
+            assert!(!err.contains("secret"), "{err}");
+        }
+        clear_all();
+        // Empty is unset (templating emits `NAME=`), and so still missing in
+        // production.
+        unsafe { env::set_var("MQTT_USERNAME", "") };
+        assert_eq!(mqtt_security(Mode::Dev), Ok(MqttSecurity::default()));
+        let err = mqtt_security(Mode::Production).expect_err("empty is not a credential");
+        assert!(
+            err.contains("MQTT_USERNAME and MQTT_PASSWORD must be set"),
+            "{err}"
+        );
+        {
+            use std::os::unix::ffi::OsStrExt;
+            unsafe { env::set_var("MQTT_USERNAME", std::ffi::OsStr::from_bytes(b"a\xffb")) };
+        }
+        let err = mqtt_security(Mode::Dev).expect_err("a non-UTF-8 value must fail");
+        assert_eq!(err, "MQTT_USERNAME must be valid UTF-8");
+        clear_all();
+    }
+
+    #[test]
+    fn production_refuses_tls_files_that_do_not_exist() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_all();
+        set_hardened_mqtt();
+        assert!(mqtt_security(Mode::Production).is_ok());
+        const CA: &str = "/etc/ssl/certs/ca-certificates.crt";
+        for key in [
+            "MQTT_TLS_CA_FILE",
+            "MQTT_TLS_CLIENT_CERT",
+            "MQTT_TLS_CLIENT_KEY",
+        ] {
+            clear_all();
+            set_hardened_mqtt();
+            unsafe { env::set_var("MQTT_TLS_CLIENT_CERT", CA) };
+            unsafe { env::set_var("MQTT_TLS_CLIENT_KEY", CA) };
+            unsafe { env::set_var(key, "/no/such/mqtt/file.pem") };
+            let err = mqtt_security(Mode::Production).expect_err("a missing file is refused");
+            let expected = format!("{key} must name a readable file when MODE=production");
+            assert_eq!(err, expected);
+        }
+        clear_all();
+    }
+
+    #[test]
+    fn mqtt_credentials_over_plaintext_need_an_explicit_opt_in_outside_production() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_all();
+        unsafe { env::set_var("MQTT_USERNAME", "app") };
+        unsafe { env::set_var("MQTT_PASSWORD", "a-dev-secret") };
+        unsafe { env::set_var("MQTT_ALLOW_INSECURE", "true") };
+        let security = mqtt_security(Mode::Dev).unwrap();
+        assert!(security.allow_insecure);
+        assert!(security.tls_ca_file.is_none());
+        clear_all();
+    }
+
+    #[test]
+    fn production_requires_mqtt_tls_and_credentials_and_refuses_the_insecure_opt_in() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_all();
+        let err = mqtt_security(Mode::Production).expect_err("an open broker must be refused");
+        assert_eq!(
+            err,
+            "MQTT_TLS_CA_FILE must be set; MQTT_USERNAME and MQTT_PASSWORD must be set \
+             when MODE=production"
+        );
+        // TLS without credentials is still anonymous.
+        unsafe { env::set_var("MQTT_TLS_CA_FILE", "/etc/ssl/certs/ca-certificates.crt") };
+        let err = mqtt_security(Mode::Production).expect_err("an anonymous client is refused");
+        assert!(
+            err.starts_with("MQTT_USERNAME and MQTT_PASSWORD must be set"),
+            "{err}"
+        );
+        // The opt-in meant for a local broker is not honoured.
+        set_hardened_mqtt();
+        unsafe { env::set_var("MQTT_ALLOW_INSECURE", "true") };
+        let err = mqtt_security(Mode::Production).expect_err("the opt-in is refused");
+        assert_eq!(
+            err,
+            "MQTT_ALLOW_INSECURE must not be set when MODE=production"
+        );
+        unsafe { env::set_var("MQTT_ALLOW_INSECURE", "maybe") };
+        let err = mqtt_security(Mode::Production).expect_err("a typo must not flip the switch");
+        assert!(err.contains("MQTT_ALLOW_INSECURE"), "{err}");
         clear_all();
     }
 }

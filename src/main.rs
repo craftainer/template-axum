@@ -7,6 +7,7 @@ use std::future::IntoFuture;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use craftainer_observability::analytics::{self, AnalyticsConfig};
 use craftainer_observability::otel::instrument_db;
 use craftainer_observability::{
     configure_telemetry, logs::configure_telemetry_without_export, Error as ObservabilityError,
@@ -19,7 +20,7 @@ use template_axum::{
 };
 
 /// How long shutdown waits for the analytics flush. Equal to the library's
-/// own `FLUSH_INTERVAL` (craftainer-observability 0.4.0, `analytics::umami`,
+/// own `FLUSH_INTERVAL` (craftainer-observability 0.5.0, `analytics::umami`,
 /// private, so repeated here): the Umami flusher sends its queue at least
 /// that often, so a final flush still running after one interval is stuck
 /// rather than slow. If the library's interval changes, revisit this value.
@@ -64,6 +65,15 @@ async fn main() {
         eprintln!("invalid configuration: {err}");
         std::process::exit(1);
     }
+    // Every ANALYTICS_* value is validated here: an unknown one is a startup
+    // error (fail closed) instead of silently turning analytics off or on at
+    // the first `track()`. The client is installed now, with the telemetry
+    // handle, so the `otel` backend can reach the OTLP logger provider.
+    let analytics_config = AnalyticsConfig::from_env().unwrap_or_else(|err| {
+        eprintln!("invalid configuration: {err}");
+        std::process::exit(1);
+    });
+    analytics::init(&analytics_config, Some(&logging));
     let stats_cache_enabled = template_axum::config::stats_cache_ttl()
         .unwrap_or_else(|err| {
             eprintln!("invalid configuration: {err}");
@@ -92,8 +102,9 @@ async fn main() {
 
     // `into_make_service_with_connect_info` (rather than plain `app.
     // into_make_service()`) makes the caller's socket address available to
-    // handlers via the `ConnectInfo<SocketAddr>` extractor -- src/
-    // rate_limit.rs's per-IP check needs it.
+    // handlers via the `ConnectInfo<SocketAddr>` extractor -- `POST
+    // /mock/token`'s per-IP rate limit needs it (the Hero write limit is keyed
+    // on the token's `sub`).
     let serve = axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),

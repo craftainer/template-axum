@@ -5,9 +5,8 @@
 //! caller's own `sub`); soft-deleted per ADR 0012.
 
 use std::collections::BTreeMap;
-use std::net::SocketAddr;
 
-use axum::extract::{ConnectInfo, Query, State};
+use axum::extract::{Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -15,15 +14,17 @@ use axum::{Json, Router};
 
 use crate::hero::controllers::analytics;
 use crate::hero::controllers::{
-    enforce_if_match, read_etag, AppState, HERO_DELETE_ROLES, HERO_EVENT_RESOURCE, HERO_READ_ROLES,
-    HERO_WRITE_ROLES,
+    announce, enforce_if_match, enforce_write_limit, read_etag, require_archive_access, AppState,
+    HERO_DELETE_ROLES, HERO_EVENT_RESOURCE, HERO_READ_ROLES, HERO_WRITE_ROLES,
 };
 use crate::hero::models::hero;
 use crate::hero::views::hero::{HeroCreate, HeroListQuery, HeroRead, HeroUpdate};
 use crate::oidc::AuthClaims;
 use crate::problem_details::AppError;
 use craftainer_crud::conditional::{not_modified, record_etag, revalidation_headers};
-use craftainer_crud::controllers::crud_actions::{self, DeleteOutcome, ListOrGet, UpdateOutcome};
+use craftainer_crud::controllers::crud_actions::{
+    self, ArchivedScope, DeleteOutcome, ListOrGet, UpdateOutcome,
+};
 use craftainer_crud::controllers::crud_events::{self, EventSse};
 use craftainer_crud::controllers::crud_query::{
     parse_archived_scope, parse_bulk_delete_include_unpublished, parse_filters,
@@ -37,16 +38,6 @@ use craftainer_crud::views::stats::{
     CategoricalValueCount, LifecycleStats, NumericFieldStat, Prediction, ResourceStats,
     SeriesPoint, TimeBucketCount,
 };
-
-/// Rate-limit scope key (`src/rate_limit.rs`) shared by create/update/
-/// delete -- a single record edit shares the same per-caller budget as
-/// every other mutating call, matching `rate_limit.py`'s own reasoning
-/// (see that module's doc comment) for applying the limit to a route's
-/// handler as a whole rather than exempting any one verb. `pub(crate)`:
-/// shared with `controllers::heroes_xml` (`docs/adrs/0014`) so both
-/// sibling routers draw from the same per-caller budget rather than each
-/// format getting its own.
-pub(crate) const HERO_WRITE_RATE_SCOPE: &str = "hero-write";
 
 /// Hero's filterable/sortable fields, derived by hand from `HeroRead`'s
 /// scalar fields (`docs/adrs/0013`) -- `powers` (a list, not a scalar) has
@@ -82,6 +73,7 @@ async fn list_or_get(
 ) -> Result<Response, AppError> {
     claims.require_any_role(&state.settings.oidc_client_id, HERO_READ_ROLES)?;
     let archived = parse_archived_scope(&raw_params).map_err(AppError::UnprocessableEntity)?;
+    require_archive_access(&state, &claims, archived != ArchivedScope::Live)?;
     let filters =
         parse_filters(HERO_FIELD_SPECS, &raw_params).map_err(AppError::UnprocessableEntity)?;
     let sort = parse_sort(HERO_FIELD_SPECS, &raw_params).map_err(AppError::UnprocessableEntity)?;
@@ -116,33 +108,18 @@ async fn list_or_get(
 /// client input (ADR 0011).
 async fn create(
     State(state): State<AppState>,
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     AuthClaims(claims): AuthClaims,
     Json(payload): Json<HeroCreate>,
 ) -> Result<(StatusCode, Json<HeroRead>), AppError> {
-    state
-        .rate_limiter
-        .check(
-            HERO_WRITE_RATE_SCOPE,
-            addr.ip(),
-            state.settings.rate_limit_hero_write_per_minute,
-            60,
-        )
-        .await?;
     claims.require_any_role(&state.settings.oidc_client_id, HERO_WRITE_ROLES)?;
+    enforce_write_limit(&state, &claims).await?;
     payload.validate().map_err(AppError::UnprocessableEntity)?;
     let owner_id = claims.subject()?.to_string();
     let hero = state.hero_crud.create(&owner_id, payload).await?;
     // Announced only after the write actually succeeded, and never able to
     // fail it (docs/adrs/0016) -- a subscriber is told about records that
     // exist, not about attempts.
-    crud_events::publish(
-        &state.events,
-        HERO_EVENT_RESOURCE,
-        EventAction::Create,
-        vec![hero.id],
-    )
-    .await;
+    announce(&state, EventAction::Create, vec![hero.id]).await;
     // Likewise only after success: a failed write returned above and emits
     // nothing (docs/adrs/0029).
     analytics::hero_created(&hero);
@@ -158,29 +135,20 @@ async fn create(
 /// (`docs/adrs/0023`); the bulk form ignores both.
 async fn update(
     State(state): State<AppState>,
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     AuthClaims(claims): AuthClaims,
     Query(query): Query<HeroListQuery>,
     Query(raw_params): Query<Vec<(String, String)>>,
     request_headers: HeaderMap,
     Json(payload): Json<HeroUpdate>,
 ) -> Result<Response, AppError> {
-    state
-        .rate_limiter
-        .check(
-            HERO_WRITE_RATE_SCOPE,
-            addr.ip(),
-            state.settings.rate_limit_hero_write_per_minute,
-            60,
-        )
-        .await?;
     claims.require_any_role(&state.settings.oidc_client_id, HERO_WRITE_ROLES)?;
+    enforce_write_limit(&state, &claims).await?;
     payload.validate().map_err(AppError::UnprocessableEntity)?;
     let filters =
         parse_filters(HERO_FIELD_SPECS, &raw_params).map_err(AppError::UnprocessableEntity)?;
     reject_only_archived(&raw_params).map_err(AppError::UnprocessableEntity)?;
     let owner_id = claims.subject()?.to_string();
-    enforce_if_match(&state, &request_headers, query.id, &raw_params).await?;
+    enforce_if_match(&state, &claims, &request_headers, query.id, &raw_params).await?;
 
     match crud_actions::resolve_update(
         &state.hero_crud,
@@ -193,13 +161,7 @@ async fn update(
     .await?
     {
         UpdateOutcome::One(hero) => {
-            crud_events::publish(
-                &state.events,
-                HERO_EVENT_RESOURCE,
-                EventAction::Update,
-                vec![hero.id],
-            )
-            .await;
+            announce(&state, EventAction::Update, vec![hero.id]).await;
             Ok((
                 [(header::ETAG, record_etag(&hero))],
                 Json(hero_read_json(hero)),
@@ -207,13 +169,7 @@ async fn update(
                 .into_response())
         }
         UpdateOutcome::Bulk(result) => {
-            crud_events::publish(
-                &state.events,
-                HERO_EVENT_RESOURCE,
-                EventAction::UpdateMany,
-                result.ids.clone(),
-            )
-            .await;
+            announce(&state, EventAction::UpdateMany, result.ids.clone()).await;
             Ok(
                 Json(serde_json::to_value(result).expect("BulkUpdateResult always serializes"))
                     .into_response(),
@@ -231,29 +187,20 @@ async fn update(
 /// `docs/adrs/0023`); the bulk form ignores it.
 async fn delete_hero(
     State(state): State<AppState>,
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     AuthClaims(claims): AuthClaims,
     Query(query): Query<HeroListQuery>,
     Query(raw_params): Query<Vec<(String, String)>>,
     request_headers: HeaderMap,
 ) -> Result<Response, AppError> {
-    state
-        .rate_limiter
-        .check(
-            HERO_WRITE_RATE_SCOPE,
-            addr.ip(),
-            state.settings.rate_limit_hero_write_per_minute,
-            60,
-        )
-        .await?;
     claims.require_any_role(&state.settings.oidc_client_id, HERO_DELETE_ROLES)?;
+    enforce_write_limit(&state, &claims).await?;
     let filters =
         parse_filters(HERO_FIELD_SPECS, &raw_params).map_err(AppError::UnprocessableEntity)?;
     reject_only_archived(&raw_params).map_err(AppError::UnprocessableEntity)?;
     let include_unpublished = parse_bulk_delete_include_unpublished(&raw_params)
         .map_err(AppError::UnprocessableEntity)?;
     let owner_id = claims.subject()?.to_string();
-    enforce_if_match(&state, &request_headers, query.id, &raw_params).await?;
+    enforce_if_match(&state, &claims, &request_headers, query.id, &raw_params).await?;
 
     match crud_actions::resolve_delete(
         &state.hero_crud,
@@ -270,19 +217,12 @@ async fn delete_hero(
             // `Some` (see `crud_actions::resolve_delete`), so the id the
             // event announces is the one the caller addressed.
             let ids = query.id.into_iter().collect();
-            crud_events::publish(&state.events, HERO_EVENT_RESOURCE, EventAction::Delete, ids)
-                .await;
+            announce(&state, EventAction::Delete, ids).await;
             analytics::hero_deleted();
             Ok(StatusCode::NO_CONTENT.into_response())
         }
         DeleteOutcome::Bulk(result) => {
-            crud_events::publish(
-                &state.events,
-                HERO_EVENT_RESOURCE,
-                EventAction::DeleteMany,
-                result.ids.clone(),
-            )
-            .await;
+            announce(&state, EventAction::DeleteMany, result.ids.clone()).await;
             Ok(Json(result).into_response())
         }
     }
@@ -436,6 +376,7 @@ async fn get_stats(
     reject_only_archived(&raw_params).map_err(AppError::UnprocessableEntity)?;
     let include_archived =
         parse_include_archived(&raw_params).map_err(AppError::UnprocessableEntity)?;
+    require_archive_access(&state, &claims, include_archived)?;
     let bucket = crud_stats::parse_bucket(query.bucket.as_ref())?;
 
     let params = BTreeMap::from([
@@ -609,11 +550,14 @@ struct EventsQuery {
 /// `GET /events` -- a Server-Sent Events stream of this resource's
 /// create/update/delete activity (`docs/adrs/0016`, FR-0030).
 ///
-/// The first frame carries the `subscriber_id` this connection was issued;
-/// sending it back (`?subscriber_id=`, or automatically via
-/// `Last-Event-ID`) on reconnect resumes the same persistent MQTT session,
-/// which is what replays events published while the client was away. A
-/// client that discards it gets a working stream with no replay.
+/// The first frame carries the `subscriber_id` this connection was issued.
+/// Streams are transient: a clean MQTT session, no replay, and a
+/// `subscriber_id` or `Last-Event-ID` the client sends back is ignored
+/// (`docs/adrs/0031`; durable sessions are opt-in on the bus, which this app
+/// does not enable). A client that missed events refetches.
+///
+/// The caller's `sub` is the stream-limit key: at most 5 concurrent streams
+/// per caller and 2 per subscriber id, `429` beyond.
 ///
 /// JSON-only: there is no XML sibling of this route (`docs/adrs/0017` in
 /// the reference), since `text/event-stream` frames carry JSON payloads.
@@ -624,9 +568,10 @@ async fn events(
     headers: HeaderMap,
 ) -> Result<EventSse, AppError> {
     claims.require_any_role(&state.settings.oidc_client_id, HERO_READ_ROLES)?;
-    Ok(crud_events::event_stream_until(
+    Ok(crud_events::event_stream_until_for_caller(
         &state.events,
         HERO_EVENT_RESOURCE,
+        claims.subject()?,
         query.subscriber_id.as_deref(),
         &headers,
         state.shutdown.clone(),
@@ -737,25 +682,13 @@ mod tests {
         } else {
             Body::from(body.to_string())
         };
-        let mut request = Request::builder()
+        Request::builder()
             .method(method)
             .uri(uri)
             .header("Authorization", format!("Bearer {}", token(sub, roles)))
             .header("Content-Type", "application/json")
             .body(body)
-            .unwrap();
-        // create/update/delete_hero extract ConnectInfo<SocketAddr> for
-        // rate limiting -- `oneshot` bypasses the real
-        // `into_make_service_with_connect_info` main.rs wires up, so tests
-        // insert the same extension by hand (harmless for routes that
-        // don't extract it, e.g. the GET list/get handler).
-        request
-            .extensions_mut()
-            .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
-                [127, 0, 0, 1],
-                12345,
-            ))));
-        request
+            .unwrap()
     }
 
     async fn json_body(response: axum::response::Response) -> serde_json::Value {
@@ -1018,6 +951,62 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn the_write_limit_is_charged_after_the_role_check_and_keyed_on_the_subject() {
+        let settings = Arc::new(Settings {
+            rate_limit_hero_write_per_minute: 1,
+            ..mock_settings()
+        });
+        let state = AppState {
+            oidc: Arc::new(OidcVerifier::new(settings.clone())),
+            settings,
+            health_registry: Arc::new(HealthRegistry::new()),
+            hero_crud: Arc::new(craftainer_crud::crud::CrudService::new(DynHeroRepository(
+                Box::new(HeroMemoryRepository::new()),
+            ))),
+            rate_limiter: Arc::new(crate::rate_limit::RateLimiter::mock()),
+            hero_stats: craftainer_crud::stats_cache::CachedStats::uncached("heroes"),
+            shutdown: tokio_util::sync::CancellationToken::new(),
+            events: Arc::new(craftainer_crud::events::EventBus::mock()),
+        };
+        let shared_app = router().with_state(state);
+        let post = |sub: &'static str, roles: &'static [&'static str]| {
+            let app = shared_app.clone();
+            async move {
+                app.oneshot(authed(
+                    "POST",
+                    "/",
+                    sub,
+                    roles,
+                    serde_json::from_str(VALID_HERO).unwrap(),
+                ))
+                .await
+                .unwrap()
+                .status()
+            }
+        };
+
+        // A caller the role check refuses spends nothing, however often it
+        // tries: the budget is for callers who may write.
+        for _ in 0..3 {
+            assert_eq!(post("viewer-1", &["viewer"]).await, StatusCode::FORBIDDEN);
+        }
+        // Every subject has its own budget (a shared peer address, as behind
+        // the BFF, does not merge them): alice and bob each get one write...
+        assert_eq!(post("alice", &["editor"]).await, StatusCode::CREATED);
+        assert_eq!(post("bob", &["editor"]).await, StatusCode::CREATED);
+        // ...and a second one from alice is over her limit, while the viewer's
+        // refused attempts above never touched it.
+        assert_eq!(
+            post("alice", &["editor"]).await,
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        assert_eq!(
+            post("bob", &["editor"]).await,
+            StatusCode::TOO_MANY_REQUESTS
+        );
     }
 
     #[tokio::test]
@@ -1627,12 +1616,47 @@ mod tests {
         );
         let body = sse_frames(response, 1).await;
         assert!(body.contains("event: subscriber"), "{body}");
-        // A server-minted id the client hands back is resumed as is.
-        assert!(body.contains(&format!("id: {minted}")), "{body}");
-        assert!(
-            body.contains(&format!(r#"{{"subscriber_id":"{minted}"}}"#)),
-            "{body}"
+        // Streams are transient (docs/adrs/0031): an id handed back is not
+        // resumed, the connection is issued a fresh one.
+        assert!(!body.contains(&minted), "{body}");
+        assert_eq!(issued_id(&body).len(), 64, "{body}");
+    }
+
+    #[tokio::test]
+    async fn events_streams_are_capped_per_caller() {
+        let bus = std::sync::Arc::new(craftainer_crud::events::EventBus::mock());
+        let shared_app = app_with_bus(bus);
+        let open = |sub: &'static str| {
+            let app = shared_app.clone();
+            async move {
+                app.oneshot(authed(
+                    "GET",
+                    "/events",
+                    sub,
+                    &["viewer"],
+                    serde_json::Value::Null,
+                ))
+                .await
+                .unwrap()
+            }
+        };
+
+        // Held open, as a real client's streams are.
+        let mut held = Vec::new();
+        for _ in 0..5 {
+            let response = open("alice").await;
+            assert_eq!(response.status(), StatusCode::OK);
+            held.push(response);
+        }
+        assert_eq!(
+            open("alice").await.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "a sixth concurrent stream for one caller is refused"
         );
+        // Another caller has its own budget, and a closed stream frees a slot.
+        assert_eq!(open("bob").await.status(), StatusCode::OK);
+        held.pop();
+        assert_eq!(open("alice").await.status(), StatusCode::OK);
     }
 
     #[tokio::test]
@@ -1982,7 +2006,7 @@ mod tests {
                 "GET",
                 "/?only_archived=true",
                 "alice",
-                &["viewer"],
+                &["maintainer"],
                 serde_json::Value::Null,
             ))
             .await
@@ -2000,7 +2024,11 @@ mod tests {
 
         // A single-record read, a write and /stats cannot honour it.
         for (method, uri, roles) in [
-            ("GET", format!("/?id={live}&only_archived=true"), "viewer"),
+            (
+                "GET",
+                format!("/?id={live}&only_archived=true"),
+                "maintainer",
+            ),
             ("GET", "/stats?only_archived=true".to_string(), "viewer"),
             ("GET", "/stats?include_archived=maybe".to_string(), "viewer"),
             (
@@ -2023,6 +2051,80 @@ mod tests {
             assert_eq!(
                 status_of(&shared_app, "GET", uri, &["viewer"]).await,
                 StatusCode::UNPROCESSABLE_ENTITY,
+                "{uri}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn archived_rows_are_readable_only_with_an_archive_role() {
+        let shared_app = app();
+        let gone = create_hero(
+            &shared_app,
+            "alice",
+            serde_json::json!({"name": "Gone", "powers": ["x"]}),
+        )
+        .await;
+        assert_eq!(
+            status_of(
+                &shared_app,
+                "DELETE",
+                &format!("/?id={gone}"),
+                &["maintainer"]
+            )
+            .await,
+            StatusCode::NO_CONTENT
+        );
+
+        // Every way of asking for archived rows is refused for the read
+        // roles that may not see them: list, single read, stats, and the
+        // `If-Match` pre-read of a write.
+        for role in ["viewer", "editor", "detective"] {
+            for (method, uri) in [
+                ("GET", "/?include_archived=true".to_string()),
+                ("GET", "/?only_archived=true".to_string()),
+                ("GET", format!("/?id={gone}&include_archived=true")),
+                ("GET", "/stats?include_archived=true".to_string()),
+            ] {
+                assert_eq!(
+                    status_of(&shared_app, method, &uri, &[role]).await,
+                    StatusCode::FORBIDDEN,
+                    "{role} {method} {uri}"
+                );
+            }
+        }
+        let response = shared_app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("PATCH")
+                    .uri(format!("/?id={gone}&include_archived=true"))
+                    .header(
+                        "Authorization",
+                        format!("Bearer {}", token("alice", &["editor"])),
+                    )
+                    .header("Content-Type", "application/json")
+                    .header("If-Match", "\"stale\"")
+                    .body(Body::from(r#"{"name":"Back"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        // Plain reads are untouched, and `maintainer` may read the archive.
+        assert_eq!(
+            status_of(&shared_app, "GET", "/", &["viewer"]).await,
+            StatusCode::OK
+        );
+        for uri in [
+            "/?include_archived=true",
+            "/?only_archived=true",
+            "/stats?include_archived=true",
+        ] {
+            assert_eq!(
+                status_of(&shared_app, "GET", uri, &["maintainer"]).await,
+                StatusCode::OK,
                 "{uri}"
             );
         }

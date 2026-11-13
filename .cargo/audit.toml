@@ -1,5 +1,17 @@
 # cargo-audit config -- see .pre-commit-config.yaml's cargo-audit hook and
 # docs/TEMPLATE.md's "Checks" section for what a narrow, justified exception
-# to a failing check looks like. No exceptions are currently needed.
+# to a failing check looks like.
 [advisories]
-ignore = []
+ignore = [
+  # TEMPORARY, review by 2027-01-09 (cargo-audit has no expiry field; the
+  # same date as the osv-scanner.toml entry and lib-crud-rs#36).
+  # RUSTSEC-2026-0459 (C SQLite CVE-2026-119375) is reported against
+  # libsqlite3-sys 0.30.1, which is in Cargo.lock only through optional weak
+  # dependency features of sqlx. SQLite is never compiled: `cargo tree
+  # --locked --workspace -i libsqlite3-sys --all-features --target all -e
+  # normal,build,dev` (and the same for sqlx-sqlite) prints "nothing to
+  # print". The fixed libsqlite3-sys 0.39 is unreachable: sqlx-sqlite 0.9.0,
+  # the latest sqlx, caps it below 0.38. Remove once a sqlx release allows
+  # libsqlite3-sys >= 0.39.
+  "RUSTSEC-2026-0459",
+]

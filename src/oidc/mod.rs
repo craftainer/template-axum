@@ -20,6 +20,14 @@ use crate::problem_details::AppError;
 pub mod well_known;
 
 const JWKS_CACHE_TTL: Duration = Duration::from_secs(300);
+/// How long one discovery or JWKS request may take in all (connect, send,
+/// read the body). Without a bound, an identity provider that accepts the
+/// connection and never answers ties up every authenticated request behind
+/// its own unbounded fetch (OWASP A10, mishandling exceptional conditions);
+/// with it they fail as `503` after this long.
+const HTTP_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long connecting to the identity provider may take.
+const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 /// Fixed HS256 key `POST /mock/token` signs with -- never verified against
 /// (Mode::Mock trusts claims as-is), so it doesn't need to be a real
 /// secret; matches `controllers/mock.py`'s equivalent constant.
@@ -92,6 +100,19 @@ impl Claims {
     }
 }
 
+/// The client for discovery and JWKS fetches: bounded in time and following
+/// no redirects (the provider's endpoints are fixed configuration; a
+/// redirect would let a compromised or misconfigured endpoint send the
+/// fetch, and the keys it trusts, elsewhere).
+fn http_client(timeout: Duration, connect_timeout: Duration) -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(timeout)
+        .connect_timeout(connect_timeout)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .expect("the OIDC HTTP client builds with a TLS backend present")
+}
+
 impl OidcVerifier {
     /// A verifier for the issuer, audience and discovery URL `settings`
     /// alone implies (`ResourceServer::from_settings`); the wiring uses
@@ -105,7 +126,7 @@ impl OidcVerifier {
         Self {
             settings,
             resource,
-            http: reqwest::Client::new(),
+            http: http_client(HTTP_TIMEOUT, HTTP_CONNECT_TIMEOUT),
             jwks: RwLock::new(None),
         }
     }
@@ -183,6 +204,9 @@ impl OidcVerifier {
         validation.set_issuer(&[self.resource.issuer.as_str()]);
         validation.set_audience(&[self.resource.audience.as_str()]);
         validation.set_required_spec_claims(&["exp", "iss", "aud"]);
+        // A token that is not valid yet is refused too (RFC 7519 section 4.1.5);
+        // the default leeway absorbs clock skew.
+        validation.validate_nbf = true;
 
         let data = jsonwebtoken::decode::<Value>(token, &decoding_key, &validation)
             .map_err(|_| invalid())?;
@@ -223,8 +247,11 @@ where
             .get(axum::http::header::AUTHORIZATION)
             .and_then(|value| value.to_str().ok())
             .ok_or_else(|| unauthorized(&parts.uri))?;
+        // The scheme is case-insensitive (RFC 9110 section 11.1, RFC 6750).
         let token = header
-            .strip_prefix("Bearer ")
+            .split_once(' ')
+            .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("Bearer"))
+            .map(|(_, token)| token)
             .ok_or_else(|| unauthorized(&parts.uri))?;
 
         match state.oidc_verifier().decode_bearer_token(token).await {
@@ -483,5 +510,123 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(claims.subject().unwrap(), "dave");
+    }
+    #[tokio::test]
+    async fn auth_claims_accepts_the_bearer_scheme_in_any_case() {
+        let state = FakeState(OidcVerifier::new(Arc::new(mock_settings())));
+        let token = jsonwebtoken::encode(
+            &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256),
+            &serde_json::json!({"sub": "erin"}),
+            &jsonwebtoken::EncodingKey::from_secret(b"anything"),
+        )
+        .unwrap();
+        for scheme in ["bearer", "BEARER", "BeArEr"] {
+            let request = Request::builder()
+                .header("Authorization", format!("{scheme} {token}"))
+                .body(())
+                .unwrap();
+            let (mut parts, ()) = request.into_parts();
+            let AuthClaims(claims) = AuthClaims::from_request_parts(&mut parts, &state)
+                .await
+                .unwrap();
+            assert_eq!(claims.subject().unwrap(), "erin", "{scheme}");
+        }
+    }
+
+    // -- discovery/JWKS fetch: bounded in time, no redirects --
+
+    /// A verifier outside mock mode whose discovery document is fetched from
+    /// `issuer` (an unroutable-port stand-in the tests control), with the
+    /// given timeouts.
+    fn verifier_for(issuer: &str, timeout: Duration) -> OidcVerifier {
+        let settings = Arc::new(Settings {
+            mode: Mode::Dev,
+            oidc_issuer_url: issuer.to_string(),
+            ..mock_settings()
+        });
+        let mut verifier = OidcVerifier::new(settings);
+        verifier.http = http_client(timeout, timeout);
+        verifier
+    }
+
+    /// A syntactically valid RS256 token with a `kid`, so verification gets
+    /// as far as fetching the key set.
+    fn token_with_kid() -> String {
+        use base64::Engine;
+        let b64 = |json: &str| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json);
+        format!(
+            "{}.{}.c2ln",
+            b64(r#"{"alg":"RS256","typ":"JWT","kid":"k1"}"#),
+            b64(r#"{"sub":"alice"}"#)
+        )
+    }
+
+    #[tokio::test]
+    async fn a_provider_that_never_answers_fails_as_unavailable_within_the_timeout() {
+        // Accepts connections and then says nothing, like a stalled IdP.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let stall = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((socket, _)) = listener.accept().await {
+                held.push(socket);
+            }
+        });
+
+        let verifier = verifier_for(
+            &format!("http://127.0.0.1:{port}/realms/r"),
+            Duration::from_millis(300),
+        );
+        let started = Instant::now();
+        let err = verifier
+            .decode_bearer_token(&token_with_kid())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AppError::ServiceUnavailable(_)), "{err:?}");
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "the fetch must not outlive its timeout"
+        );
+        stall.abort();
+    }
+
+    #[tokio::test]
+    async fn a_redirecting_discovery_endpoint_is_not_followed() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        // The "target" the redirect points at must never be contacted.
+        let target = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_port = target.local_addr().unwrap().port();
+        let contacted = tokio::spawn(async move { target.accept().await.is_ok() });
+
+        let redirector = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = redirector.local_addr().unwrap().port();
+        let serve = tokio::spawn(async move {
+            while let Ok((mut socket, _)) = redirector.accept().await {
+                let mut buffer = [0u8; 1024];
+                let _ = socket.read(&mut buffer).await;
+                let reply = format!(
+                    "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{target_port}/x\r\n\
+                     Content-Length: 0\r\nConnection: close\r\n\r\n"
+                );
+                let _ = socket.write_all(reply.as_bytes()).await;
+            }
+        });
+
+        let verifier = verifier_for(
+            &format!("http://127.0.0.1:{port}/realms/r"),
+            Duration::from_secs(2),
+        );
+        let err = verifier
+            .decode_bearer_token(&token_with_kid())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AppError::ServiceUnavailable(_)), "{err:?}");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            !contacted.is_finished(),
+            "the redirect target must not have been contacted"
+        );
+        serve.abort();
+        contacted.abort();
     }
 }

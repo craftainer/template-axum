@@ -82,4 +82,5 @@ for a new top-level module.
 - The api-catalog has no `service-desc` link: this app serves no OpenAPI
   document.
 - The HTML views still accept `?token=` (a token in a URL); that is a
-  separate finding, not changed here.
+  separate finding, not changed here. (Removed by
+  [ADR 0031](0031-owasp-hardening-after-craftainer-crud-0-4.md).)

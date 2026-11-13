@@ -46,6 +46,10 @@ services:
       # lives purely in the container's writable layer and is rebuilt by
       # scripts/post-create.d/10-cargo-build.sh when needed.
       CARGO_TARGET_DIR: /home/vscode/.cache/cargo-target
+      # The app refuses to start without MODE (src/config.rs, ADR 0031): a
+      # forgotten MODE must not mean the mode that skips the production
+      # checks. The devcontainer runs against the real stack services.
+      MODE: dev
       # Fixed in-network hostnames/ports, not credentials, so they're
       # literal here rather than pulled from a stack env file.
       POSTGRES_HOST: postgres

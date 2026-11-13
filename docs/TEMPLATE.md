@@ -134,8 +134,11 @@ Without a devcontainer: install the pinned Rust toolchain
 `OIDC_AUDIENCE` variables `src/config.rs` reads, plus `OIDC_ISSUER` /
 `OIDC_DISCOVERY_URL` when the token issuer is not the URL the app reaches
 the provider at, `PUBLIC_BASE_URL` (required under `MODE=production`) and
-`SECURITY_TXT_*` (see `src/README.md`'s "OIDC / auth" section) (or run under
-`MODE=mock`, `ALLOW_MOCK_MODE=1` for zero infrastructure), then
+`SECURITY_TXT_*` (see `src/README.md`'s "OIDC / auth" section), and `MODE`
+itself (`dev`, `mock` or `production`; there is no default, the app refuses to
+start without it), or run under `MODE=mock`, `ALLOW_MOCK_MODE=1` for zero
+infrastructure. The `mqtt-tls` feature links the system OpenSSL, so install
+`pkg-config` and `libssl-dev` first. Then
 `cargo run` the same way. Install [`prek`](https://prek.j178.dev/) and
 run `prek install` once to enable the git hooks.
 
@@ -595,7 +598,7 @@ these files over base:
 | `scripts/image-dast.sh` | `replace` | the ZAP baseline scan the `image-dast` hook runs |
 | `.zap/rules.tsv` | `ignore` | the instance's ZAP rule levels, seeded with a commented header |
 | `scripts/test-image-scripts.sh` | `replace` | offline tests of the Makefile and `scripts/` logic, run by the `image-scripts-test` hook |
-| `scripts/runner-setup.d/*.sh` | `replace` for the scripts template-axum ships (`10-ca-certificates.sh`); an instance's own go in `.github/template-sync-manifest.local.yml` | runner-stage hooks |
+| `scripts/runner-setup.d/*.sh` | `replace` for the scripts template-axum ships (`10-ca-certificates.sh`, `20-libssl3.sh`); an instance's own go in `.github/template-sync-manifest.local.yml` | runner-stage hooks |
 | `scripts/check-dockerfile-versions.sh` | `replace` | the version-ARG consistency check |
 
 ### Package targets

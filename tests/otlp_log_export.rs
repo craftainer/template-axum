@@ -145,13 +145,11 @@ async fn startup_logs_reach_an_otlp_collector_and_the_last_batch_is_flushed_on_s
 #[tokio::test(flavor = "multi_thread")]
 async fn an_exporter_that_cannot_be_built_falls_back_to_json_logs_only() {
     let _guard = PORT_8000_LOCK.lock().await;
-    // Not a recognized OTLP compression algorithm, so the exporter builder
-    // fails before any network call (the same trick as the crate's own tests).
-    let child = spawn_app(
-        "http://127.0.0.1:1",
-        &[("OTEL_EXPORTER_OTLP_COMPRESSION", "not-a-real-algorithm")],
-        Stdio::piped(),
-    );
+    // Not a URI, so the exporter builder fails before any network call (the
+    // same input opentelemetry-otlp's own tests use). An unrecognized
+    // compression algorithm no longer does: opentelemetry-otlp 0.33 ignores it
+    // with a warning.
+    let child = spawn_app("-*/*-/*-//-/-/invalid-uri", &[], Stdio::piped());
     let mut child = child;
     let stdout = child.stdout.take().unwrap();
     wait_until_ready().await;

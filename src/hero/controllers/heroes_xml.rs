@@ -8,10 +8,8 @@
 //! delete/list/filter/sort/bulk behave identically regardless of which
 //! sibling a caller uses.
 
-use std::net::SocketAddr;
-
 use axum::body::Bytes;
-use axum::extract::{ConnectInfo, Query, State};
+use axum::extract::{Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -19,18 +17,19 @@ use axum::Router;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
-use crate::hero::controllers::heroes::{HERO_FIELD_SPECS, HERO_WRITE_RATE_SCOPE};
+use crate::hero::controllers::heroes::HERO_FIELD_SPECS;
 use crate::hero::controllers::{
-    enforce_if_match, read_etag, AppState, HERO_DELETE_ROLES, HERO_EVENT_RESOURCE, HERO_READ_ROLES,
-    HERO_WRITE_ROLES,
+    announce, enforce_if_match, enforce_write_limit, read_etag, require_archive_access, AppState,
+    HERO_DELETE_ROLES, HERO_READ_ROLES, HERO_WRITE_ROLES,
 };
 use crate::hero::views::hero::{HeroCreate, HeroListQuery, HeroUpdate};
 use crate::hero::views::hero_xml::HeroReadXml;
 use crate::oidc::AuthClaims;
 use crate::problem_details::AppError;
 use craftainer_crud::conditional::{not_modified, record_etag, revalidation_headers};
-use craftainer_crud::controllers::crud_actions::{self, DeleteOutcome, ListOrGet, UpdateOutcome};
-use craftainer_crud::controllers::crud_events;
+use craftainer_crud::controllers::crud_actions::{
+    self, ArchivedScope, DeleteOutcome, ListOrGet, UpdateOutcome,
+};
 use craftainer_crud::controllers::crud_query::{
     parse_archived_scope, parse_bulk_delete_include_unpublished, parse_filters, parse_sort,
     reject_only_archived,
@@ -85,6 +84,7 @@ async fn list_or_get(
 ) -> Result<Response, AppError> {
     claims.require_any_role(&state.settings.oidc_client_id, HERO_READ_ROLES)?;
     let archived = parse_archived_scope(&raw_params).map_err(AppError::UnprocessableEntity)?;
+    require_archive_access(&state, &claims, archived != ArchivedScope::Live)?;
     let filters =
         parse_filters(HERO_FIELD_SPECS, &raw_params).map_err(AppError::UnprocessableEntity)?;
     let sort = parse_sort(HERO_FIELD_SPECS, &raw_params).map_err(AppError::UnprocessableEntity)?;
@@ -119,20 +119,11 @@ async fn list_or_get(
 
 async fn create(
     State(state): State<AppState>,
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     AuthClaims(claims): AuthClaims,
     body: Bytes,
 ) -> Result<Response, AppError> {
-    state
-        .rate_limiter
-        .check(
-            HERO_WRITE_RATE_SCOPE,
-            addr.ip(),
-            state.settings.rate_limit_hero_write_per_minute,
-            60,
-        )
-        .await?;
     claims.require_any_role(&state.settings.oidc_client_id, HERO_WRITE_ROLES)?;
+    enforce_write_limit(&state, &claims).await?;
     let payload: HeroCreate = parse_xml_body(&body)?;
     payload.validate().map_err(AppError::UnprocessableEntity)?;
     let owner_id = claims.subject()?.to_string();
@@ -141,43 +132,28 @@ async fn create(
     // publishes to (docs/adrs/0016): a subscriber watches the *records*,
     // and which representation a writer happened to use is not something
     // it should have to care about.
-    crud_events::publish(
-        &state.events,
-        HERO_EVENT_RESOURCE,
-        EventAction::Create,
-        vec![hero.id],
-    )
-    .await;
+    announce(&state, EventAction::Create, vec![hero.id]).await;
     let response = xml_response("hero", &HeroReadXml::from(hero))?;
     Ok((StatusCode::CREATED, response).into_response())
 }
 
 async fn update(
     State(state): State<AppState>,
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     AuthClaims(claims): AuthClaims,
     Query(query): Query<HeroListQuery>,
     Query(raw_params): Query<Vec<(String, String)>>,
     request_headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, AppError> {
-    state
-        .rate_limiter
-        .check(
-            HERO_WRITE_RATE_SCOPE,
-            addr.ip(),
-            state.settings.rate_limit_hero_write_per_minute,
-            60,
-        )
-        .await?;
     claims.require_any_role(&state.settings.oidc_client_id, HERO_WRITE_ROLES)?;
+    enforce_write_limit(&state, &claims).await?;
     let payload: HeroUpdate = parse_xml_body(&body)?;
     payload.validate().map_err(AppError::UnprocessableEntity)?;
     let filters =
         parse_filters(HERO_FIELD_SPECS, &raw_params).map_err(AppError::UnprocessableEntity)?;
     reject_only_archived(&raw_params).map_err(AppError::UnprocessableEntity)?;
     let owner_id = claims.subject()?.to_string();
-    enforce_if_match(&state, &request_headers, query.id, &raw_params).await?;
+    enforce_if_match(&state, &claims, &request_headers, query.id, &raw_params).await?;
 
     match crud_actions::resolve_update(
         &state.hero_crud,
@@ -190,13 +166,7 @@ async fn update(
     .await?
     {
         UpdateOutcome::One(hero) => {
-            crud_events::publish(
-                &state.events,
-                HERO_EVENT_RESOURCE,
-                EventAction::Update,
-                vec![hero.id],
-            )
-            .await;
+            announce(&state, EventAction::Update, vec![hero.id]).await;
             let etag = record_etag(&hero);
             Ok((
                 [(header::ETAG, etag)],
@@ -205,13 +175,7 @@ async fn update(
                 .into_response())
         }
         UpdateOutcome::Bulk(result) => {
-            crud_events::publish(
-                &state.events,
-                HERO_EVENT_RESOURCE,
-                EventAction::UpdateMany,
-                result.ids.clone(),
-            )
-            .await;
+            announce(&state, EventAction::UpdateMany, result.ids.clone()).await;
             xml_response("bulk_update_result", &result)
         }
     }
@@ -219,29 +183,20 @@ async fn update(
 
 async fn delete_hero(
     State(state): State<AppState>,
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     AuthClaims(claims): AuthClaims,
     Query(query): Query<HeroListQuery>,
     Query(raw_params): Query<Vec<(String, String)>>,
     request_headers: HeaderMap,
 ) -> Result<Response, AppError> {
-    state
-        .rate_limiter
-        .check(
-            HERO_WRITE_RATE_SCOPE,
-            addr.ip(),
-            state.settings.rate_limit_hero_write_per_minute,
-            60,
-        )
-        .await?;
     claims.require_any_role(&state.settings.oidc_client_id, HERO_DELETE_ROLES)?;
+    enforce_write_limit(&state, &claims).await?;
     let filters =
         parse_filters(HERO_FIELD_SPECS, &raw_params).map_err(AppError::UnprocessableEntity)?;
     reject_only_archived(&raw_params).map_err(AppError::UnprocessableEntity)?;
     let include_unpublished = parse_bulk_delete_include_unpublished(&raw_params)
         .map_err(AppError::UnprocessableEntity)?;
     let owner_id = claims.subject()?.to_string();
-    enforce_if_match(&state, &request_headers, query.id, &raw_params).await?;
+    enforce_if_match(&state, &claims, &request_headers, query.id, &raw_params).await?;
 
     match crud_actions::resolve_delete(
         &state.hero_crud,
@@ -255,18 +210,11 @@ async fn delete_hero(
     {
         DeleteOutcome::One => {
             let ids = query.id.into_iter().collect();
-            crud_events::publish(&state.events, HERO_EVENT_RESOURCE, EventAction::Delete, ids)
-                .await;
+            announce(&state, EventAction::Delete, ids).await;
             Ok(StatusCode::NO_CONTENT.into_response())
         }
         DeleteOutcome::Bulk(result) => {
-            crud_events::publish(
-                &state.events,
-                HERO_EVENT_RESOURCE,
-                EventAction::DeleteMany,
-                result.ids.clone(),
-            )
-            .await;
+            announce(&state, EventAction::DeleteMany, result.ids.clone()).await;
             xml_response("bulk_delete_result", &result)
         }
     }
@@ -359,17 +307,13 @@ mod tests {
         } else {
             Body::from(body.to_string())
         };
-        let mut request = Request::builder()
+        Request::builder()
             .method(method)
             .uri(uri)
             .header("Authorization", format!("Bearer {}", token(sub, roles)))
             .header("Content-Type", "application/xml")
             .body(body)
-            .unwrap();
-        request
-            .extensions_mut()
-            .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 12345))));
-        request
+            .unwrap()
     }
 
     async fn body_text(response: Response) -> String {
@@ -436,7 +380,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_rejects_a_non_utf8_body_with_422() {
-        let mut request = Request::builder()
+        let request = Request::builder()
             .method("POST")
             .uri("/")
             .header(
@@ -446,9 +390,6 @@ mod tests {
             .header("Content-Type", "application/xml")
             .body(Body::from(vec![0xff, 0xfe, 0xfd]))
             .unwrap();
-        request
-            .extensions_mut()
-            .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 12345))));
         let response = app().oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
     }
