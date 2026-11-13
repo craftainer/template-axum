@@ -1050,7 +1050,10 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/form/1/delete")
-                    .header("Authorization", format!("Bearer {}", token_with_no_sub(&["maintainer"])))
+                    .header(
+                        "Authorization",
+                        format!("Bearer {}", token_with_no_sub(&["maintainer"])),
+                    )
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1277,8 +1280,16 @@ mod tests {
         assert_eq!(started.status(), StatusCode::SEE_OTHER);
         assert_eq!(started.headers()["location"], "/heroes/form");
         let cookie = set_cookie_of(&started);
-        assert!(cookie.starts_with(&format!("hero_session={tok};")), "{cookie}");
-        for attribute in ["HttpOnly", "SameSite=Strict", "Path=/heroes", "Max-Age=3600"] {
+        assert!(
+            cookie.starts_with(&format!("hero_session={tok};")),
+            "{cookie}"
+        );
+        for attribute in [
+            "HttpOnly",
+            "SameSite=Strict",
+            "Path=/heroes",
+            "Max-Age=3600",
+        ] {
             assert!(cookie.contains(attribute), "{attribute} in {cookie}");
         }
         // http://localhost (the default public origin): a Secure cookie would
@@ -1312,7 +1323,10 @@ mod tests {
             .oneshot(session_post(
                 "/form",
                 "name=Spectra&powers=flight&power_level=5".to_string(),
-                &[("Cookie", cookie_header.as_str()), ("Sec-Fetch-Site", "same-origin")],
+                &[
+                    ("Cookie", cookie_header.as_str()),
+                    ("Sec-Fetch-Site", "same-origin"),
+                ],
             ))
             .await
             .unwrap();
@@ -1356,7 +1370,10 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/form")
-                    .header("Cookie", format!("hero_session={}", token("a", &["viewer"])))
+                    .header(
+                        "Cookie",
+                        format!("hero_session={}", token("a", &["viewer"])),
+                    )
                     .header("Sec-Fetch-Site", "cross-site")
                     .body(Body::empty())
                     .unwrap(),
@@ -1374,7 +1391,11 @@ mod tests {
             ("/form/logout", String::new()),
         ] {
             let response = app()
-                .oneshot(session_post(path, body, &[("Sec-Fetch-Site", "cross-site")]))
+                .oneshot(session_post(
+                    path,
+                    body,
+                    &[("Sec-Fetch-Site", "cross-site")],
+                ))
                 .await
                 .unwrap();
             assert_eq!(response.status(), StatusCode::FORBIDDEN, "{path}");
@@ -1469,13 +1490,18 @@ mod tests {
     #[test]
     fn only_a_bearer_scheme_and_the_session_cookie_are_credentials() {
         let mut headers = HeaderMap::new();
-        headers.insert(AUTHORIZATION, HeaderValue::from_static("Basic dXNlcjpwYXNz"));
-        headers.insert(COOKIE, HeaderValue::from_static("other=1; hero_session_x=2"));
+        headers.insert(
+            AUTHORIZATION,
+            HeaderValue::from_static("Basic dXNlcjpwYXNz"),
+        );
+        headers.insert(
+            COOKIE,
+            HeaderValue::from_static("other=1; hero_session_x=2"),
+        );
         assert_eq!(bearer_token(&headers), None);
         assert_eq!(cookie_token(&headers), None);
         let mut headers = HeaderMap::new();
         headers.insert(AUTHORIZATION, HeaderValue::from_static("Bearer"));
         assert_eq!(bearer_token(&headers), None);
     }
-
 }

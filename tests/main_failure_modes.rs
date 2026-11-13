@@ -117,7 +117,10 @@ async fn production_without_mqtt_tls_and_credentials_exits_with_status_1() {
     let (code, stderr) = run_to_exit(env).await;
 
     assert_eq!(code, Some(1));
-    assert!(stderr.contains("MQTT_TLS_CA_FILE must be set"), "stderr: {stderr}");
+    assert!(
+        stderr.contains("MQTT_TLS_CA_FILE must be set"),
+        "stderr: {stderr}"
+    );
     assert!(!stderr.contains("a-real-broker-secret"), "stderr: {stderr}");
 }
 

@@ -108,10 +108,7 @@ pub(crate) const HERO_WRITE_RATE_SCOPE: &str = "hero-write";
 /// spend, or drain, the budget of the users it shares a proxy with, and
 /// the key is a verified identity, not the peer address (which behind the BFF
 /// is the same for everybody).
-pub(crate) async fn enforce_write_limit(
-    state: &AppState,
-    claims: &Claims,
-) -> Result<(), AppError> {
+pub(crate) async fn enforce_write_limit(state: &AppState, claims: &Claims) -> Result<(), AppError> {
     state
         .rate_limiter
         .check(

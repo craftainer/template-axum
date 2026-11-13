@@ -497,7 +497,9 @@ pub fn mqtt_security(mode: Mode) -> Result<MqttSecurity, String> {
         return Err("MQTT_USERNAME and MQTT_PASSWORD must be set together".to_string());
     }
     if security.tls_client_cert.is_some() != security.tls_client_key.is_some() {
-        return Err("MQTT_TLS_CLIENT_CERT and MQTT_TLS_CLIENT_KEY must be set together".to_string());
+        return Err(
+            "MQTT_TLS_CLIENT_CERT and MQTT_TLS_CLIENT_KEY must be set together".to_string(),
+        );
     }
     if security.tls_client_cert.is_some() && security.tls_ca_file.is_none() {
         return Err("MQTT_TLS_CLIENT_CERT needs MQTT_TLS_CA_FILE".to_string());
@@ -1628,11 +1630,20 @@ mod tests {
             security.tls_ca_file,
             Some(PathBuf::from("/etc/ssl/certs/ca-certificates.crt"))
         );
-        assert_eq!(security.tls_client_cert, Some(PathBuf::from("/tls/client.crt")));
-        assert_eq!(security.tls_client_key, Some(PathBuf::from("/tls/client.key")));
+        assert_eq!(
+            security.tls_client_cert,
+            Some(PathBuf::from("/tls/client.crt"))
+        );
+        assert_eq!(
+            security.tls_client_key,
+            Some(PathBuf::from("/tls/client.key"))
+        );
         assert!(!security.allow_insecure);
         let shown = format!("{security:?}");
-        assert!(shown.contains("<redacted>") && shown.contains("app"), "{shown}");
+        assert!(
+            shown.contains("<redacted>") && shown.contains("app"),
+            "{shown}"
+        );
         assert!(!shown.contains("a-real-broker-secret"), "{shown}");
         clear_all();
     }
@@ -1704,12 +1715,18 @@ mod tests {
         // TLS without credentials is still anonymous.
         unsafe { env::set_var("MQTT_TLS_CA_FILE", "/ca.pem") };
         let err = mqtt_security(Mode::Production).expect_err("an anonymous client is refused");
-        assert!(err.starts_with("MQTT_USERNAME and MQTT_PASSWORD must be set"), "{err}");
+        assert!(
+            err.starts_with("MQTT_USERNAME and MQTT_PASSWORD must be set"),
+            "{err}"
+        );
         // The opt-in meant for a local broker is not honoured.
         set_hardened_mqtt();
         unsafe { env::set_var("MQTT_ALLOW_INSECURE", "true") };
         let err = mqtt_security(Mode::Production).expect_err("the opt-in is refused");
-        assert_eq!(err, "MQTT_ALLOW_INSECURE must not be set when MODE=production");
+        assert_eq!(
+            err,
+            "MQTT_ALLOW_INSECURE must not be set when MODE=production"
+        );
         unsafe { env::set_var("MQTT_ALLOW_INSECURE", "maybe") };
         let err = mqtt_security(Mode::Production).expect_err("a typo must not flip the switch");
         assert!(err.contains("MQTT_ALLOW_INSECURE"), "{err}");
