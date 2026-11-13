@@ -107,9 +107,12 @@ port is conventionally 8883; the default stays 1883).
 | `MQTT_TLS_CLIENT_CERT`, `MQTT_TLS_CLIENT_KEY` | unset | Mutual TLS; set together, need the CA file. The key is PKCS#8 PEM. |
 | `MQTT_ALLOW_INSECURE` | `false` | `true` allows credentials over a plaintext link (a local broker). Refused under `MODE=production`. |
 
-`MODE=production` requires the CA file and the credentials. The password
+`MODE=production` requires the CA file and the credentials, and refuses a CA,
+certificate or key path that is not a file (the bus reads them only at connect
+time, so a missing mount would otherwise show up as events never delivered). An
+empty variable counts as unset. The password
 never appears in an error message or in `Debug` output. The build needs
-`pkg-config`/`libssl-dev` and the runtime image `libssl3` (the feature uses
+`pkg-config`/`libssl-dev` and the runtime image `libssl3t64` (`libssl3`; the feature uses
 the system OpenSSL, not rustls).
 
 ## Generic vs. Hero-specific split
