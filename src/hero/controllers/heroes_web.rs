@@ -35,7 +35,9 @@
 //! resource -- not a general browser-auth mechanism (that is the BFF's
 //! job), and not something any other router in this app does.
 
-use axum::extract::{Path, State};
+use std::net::SocketAddr;
+
+use axum::extract::{ConnectInfo, Path, State};
 use axum::http::header::{AUTHORIZATION, CACHE_CONTROL, COOKIE, SET_COOKIE};
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode};
@@ -57,6 +59,16 @@ const COMPONENTS_JS: &str = include_str!("heroes_web_components.js");
 
 /// The page every successful form post redirects back to.
 const PAGE: &str = "/heroes/form";
+
+/// Rate-limit scope (`src/rate_limit.rs`) for `POST /heroes/form/session`.
+const SESSION_RATE_SCOPE: &str = "hero-session";
+
+/// Attempts per peer address per minute at `POST /heroes/form/session`. The
+/// route is unauthenticated and every attempt costs a token verification
+/// (and, for an unknown `kid`, a possible key-set refetch), so it is
+/// limited like `POST /mock/token`: by peer address, since there is no
+/// verified identity yet. A person pasting a token needs one or two.
+const SESSION_RATE_LIMIT_PER_MINUTE: u32 = 10;
 
 /// The session cookie's name.
 const SESSION_COOKIE: &str = "hero_session";
@@ -278,11 +290,25 @@ fn redirect_with_cookie(cookie: HeaderValue) -> Response {
 /// session cookie.
 async fn start_session(
     State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Form(form): Form<SessionForm>,
 ) -> Response {
     if !not_cross_site(&headers) {
         return cross_site_refused();
+    }
+    // Before anything is verified: a refused attempt costs nothing.
+    if let Err(err) = state
+        .rate_limiter
+        .check(
+            SESSION_RATE_SCOPE,
+            peer.ip(),
+            SESSION_RATE_LIMIT_PER_MINUTE,
+            60,
+        )
+        .await
+    {
+        return err.into_response();
     }
     let token = form.token.trim();
     // Checked before verifying: only a token the cookie can carry verbatim
@@ -1268,6 +1294,18 @@ mod tests {
     // -- the session cookie replaces `?token=` (docs/adrs/0031) --
 
     fn session_post(path: &str, body: String, extra: &[(&str, &str)]) -> Request<Body> {
+        session_post_from([127, 0, 0, 1], path, body, extra)
+    }
+
+    /// `start_session` extracts `ConnectInfo<SocketAddr>` for rate limiting;
+    /// `oneshot` bypasses the `into_make_service_with_connect_info` main.rs
+    /// wires up, so the extension is inserted by hand.
+    fn session_post_from(
+        peer: [u8; 4],
+        path: &str,
+        body: String,
+        extra: &[(&str, &str)],
+    ) -> Request<Body> {
         let mut builder = Request::builder()
             .method("POST")
             .uri(path)
@@ -1275,7 +1313,11 @@ mod tests {
         for (name, value) in extra {
             builder = builder.header(*name, *value);
         }
-        builder.body(Body::from(body)).unwrap()
+        let mut request = builder.body(Body::from(body)).unwrap();
+        request
+            .extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from((peer, 12345))));
+        request
     }
 
     fn set_cookie_of(response: &Response) -> String {
@@ -1545,5 +1587,54 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(AUTHORIZATION, HeaderValue::from_static("Bearer"));
         assert_eq!(bearer_token(&headers), None);
+    }
+
+    #[tokio::test]
+    async fn the_session_endpoint_is_rate_limited_per_peer_with_retry_after() {
+        let app = app();
+        let attempt = |peer: [u8; 4]| {
+            session_post_from(peer, "/form/session", "token=not-a-token".to_string(), &[])
+        };
+        for _ in 0..SESSION_RATE_LIMIT_PER_MINUTE {
+            let response = app.clone().oneshot(attempt([10, 0, 0, 1])).await.unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+        // Over the limit: refused before the token is looked at, with the
+        // time to wait.
+        let response = app.clone().oneshot(attempt([10, 0, 0, 1])).await.unwrap();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(response.headers().get("retry-after").unwrap(), "60");
+        assert!(response.headers().get(SET_COOKIE).is_none());
+
+        // Even a valid token is refused while the peer is over its budget.
+        let valid = session_post_from(
+            [10, 0, 0, 1],
+            "/form/session",
+            format!("token={}", token("alice", &["viewer"])),
+            &[],
+        );
+        let response = app.clone().oneshot(valid).await.unwrap();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        // Another peer has its own budget.
+        let response = app.oneshot(attempt([10, 0, 0, 2])).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn a_cross_site_session_post_does_not_spend_the_limit() {
+        let app = app();
+        for _ in 0..(SESSION_RATE_LIMIT_PER_MINUTE + 2) {
+            let response = app
+                .clone()
+                .oneshot(session_post(
+                    "/form/session",
+                    "token=x".to_string(),
+                    &[("Sec-Fetch-Site", "cross-site")],
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        }
     }
 }
