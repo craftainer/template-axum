@@ -178,19 +178,31 @@ the pieces needed to fix several (`craftainer-crud` 0.4.0,
    a proxy or BFF the peer address is the proxy's, so the budget is shared by
    everyone it fronts; the page is meant for direct use, and the JSON API
    (keyed on `sub`) is unaffected.
-3. **`SUBSCRIBER_SECRET`: recommended for removal, not removed here.** It
-   signs the subscriber ids `/events` mints so a client can resume a
-   *durable* session on any replica. Streams are transient and a
-   client-supplied id is ignored (decision 3), so no deployment can use the
-   signature for anything: a random per-process key is equivalent, and
-   requiring a 32-character secret in production is configuration with no
-   effect (and a reason for a deployment to fail to start). The recommendation
-   is to delete `config::subscriber_secret`, its start-up check in `main`, the
-   `subscriber_secret` parameter of `build_event_bus` and the production
-   requirement, and to ignore a set value rather than reject it (existing
-   deployments set it). It is not part of this change because it touches the
-   public `build_event_bus` signature, `main`, `config`, `lib` and two test files,
-   and was written without a local compiler; it should be done in a change
-   that runs the whole suite, together with confirming against the
-   `craftainer-crud` version in use that a transient bus never resumes a
-   presented id. Until then it stays as documented in ADR 0020.
+3. **`SUBSCRIBER_SECRET` is removed (SUBSEC).** It signed the subscriber ids
+   `/events` mints so a client could resume a *durable* session on any
+   replica. Streams are transient and a client-supplied id is ignored
+   (decision 3), so no deployment can use the signature for anything: a
+   random per-process key is equivalent, and requiring a 32-character secret
+   in production was configuration with no effect (and a reason for a
+   deployment to fail to start).
+
+   Confirmed against `craftainer-crud` 0.4.0 (the version in `Cargo.lock`,
+   tag `v0.4.0`): the route calls `crud_events::event_stream_until_for_caller`,
+   whose `open_stream` verifies a presented id (`resolve_subscriber_id`) and
+   then calls `EventBus::subscribe_for_caller` (`src/events.rs`), which begins
+   `let requested = requested.filter(|_| self.durable_streams);` and opens the
+   MQTT session with `set_clean_session(!durable)`. `durable_streams` is
+   `false` unless the host calls `with_durable_streams`, which this template
+   never does, so a presented id, signed or not, is dropped before the
+   session is opened and a fresh id is minted. The other subscriber, the
+   stats-cache invalidation task (`src/cache.rs`) uses `subscribe_transient(.., None)`.
+
+   Removed: `config::subscriber_secret`, its start-up check in `main`, the
+   `subscriber_secret` parameter of `build_event_bus` (now
+   `build_event_bus(settings, &mqtt)`), the production requirement and the two
+   failure-mode tests. A set `SUBSCRIBER_SECRET` is ignored, whatever its
+   value, with one deprecation warning at start-up
+   (`config::subscriber_secret_is_set`), so existing deployments keep
+   starting. If durable streams are ever enabled, a shared key becomes
+   meaningful again (`EventBus::with_subscriber_secret`) and must come back
+   with it. This supersedes the "Addendum: `SUBSCRIBER_SECRET`" in ADR 0020.

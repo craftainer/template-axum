@@ -50,7 +50,6 @@ async fn run_to_exit(env: Vec<(&'static str, String)>) -> (Option<i32>, String) 
         Command::new(env!("CARGO_BIN_EXE_template-axum"))
             // Not inherited: only what the test sets counts.
             .env_remove("MODE")
-            .env_remove("SUBSCRIBER_SECRET")
             .env_remove("ANALYTICS_CONSENT")
             .env_remove("MQTT_USERNAME")
             .env_remove("MQTT_PASSWORD")
@@ -71,7 +70,7 @@ async fn run_to_exit(env: Vec<(&'static str, String)>) -> (Option<i32>, String) 
 }
 
 /// A `MODE=production` environment that passes every other production check,
-/// so only `SUBSCRIBER_SECRET` decides the outcome.
+/// so a test removes or changes one thing and sees only that fail.
 fn hardened_production_env() -> Vec<(&'static str, String)> {
     [
         ("MODE", "production"),
@@ -135,34 +134,6 @@ async fn an_unknown_analytics_value_exits_with_status_1() {
 
     assert_eq!(code, Some(1));
     assert!(stderr.contains("ANALYTICS_CONSENT"), "stderr: {stderr}");
-}
-
-#[tokio::test]
-async fn production_without_a_subscriber_secret_exits_with_status_1() {
-    let (code, stderr) = run_to_exit(hardened_production_env()).await;
-
-    assert_eq!(code, Some(1));
-    assert!(stderr.contains("invalid configuration"), "stderr: {stderr}");
-    assert!(
-        stderr.contains("SUBSCRIBER_SECRET must be set when MODE=production"),
-        "stderr: {stderr}"
-    );
-}
-
-#[tokio::test]
-async fn a_short_subscriber_secret_exits_with_status_1_without_echoing_it() {
-    let short = "too-short-secret-value";
-    for mut env in [hardened_production_env(), vec![("MODE", "dev".to_string())]] {
-        env.push(("SUBSCRIBER_SECRET", short.to_string()));
-        let (code, stderr) = run_to_exit(env).await;
-        assert_eq!(code, Some(1));
-        assert!(stderr.contains("invalid configuration"), "stderr: {stderr}");
-        assert!(
-            stderr.contains("SUBSCRIBER_SECRET must be at least 32 characters"),
-            "stderr: {stderr}"
-        );
-        assert!(!stderr.contains(short), "the secret leaked: {stderr}");
-    }
 }
 
 #[tokio::test]

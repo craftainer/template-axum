@@ -414,33 +414,17 @@ pub fn stats_cache_ttl() -> Result<Option<Duration>, String> {
     env_seconds("STATS_CACHE_TTL_SECONDS")
 }
 
-/// `SUBSCRIBER_SECRET`: the key `craftainer_crud`'s event bus signs the
-/// subscriber ids it mints with (`docs/adrs/0020`). Mirrors
-/// template-fastapi's `subscriber_secret`: unset is allowed (the bus then
-/// uses a random per-process key, so ids survive neither a restart nor a
-/// second replica), a set value must be at least 32 characters, and
-/// `Mode::Production` refuses to start without one. Read by `main` (to fail
-/// fast) and `build_state_with_db` rather than held in `Settings`, so the
-/// secret is never part of a `Debug`-printable struct. An error message
-/// never contains the value.
-pub fn subscriber_secret(mode: Mode) -> Result<Option<String>, String> {
-    match env::var("SUBSCRIBER_SECRET") {
-        Ok(secret) if secret.chars().count() >= MIN_SUBSCRIBER_SECRET_CHARS => Ok(Some(secret)),
-        Ok(_) => Err(format!(
-            "SUBSCRIBER_SECRET must be at least {MIN_SUBSCRIBER_SECRET_CHARS} characters"
-        )),
-        Err(env::VarError::NotUnicode(_)) => {
-            Err("SUBSCRIBER_SECRET must be valid UTF-8".to_string())
-        }
-        Err(env::VarError::NotPresent) if mode == Mode::Production => {
-            Err("SUBSCRIBER_SECRET must be set when MODE=production".to_string())
-        }
-        Err(env::VarError::NotPresent) => Ok(None),
-    }
+/// Whether the retired `SUBSCRIBER_SECRET` is still set (`docs/adrs/0031`,
+/// addendum). Its value is never read: `main` only logs a deprecation
+/// warning, so a deployment that still sets it, whatever the value, keeps
+/// starting.
+#[must_use]
+pub fn subscriber_secret_is_set() -> bool {
+    env::var_os("SUBSCRIBER_SECRET").is_some()
 }
 
 /// The MQTT broker's transport security, read from `MQTT_*` variables
-/// (`docs/adrs/0031`). Held outside [`Settings`] like [`subscriber_secret`],
+/// (`docs/adrs/0031`). Held outside [`Settings`],
 /// so the password is never part of a `Debug`-printable struct; `Debug` here
 /// redacts it anyway.
 #[derive(Clone, PartialEq, Eq, Default)]
@@ -540,10 +524,6 @@ pub fn mqtt_security(mode: Mode) -> Result<MqttSecurity, String> {
     }
     Ok(security)
 }
-
-/// The shortest `SUBSCRIBER_SECRET`, in characters (`config.py`'s
-/// `min_length`); also at least `craftainer_crud`'s 32-byte minimum.
-const MIN_SUBSCRIBER_SECRET_CHARS: usize = 32;
 
 /// The audience a bearer token must carry when `OIDC_AUDIENCE` is unset;
 /// the bundled realm's `api` and `bff` clients both add it.
@@ -1023,35 +1003,15 @@ mod tests {
     }
 
     #[test]
-    fn subscriber_secret_is_optional_outside_production_but_must_be_32_characters() {
+    fn a_retired_subscriber_secret_is_reported_but_never_rejected() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_all();
-        for mode in [Mode::Dev, Mode::Mock] {
-            assert_eq!(subscriber_secret(mode), Ok(None));
+        assert!(!subscriber_secret_is_set());
+        for value in ["", "short", &"k".repeat(40)] {
+            unsafe { env::set_var("SUBSCRIBER_SECRET", value) };
+            assert!(subscriber_secret_is_set());
+            assert!(Settings::from_env().is_ok(), "{value:?} must not be refused");
         }
-        let good = "k".repeat(32);
-        unsafe { env::set_var("SUBSCRIBER_SECRET", &good) };
-        assert_eq!(subscriber_secret(Mode::Dev), Ok(Some(good)));
-        for bad in ["", "short", &"k".repeat(31)] {
-            unsafe { env::set_var("SUBSCRIBER_SECRET", bad) };
-            let err = subscriber_secret(Mode::Dev).expect_err("a short secret must be rejected");
-            assert!(err.contains("SUBSCRIBER_SECRET"), "{err}");
-            if !bad.is_empty() {
-                assert!(!err.contains(bad), "the error must not echo the secret");
-            }
-        }
-        clear_all();
-    }
-
-    #[test]
-    fn production_requires_a_subscriber_secret() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        clear_all();
-        let err = subscriber_secret(Mode::Production).expect_err("unset must fail in production");
-        assert_eq!(err, "SUBSCRIBER_SECRET must be set when MODE=production");
-        let good = "p".repeat(40);
-        unsafe { env::set_var("SUBSCRIBER_SECRET", &good) };
-        assert_eq!(subscriber_secret(Mode::Production), Ok(Some(good)));
         clear_all();
     }
 

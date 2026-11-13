@@ -173,6 +173,9 @@ Hero routes, with these differences:
 
 ## Addendum: `SUBSCRIBER_SECRET`
 
+> Superseded by ADR 0031 (addendum, decision 3): the variable is retired,
+> ignored with a deprecation warning. What follows is the historical record.
+
 The follow-up above is closed with the same rule as template-fastapi:
 `SUBSCRIBER_SECRET` is optional, at least 32 characters when set (a shorter
 value, including an empty one, fails startup in every mode), and required
