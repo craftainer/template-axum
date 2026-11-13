@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use chrono::NaiveDateTime;
 use craftainer_crud::crud::CrudService;
-use craftainer_crud::events::EventBus;
+use craftainer_crud::events::{EventBus, MqttTls};
 use craftainer_observability::health::HealthRegistry;
 use sea_orm::{ActiveModelTrait, ConnectionTrait, Database, DatabaseConnection, Set};
 use template_axum::config::{Mode, Settings};
@@ -151,7 +151,7 @@ pub fn integration_settings() -> Settings {
         mqtt_port: std::env::var("MQTT_PORT")
             .ok()
             .and_then(|port| port.parse().ok())
-            .unwrap_or(1883),
+            .unwrap_or(8883),
         rate_limit_mock_token_per_minute: 10_000,
         rate_limit_hero_write_per_minute: 10_000,
         bulk_action_max_matched: 1000,
@@ -232,6 +232,31 @@ pub fn dev_verifier(settings: Arc<Settings>) -> OidcVerifier {
     OidcVerifier::with_resource_server(settings, Arc::new(resource))
 }
 
+/// The stack broker's transport security, read from the same `MQTT_*`
+/// variables the app reads (`config::mqtt_security`): the devcontainer's
+/// Mosquitto serves TLS only and refuses anonymous clients
+/// (`.devcontainer/stack/mqtt/`, `docs/adrs/0031`), so every test that
+/// talks to it needs these.
+pub fn mqtt_security() -> template_axum::config::MqttSecurity {
+    template_axum::config::mqtt_security(Mode::Dev)
+        .expect("the MQTT_* environment must be valid (the devcontainer sets it)")
+}
+
+/// An `EventBus` connected to the stack's broker with the credentials and
+/// CA file from [`mqtt_security`].
+pub fn dev_event_bus() -> EventBus {
+    let settings = dev_settings(None);
+    let security = mqtt_security();
+    let mut bus = EventBus::connect(&settings.mqtt_host, settings.mqtt_port);
+    if let (Some(username), Some(password)) = (&security.username, &security.password) {
+        bus = bus.with_mqtt_credentials(username, password);
+    }
+    if let Some(ca_file) = &security.tls_ca_file {
+        bus = bus.with_mqtt_tls(MqttTls::new(ca_file));
+    }
+    bus
+}
+
 /// Settings for the integration tier's `Mode::Dev` path: real Postgres/
 /// Redis/S3/MQTT/Keycloak coordinates, so a test can exercise a real
 /// backend's happy path instead of `Mode::Mock`'s fakes.
@@ -258,7 +283,7 @@ pub fn dev_settings(oidc_audience: Option<String>) -> Arc<Settings> {
         mqtt_port: std::env::var("MQTT_PORT")
             .ok()
             .and_then(|port| port.parse().ok())
-            .unwrap_or(1883),
+            .unwrap_or(8883),
         rate_limit_mock_token_per_minute: 10_000,
         rate_limit_hero_write_per_minute: 10_000,
         bulk_action_max_matched: 1000,

@@ -92,7 +92,7 @@ MQTT topic or wildcard characters.
 
 `default-features = false`: rumqttc's default `use-rustls` feature pulls
 in a second rustls/tokio-rustls copy for broker TLS this app does not use
-(the broker is an in-network plaintext `:1883` stack service), and a
+(at the time the broker was an in-network plaintext `:1883` stack service; ADR 0031 moved it to TLS on 8883), and a
 single rustls copy in the graph is the same constraint `aws-sdk-s3` and
 `reqwest` are already configured for.
 

@@ -16,7 +16,7 @@ mod common;
 async fn the_dev_mode_bus_delivers_a_published_event_through_the_real_broker() {
     let bus = build_event_bus(
         &common::dev_settings(None),
-        &template_axum::config::MqttSecurity::default(),
+        &common::mqtt_security(),
     );
     let resource = format!("heroes-it-{}", common::unique_suffix());
 
