@@ -300,12 +300,7 @@ async fn invalidation_arrives_through_the_real_mqtt_broker() {
     let prefix = prefix();
     let cache = Arc::new(connect(&prefix, TTL, "v1").await);
     let stats = CachedStats::new(cache.clone(), HERO_EVENT_RESOURCE);
-    let host = std::env::var("MQTT_HOST").unwrap_or_else(|_| "localhost".into());
-    let port = std::env::var("MQTT_PORT")
-        .ok()
-        .and_then(|port| port.parse().ok())
-        .unwrap_or(1883);
-    let events = Arc::new(EventBus::connect(&host, port));
+    let events = Arc::new(common::dev_event_bus());
     let shutdown = CancellationToken::new();
     let task = tokio::spawn(run_invalidation(
         stats,

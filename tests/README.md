@@ -51,7 +51,10 @@ directory tree, so this instance's four tiers live in different places:
     `up()`, so this is the only place `down()` runs at all.
   - `mqtt_event_bus.rs` — `lib::build_event_bus`'s real-broker branch
     against live Mosquitto: the app's wiring delivers a published event to
-    a subscriber. The bus itself (replay, subscriber ids) is tested in
+    a subscriber, over the stack broker's TLS listener with its credentials
+    (`common::mqtt_security`: the `MQTT_*` variables the devcontainer sets;
+    the broker is TLS-only and refuses anonymous clients). The bus itself
+    (replay, subscriber ids) is tested in
     `craftainer-crud` (`docs/adrs/0020`).
   - `otlp_log_export.rs` — OTLP log export through the real binary
     (`docs/adrs/0020`, `FR-0035`): an in-process OTLP receiver stands in
