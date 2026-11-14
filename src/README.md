@@ -96,8 +96,8 @@ counted by the bus.
 ## MQTT transport security
 
 `config::mqtt_security(mode)` reads the broker's security options from the
-environment (held outside `Settings`, like `SUBSCRIBER_SECRET`);
-`build_event_bus(settings, secret, &mqtt)` applies them to the bus
+environment (held outside `Settings`);
+`build_event_bus(settings, &mqtt)` applies them to the bus
 (`docs/adrs/0031`). `MQTT_HOST`/`MQTT_PORT` stay in `Settings` (the TLS
 port is conventionally 8883; the default stays 1883).
 
@@ -220,21 +220,16 @@ Behind PgBouncer in transaction mode the pooler must be >= 1.21 with
 (`connect_database` + `build_state_with_db`) and closes it once
 `axum::serve` returns.
 
-## Event-stream subscriber secret
+## Retired: `SUBSCRIBER_SECRET`
 
-`craftainer-crud` signs the subscriber ids `/events` hands out (a client can
-only hand one back). `SUBSCRIBER_SECRET` is the signing key, as in
-template-fastapi: optional, at least 32 characters, and required under
-`MODE=production` (startup exits 1 with `invalid configuration:
-SUBSCRIBER_SECRET must be set when MODE=production`). Set to something
-shorter it fails in every mode; the message never contains the value. Unset
-(dev, mock) the bus uses a random per-process key, so ids survive neither a
-restart nor a second replica; set the same value on every replica to let a
-client resume across both. `config::subscriber_secret(mode)` reads it; `main`
-checks it before opening any connection, `build_state_with_db` passes it to
-`build_event_bus(settings, secret, &mqtt)` (`EventBus::with_subscriber_secret`).
-It is deliberately not a `Settings` field, so no `Debug` output of the
-settings can print it. `docs/adrs/0020` records the decision.
+`SUBSCRIBER_SECRET` used to be the signing key for the subscriber ids
+`/events` hands out. Streams are transient and a client-supplied
+`subscriber_id` or `Last-Event-ID` is ignored (`docs/adrs/0031`), so the key
+protects nothing and is gone: `build_event_bus(settings, &mqtt)` leaves the
+bus its random per-process key, and `MODE=production` no longer requires a
+secret. A deployment that still sets it, with any value, keeps starting:
+`main` logs one deprecation warning (`config::subscriber_secret_is_set`) and
+ignores it. Remove it from the environment.
 
 ## Stats cache
 

@@ -58,12 +58,12 @@ async fn main() {
             eprintln!("invalid configuration: {err}");
             std::process::exit(1);
         });
-    // Checked here so a bad or (in production) missing SUBSCRIBER_SECRET
-    // exits 1 before any connection is opened; the value is read again by
-    // `build_state_with_db` and never held in `Settings`.
-    if let Err(err) = template_axum::config::subscriber_secret(settings.mode) {
-        eprintln!("invalid configuration: {err}");
-        std::process::exit(1);
+    // Retired (docs/adrs/0031): streams are transient, so the signing key
+    // protects nothing. A deployment that still sets it keeps starting.
+    if template_axum::config::subscriber_secret_is_set() {
+        tracing::warn!(
+            "SUBSCRIBER_SECRET is deprecated and ignored (event streams are transient); remove it from the environment"
+        );
     }
     // Every ANALYTICS_* value is validated here: an unknown one is a startup
     // error (fail closed) instead of silently turning analytics off or on at

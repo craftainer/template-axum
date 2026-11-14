@@ -130,10 +130,9 @@ fn resource_server(settings: &Settings) -> ResourceServer {
 /// (NFR-0022 -- mock mode boots with zero containers). Same `Mode`-branch
 /// shape as the repository and rate-limiter choices above/below.
 ///
-/// `subscriber_secret` (`config::subscriber_secret`, at least 32 bytes) is
-/// handed to `EventBus::with_subscriber_secret` so the subscriber ids the
-/// bus mints verify on every replica and after a restart; `None` keeps the
-/// bus's random per-process key (`docs/adrs/0020`).
+/// The bus keeps its random per-process subscriber-id key: streams are
+/// transient and a client-supplied id is ignored, so there is nothing for a
+/// shared key to resume (`docs/adrs/0031`, decision 3 and its addendum).
 ///
 /// `mqtt` (`config::mqtt_security`) secures the broker connection: TLS 1.2+
 /// verified against `MQTT_TLS_CA_FILE`, optional client certificate, and
@@ -142,11 +141,7 @@ fn resource_server(settings: &Settings) -> ResourceServer {
 /// the bus rejects the combination (`EventBus::validate`); `Settings::
 /// from_env` has already refused every such combination, so that is a
 /// programming error.
-pub fn build_event_bus(
-    settings: &Settings,
-    subscriber_secret: Option<&[u8]>,
-    mqtt: &config::MqttSecurity,
-) -> EventBus {
+pub fn build_event_bus(settings: &Settings, mqtt: &config::MqttSecurity) -> EventBus {
     let mut bus = if settings.mode == Mode::Mock {
         EventBus::mock()
     } else {
@@ -167,10 +162,7 @@ pub fn build_event_bus(
     }
     bus.validate()
         .unwrap_or_else(|err| panic!("invalid configuration: {err}"));
-    match subscriber_secret {
-        Some(secret) => bus.with_subscriber_secret(secret),
-        None => bus,
-    }
+    bus
 }
 
 /// Open the Postgres pool (`db::connect`, `DB_POOL_*`) and, unless
@@ -239,17 +231,11 @@ pub async fn build_state_with_db(
         None => CachedStats::uncached(HERO_EVENT_RESOURCE),
     };
 
-    let subscriber_secret = config::subscriber_secret(settings.mode)
-        .unwrap_or_else(|err| panic!("invalid configuration: {err}"));
     let mqtt_security = config::mqtt_security(settings.mode)
         .unwrap_or_else(|err| panic!("invalid configuration: {err}"));
 
     AppState {
-        events: Arc::new(build_event_bus(
-            &settings,
-            subscriber_secret.as_deref().map(str::as_bytes),
-            &mqtt_security,
-        )),
+        events: Arc::new(build_event_bus(&settings, &mqtt_security)),
         oidc: Arc::new(OidcVerifier::with_resource_server(
             settings.clone(),
             Arc::new(resource_server(&settings)),
@@ -593,7 +579,7 @@ mod tests {
 
     #[tokio::test]
     async fn mock_mode_builds_an_in_memory_event_bus() {
-        let bus = build_event_bus(&mock_settings(), None, &config::MqttSecurity::default());
+        let bus = build_event_bus(&mock_settings(), &config::MqttSecurity::default());
         // The broker-backed variant would need a live Mosquitto; this one
         // fans out in-process, which is what makes MODE=mock container-free.
         let (_id, mut stream) = bus.subscribe("heroes", None).await.unwrap();
@@ -604,22 +590,6 @@ mod tests {
         ))
         .await;
         assert_eq!(stream.next_event().await.unwrap().ids, vec![1]);
-    }
-
-    #[test]
-    fn a_shared_subscriber_secret_makes_ids_verify_across_buses() {
-        let secret = b"s".repeat(32);
-        let none = config::MqttSecurity::default();
-        let first = build_event_bus(&mock_settings(), Some(&secret), &none);
-        let id = first.mint_subscriber_id("heroes");
-        // A "restart" (or another replica): a new bus with the same secret.
-        let second = build_event_bus(&mock_settings(), Some(&secret), &none);
-        assert_eq!(second.verify_subscriber_id("heroes", &id), Some(id.clone()));
-        // Without it, each bus has its own random key and rejects the id.
-        let unkeyed = build_event_bus(&mock_settings(), None, &none);
-        assert_eq!(unkeyed.verify_subscriber_id("heroes", &id), None);
-        let other = build_event_bus(&mock_settings(), Some(&b"o".repeat(32)), &none);
-        assert_eq!(other.verify_subscriber_id("heroes", &id), None);
     }
 
     fn secured() -> config::MqttSecurity {
@@ -638,14 +608,14 @@ mod tests {
         // Every option is applied through the bus's builder methods; the
         // in-memory bus has no broker, so none of them has an effect, and
         // `validate` passes.
-        let bus = build_event_bus(&mock_settings(), None, &secured());
+        let bus = build_event_bus(&mock_settings(), &secured());
         bus.validate().unwrap();
         let tls_without_client_auth = config::MqttSecurity {
             tls_client_cert: None,
             tls_client_key: None,
             ..secured()
         };
-        build_event_bus(&mock_settings(), None, &tls_without_client_auth);
+        build_event_bus(&mock_settings(), &tls_without_client_auth);
         let insecure = config::MqttSecurity {
             tls_ca_file: None,
             tls_client_cert: None,
@@ -653,7 +623,7 @@ mod tests {
             allow_insecure: true,
             ..secured()
         };
-        build_event_bus(&mock_settings(), None, &insecure);
+        build_event_bus(&mock_settings(), &insecure);
     }
 
     #[tokio::test]
@@ -665,7 +635,7 @@ mod tests {
             mqtt_port: 1,
             ..mock_settings()
         };
-        let bus = build_event_bus(&settings, None, &secured());
+        let bus = build_event_bus(&settings, &secured());
         bus.validate().unwrap();
     }
 
@@ -682,7 +652,7 @@ mod tests {
             tls_client_key: None,
             ..secured()
         };
-        build_event_bus(&settings, None, &plaintext);
+        build_event_bus(&settings, &plaintext);
     }
 
     #[tokio::test]
