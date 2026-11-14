@@ -60,8 +60,8 @@ the pieces needed to fix several (`craftainer-crud` 0.4.0,
    `MQTT_PASSWORD`, `MQTT_TLS_CA_FILE` (the only trust anchor; setting it turns
    TLS on, TLS 1.2 or later, host name always verified), `MQTT_TLS_CLIENT_CERT`
    and `MQTT_TLS_CLIENT_KEY` (mutual TLS, PKCS#8 PEM) and `MQTT_ALLOW_INSECURE`
-   are read by `config::mqtt_security`, held outside `Settings` like
-   `SUBSCRIBER_SECRET`, and wired by `build_event_bus`.
+   are read by `config::mqtt_security`, held outside `Settings`, and
+   wired by `build_event_bus`.
    `Settings::from_env` rejects a half-set pair, a client certificate without a
    CA file, and credentials over plaintext without `MQTT_ALLOW_INSECURE=true`
    in every mode; `MODE=production` additionally requires the CA file and
