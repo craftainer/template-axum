@@ -21,7 +21,6 @@ services:
       - ./stack/postgres/postgres.env
       - ./stack/s3/s3.env
       - ./stack/keycloak/keycloak.env
-      - ./stack/mqtt/mqtt.env
       - ./stack/umami/analytics.env
     # Waits for every stack service's own healthcheck (see each fragment's
     # compose.yml) so `docker compose up` -- and therefore devcontainers/ci's
@@ -40,8 +39,6 @@ services:
         condition: service_healthy
       selenium:
         condition: service_healthy
-    volumes:
-      - mqtt-tls:/mqtt-tls:ro
     environment:
       # Keep cargo's build artefacts outside the bind-mounted /workspace: on
       # Windows hosts a target/ inside the mount gets scanned file-by-file by
@@ -60,12 +57,7 @@ services:
       S3_ENDPOINT_URL: http://s3:9000
       REDIS_URL: redis://redis:6379/0
       MQTT_HOST: mqtt
-      # The dev broker serves TLS only and refuses anonymous clients
-      # (stack/mqtt/, ADR 0031): MQTT_USERNAME/MQTT_PASSWORD arrive from
-      # mqtt.env above, and the self-signed certificate it serves lives in
-      # the `mqtt-tls` volume mounted read-only above.
-      MQTT_PORT: "8883"
-      MQTT_TLS_CA_FILE: /mqtt-tls/mqtt.crt
+      MQTT_PORT: "1883"
     # No ports: mapping and no networks: block -- see .devcontainer/README.md's
     # "Don't". Host access to :8000 comes from devcontainer.json's
     # forwardPorts, and myapp reaches every stack service by name on the

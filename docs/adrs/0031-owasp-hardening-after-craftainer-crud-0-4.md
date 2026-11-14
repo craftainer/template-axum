@@ -60,25 +60,15 @@ the pieces needed to fix several (`craftainer-crud` 0.4.0,
    `MQTT_PASSWORD`, `MQTT_TLS_CA_FILE` (the only trust anchor; setting it turns
    TLS on, TLS 1.2 or later, host name always verified), `MQTT_TLS_CLIENT_CERT`
    and `MQTT_TLS_CLIENT_KEY` (mutual TLS, PKCS#8 PEM) and `MQTT_ALLOW_INSECURE`
-   are read by `config::mqtt_security`, held outside `Settings`, and
-   wired by `build_event_bus`.
+   are read by `config::mqtt_security`, held outside `Settings` like
+   `SUBSCRIBER_SECRET`, and wired by `build_event_bus`.
    `Settings::from_env` rejects a half-set pair, a client certificate without a
    CA file, and credentials over plaintext without `MQTT_ALLOW_INSECURE=true`
    in every mode; `MODE=production` additionally requires the CA file and
    credentials and refuses `MQTT_ALLOW_INSECURE`. The bus also validates its
-   own settings at startup (`EventBus::validate`). The dev broker
-   matches production (MQTLS): `stack/mqtt/` serves TLS only on 8883 with
-   `allow_anonymous false` and no plaintext listener, using the pattern of
-   template-fastapi's stack. A one-shot `mqtt-tls-cert` service writes a
-   self-signed certificate (SAN `mqtt`, `localhost`) into the `mqtt-tls`
-   volume; the broker builds its password file at every start from
-   `mqtt.env`'s dev-only `MQTT_USERNAME`/`MQTT_PASSWORD`; `compose.instance.yml`
-   hands `myapp` the same credentials, mounts the volume read-only and sets
-   `MQTT_PORT=8883` and `MQTT_TLS_CA_FILE=/mqtt-tls/mqtt.crt`, so `MODE=dev`
-   exercises the same TLS and credential path as production. The integration
-   tests read the same variables (`tests/common`), and the real-stack perf
-   script mounts the broker's volume and `mqtt.env`. A devcontainer rebuild
-   applies it.
+   own settings at startup (`EventBus::validate`). The dev broker is left as
+   it was (anonymous, plaintext; it is `MODE=dev`, which sets none of the
+   variables): hardening the dev stack's broker is a follow-up.
 2. **Events are delivered after the write, through `PendingEvents`.** Every
    mutating handler calls `controllers::announce`, which records the event in
    a `PendingEvents` and commits it on the bus in its own task, so a client
@@ -155,7 +145,8 @@ the pieces needed to fix several (`craftainer-crud` 0.4.0,
   in a cookie. Anything that linked to `/heroes/form?token=` must use the
   bearer header or the session form.
 - `If-Match`/optimistic concurrency (`lib-crud-rs` 0.5, a breaking repository
-  change) and request/body limits at the HTTP edge are not part of this change.
+  change), a TLS listener and authentication on the dev broker, request/body
+  limits at the HTTP edge are not part of this change.
 - `libsqlite3-sys` 0.30.1 is in `Cargo.lock` only through optional weak
   dependency features of `sqlx`; `cargo tree` for the whole workspace, all
   features and all targets does not reach it, so RUSTSEC-2026-0459 is not

@@ -104,25 +104,13 @@ done
 # from anything else on the shared instance. The per-minute limits are
 # raised so the limiter does not turn the load into 429s.
 docker rm -f "$app" >/dev/null 2>&1 || true
-# The dev broker serves TLS only and requires the credentials in mqtt.env
-# (.devcontainer/stack/mqtt/). Trust its self-signed certificate by mounting
-# the broker's own `/tls` volume (whatever the compose project named it)
-# read-only.
-mqtt_tls_volume=$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/tls"}}{{.Name}}{{end}}{{end}}' mqtt-mqtt-1)
-if [ -z "$mqtt_tls_volume" ]; then
-  echo "could not find the mqtt container's /tls volume" >&2
-  exit 1
-fi
 docker create --name "$app" --network keycloak_default \
-  --env-file "$repo/.devcontainer/stack/mqtt/mqtt.env" \
-  -v "$mqtt_tls_volume:/mqtt-tls:ro" \
   --cpus "$cpus" --memory "$memory" --memory-swap "$memory" \
   -e MODE=dev \
   -e POSTGRES_HOST=postgres -e POSTGRES_USER=app -e POSTGRES_PASSWORD=app \
   -e POSTGRES_DB="$db" \
   -e REDIS_URL=redis://redis:6379/14 \
-  -e MQTT_HOST=mqtt -e MQTT_PORT=8883 \
-  -e MQTT_TLS_CA_FILE=/mqtt-tls/mqtt.crt \
+  -e MQTT_HOST=mqtt -e MQTT_PORT=1883 \
   -e OIDC_ISSUER_URL=http://keycloak:8080/realms/template-axum \
   -e OIDC_AUDIENCE=api \
   -e RATE_LIMIT_HERO_WRITE_PER_MINUTE=1000000 \
